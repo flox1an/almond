@@ -1,0 +1,22 @@
+[package]
+name = "rugpull-rodeo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio-util = { version = "0.7", features = ["io"] }
+regex = "1"
+mime_guess = "2"
+axum-server = "0.7.2"
+futures-util = "0.3.31"
+sha2 = "0.10.8"
+reqwest = { version = "0.11", features = ["json"] }
+hyper = "1.6.0"
+dotenv = "0.15.0"

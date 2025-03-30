@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rugpull Rodeo</title>
+    <style>
+        body {
+            background-color: black;
+            padding: 0px;
+        }
+        #terminal {
+            color: greenyellow;
+            font-family: 'Courier New', Courier, monospace;
+            font-weight: 600;
+            white-space: pre;
+            letter-spacing: .1em;
+            padding: 15px;
+            overflow-y: auto;
+        }
+        #cursor {
+            display: inline-block;
+            animation: blink 1s step-end infinite;
+            transition: opacity 0.5s ease;
+        }
+
+        @keyframes blink {
+            50% {
+                opacity: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="terminal">
+        <span id="text"></span><span id="cursor">▊</span>
+    </div>
+
+    <script>
+        const text = "Rugpull Rodeo"//\n\nhi! this is a blossom server that will rug you.";
+        let index = 0;
+        const terminal = document.getElementById('text');
+
+        function type() {
+            if (index < text.length) {
+                terminal.textContent += text.charAt(index);
+                index++;
+                setTimeout(type, 10 + Math.random() * 200); // Adjust the speed here (in milliseconds)
+            }
+        }
+
+        type();
+    </script>
+</body>
+</html>
