@@ -104,6 +104,58 @@ pub async fn enforce_storage_limits(state: &AppState) {
             break;
         }
     }
+
+    // Clean up empty directories using a stack-based approach
+    let mut dirs_to_process = vec![state.upload_dir.to_path_buf()];
+    let mut empty_dirs = vec![];
+
+    // First pass: collect all empty directories
+    while let Some(dir) = dirs_to_process.pop() {
+        if let Ok(mut entries) = fs::read_dir(&dir).await {
+            let mut has_entries = false;
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs_to_process.push(path);
+                }
+                has_entries = true;
+            }
+            if !has_entries {
+                empty_dirs.push(dir);
+            }
+        }
+    }
+
+    // Second pass: remove empty directories and check parent directories
+    let mut parent_dirs = vec![];
+    for dir in empty_dirs.into_iter().rev() {
+        if fs::remove_dir(&dir).await.is_ok() {
+            info!("Removed empty directory: {}", dir.display());
+            // Add parent directory to check if it becomes empty
+            if let Some(parent) = dir.parent() {
+                if parent != state.upload_dir {
+                    parent_dirs.push(parent.to_path_buf());
+                }
+            }
+        }
+    }
+
+    // Third pass: check parent directories that might have become empty
+    for parent_dir in parent_dirs {
+        if let Ok(mut entries) = fs::read_dir(&parent_dir).await {
+            let mut has_entries = false;
+            while let Ok(Some(_)) = entries.next_entry().await {
+                has_entries = true;
+                break;
+            }
+            if !has_entries {
+                if fs::remove_dir(&parent_dir).await.is_ok() {
+                    info!("Removed empty parent directory: {}", parent_dir.display());
+                }
+            }
+        }
+    }
+
     info!("Deleted {} file(s) to enforce storage limits.", removed);
 }
 
