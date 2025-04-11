@@ -16,14 +16,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    fs::File,
+    fs::{self, File},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
 };
 use tokio_util::io::ReaderStream;
 use tracing::{error, info, warn};
 
 use crate::models::{AppState, BlobDescriptor, ListQuery, FileMetadata};
-use crate::utils::{find_file, get_sha256_hash_from_filename, parse_range_header};
+use crate::utils::{find_file, get_sha256_hash_from_filename, parse_range_header, get_nested_path};
 
 pub async fn list_blobs(
     State(state): State<AppState>,
@@ -46,7 +46,10 @@ pub async fn list_blobs(
             }
         }
 
-        let url = format!("{}/{}", state.public_url, sha256);
+        let url = match metadata.extension.clone() {
+            Some(ext) => format!("{}/{}.{}", state.public_url, sha256, ext),
+            None => format!("{}/{}", state.public_url, sha256),
+        };
 
         blobs.push(BlobDescriptor {
             url,
@@ -119,10 +122,16 @@ pub async fn upload_file(
     let sha256 = format!("{:x}", hasher.finalize());
     let size = buffer.len() as u64;
 
-    let filepath = match extension.clone() {
-        Some(ext) => state.upload_dir.join(format!("{}.{}", sha256, ext)),
-        None => state.upload_dir.join(&sha256),
-    };
+    let filepath = get_nested_path(&state.upload_dir, &sha256, extension.as_deref());
+    
+    // Create parent directories if they don't exist
+    if let Some(parent) = filepath.parent() {
+        fs::create_dir_all(parent).await.map_err(|e| {
+            error!("Failed to create directory: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
+
     let mut file = File::create(&filepath).await.map_err(|e| {
         error!("File create error: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
@@ -223,12 +232,17 @@ pub async fn mirror_blob(
 
     info!("Calculated SHA256: {}", sha256);
 
-    let filename = format!(
-        "{}.{}",
-        sha256,
-        content_type.split('/').last().unwrap_or("bin")
-    );
-    let filepath = state.upload_dir.join(filename);
+    let extension = content_type.split('/').last().unwrap_or("bin");
+    let filepath = get_nested_path(&state.upload_dir, &sha256, Some(extension));
+    
+    // Create parent directories if they don't exist
+    if let Some(parent) = filepath.parent() {
+        fs::create_dir_all(parent).await.map_err(|e| {
+            error!("Failed to create directory: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
+
     info!("Saving blob to: {}", filepath.display());
 
     let mut file = File::create(&filepath)

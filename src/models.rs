@@ -6,6 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::RwLock;
+use mime_guess;
 
 #[derive(Clone)]
 pub struct FileMetadata {
@@ -35,8 +36,18 @@ impl AppState {
         size: u64,
         content_type: Option<String>,
     ) -> BlobDescriptor {
+        let extension = content_type
+            .as_ref()
+            .and_then(|ct| mime_guess::get_mime_extensions_str(ct))
+            .and_then(|mime| mime.first().map(|ext| ext.to_string()));
+
+        let url = match extension {
+            Some(ext) => format!("{}/{}.{}", self.public_url, sha256, ext),
+            None => format!("{}/{}", self.public_url, sha256),
+        };
+
         BlobDescriptor {
-            url: format!("{}/{}", self.public_url, sha256),
+            url,
             sha256: sha256.to_string(),
             size,
             r#type: content_type,
