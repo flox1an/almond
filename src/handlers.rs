@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+use axum::body::to_bytes;
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
@@ -8,19 +8,22 @@ use axum::{
 };
 use futures_util::StreamExt;
 use mime_guess::from_path;
-use reqwest::{Client, header as reqwest_header};
+use reqwest::{header as reqwest_header, Client};
 use serde_json::{self, Value};
 use sha2::{Digest, Sha256};
+use std::{
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
 };
 use tokio_util::io::ReaderStream;
 use tracing::{error, info, warn};
-use axum::body::to_bytes;
 
 use crate::models::{AppState, BlobDescriptor, ListQuery};
-use crate::utils::{enforce_storage_limits, find_file, get_sha256_hash_from_filename, parse_range_header};
+use crate::utils::{find_file, get_sha256_hash_from_filename, parse_range_header};
 
 pub async fn list_blobs(
     State(state): State<AppState>,
@@ -149,8 +152,6 @@ pub async fn upload_file(
     let sha256 = format!("{:x}", hasher.finalize());
     let size = buffer.len() as u64;
 
-    enforce_storage_limits(&state).await;
-
     let filepath = match extension {
         Some(ext) => state.upload_dir.join(format!("{}.{}", sha256, ext)),
         None => state.upload_dir.join(&sha256),
@@ -166,6 +167,10 @@ pub async fn upload_file(
 
     let key = sha256[..64.min(sha256.len())].to_string();
     state.file_index.write().await.insert(key.clone(), filepath);
+
+    // After successful upload queue cleanup job
+    let mut changes_pending = state.changes_pending.write().await;
+    *changes_pending = true;
 
     let descriptor = state.create_blob_descriptor(&sha256, size, content_type);
 
@@ -269,6 +274,10 @@ pub async fn mirror_blob(
         .insert(sha256.clone(), filepath);
     info!("Blob descriptor created for SHA256: {}", sha256);
 
+    // After successful mirroring
+    let mut changes_pending = state.changes_pending.write().await;
+    *changes_pending = true;
+
     Ok(Response::builder()
         .status(StatusCode::CREATED)
         .header(header::CONTENT_TYPE, "application/json")
@@ -347,4 +356,4 @@ async fn serve_file_with_range(path: PathBuf, req: Request<Body>) -> Result<Resp
         )
         .body(body)
         .unwrap())
-} 
+}

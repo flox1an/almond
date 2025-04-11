@@ -1,5 +1,8 @@
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc};
 use regex::Regex;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 use tokio::{fs, sync::RwLock};
 use tracing::{info, warn};
 
@@ -85,7 +88,10 @@ pub fn get_sha256_hash_from_filename(filename: &str) -> Option<String> {
     }
 }
 
-pub async fn find_file(index: &RwLock<HashMap<String, PathBuf>>, base_name: &str) -> Option<PathBuf> {
+pub async fn find_file(
+    index: &RwLock<HashMap<String, PathBuf>>,
+    base_name: &str,
+) -> Option<PathBuf> {
     let index = index.read().await;
     index.get(base_name).cloned()
 }
@@ -109,4 +115,4 @@ pub fn parse_range_header(header_value: &str, total_size: u64) -> Option<(u64, u
         return None;
     }
     Some((start, end))
-} 
+}

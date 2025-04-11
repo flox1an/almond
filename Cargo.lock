@@ -1094,28 +1094,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rugpull-rodeo"
-version = "0.1.0"
-dependencies = [
- "axum",
- "axum-server",
- "dotenv",
- "futures-util",
- "hyper 1.6.0",
- "mime_guess",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-util",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "rustc-demangle"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1366,6 +1344,28 @@ checksum = "a75fb188eb626b924683e3b95e3a48e63551fcfb51949de2f06a9d91dbee93c9"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "temp-st"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "axum-server",
+ "dotenv",
+ "futures-util",
+ "hyper 1.6.0",
+ "mime_guess",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -5,10 +5,7 @@ use axum::{
     response::Response,
 };
 
-pub async fn cors_middleware(
-    req: Request<Body>,
-    next: Next,
-) -> Response {
+pub async fn cors_middleware(req: Request<Body>, next: Next) -> Response {
     if req.method() == axum::http::Method::OPTIONS {
         return Response::builder()
             .status(StatusCode::OK)
@@ -44,4 +41,4 @@ pub async fn cors_middleware(
     );
     headers.insert(header::ACCESS_CONTROL_MAX_AGE, "86400".parse().unwrap());
     response
-} 
+}

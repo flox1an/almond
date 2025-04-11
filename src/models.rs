@@ -1,5 +1,10 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
@@ -11,6 +16,7 @@ pub struct AppState {
     pub bind_addr: String,
     pub public_url: String,
     pub cleanup_interval_secs: u64,
+    pub changes_pending: Arc<RwLock<bool>>,
 }
 
 impl AppState {
@@ -47,4 +53,4 @@ pub struct BlobDescriptor {
 pub struct ListQuery {
     pub since: Option<u64>,
     pub until: Option<u64>,
-} 
+}
