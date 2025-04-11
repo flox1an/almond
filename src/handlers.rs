@@ -16,69 +16,45 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    fs::{self, File},
+    fs::File,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
 };
 use tokio_util::io::ReaderStream;
 use tracing::{error, info, warn};
 
-use crate::models::{AppState, BlobDescriptor, ListQuery};
+use crate::models::{AppState, BlobDescriptor, ListQuery, FileMetadata};
 use crate::utils::{find_file, get_sha256_hash_from_filename, parse_range_header};
 
 pub async fn list_blobs(
     State(state): State<AppState>,
     Query(params): Query<ListQuery>,
 ) -> Result<Json<Vec<BlobDescriptor>>, (StatusCode, String)> {
-    let mut entries = fs::read_dir(&state.upload_dir)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut blobs = vec![];
+    let index = state.file_index.read().await;
+    let mut blobs = Vec::new();
 
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    {
-        let path = entry.path();
-        if path.is_file() {
-            let metadata = entry
-                .metadata()
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let created = metadata.created().unwrap_or(SystemTime::now());
-            let timestamp = created
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+    for (sha256, metadata) in index.iter() {
+        let timestamp = metadata.created_at;
 
-            if let Some(since) = params.since {
-                if timestamp < since {
-                    continue;
-                }
+        if let Some(since) = params.since {
+            if timestamp < since {
+                continue;
             }
-            if let Some(until) = params.until {
-                if timestamp > until {
-                    continue;
-                }
-            }
-
-            let filename = path.file_name().unwrap().to_string_lossy().to_string();
-            let sha256 = filename[..64.min(filename.len())].to_string();
-            let size = metadata.len();
-            let mime = from_path(&path)
-                .first()
-                .map(|m| m.essence_str().to_string());
-
-            let url = format!("{}/{}", state.public_url, filename);
-
-            blobs.push(BlobDescriptor {
-                url,
-                sha256,
-                size,
-                r#type: mime,
-                uploaded: timestamp,
-            });
         }
+        if let Some(until) = params.until {
+            if timestamp > until {
+                continue;
+            }
+        }
+
+        let url = format!("{}/{}", state.public_url, sha256);
+
+        blobs.push(BlobDescriptor {
+            url,
+            sha256: sha256.clone(),
+            size: metadata.size,
+            r#type: metadata.mime_type.clone(),
+            uploaded: timestamp,
+        });
     }
 
     Ok(Json(blobs))
@@ -95,25 +71,16 @@ pub async fn handle_file_request(
         info!("Found file: {}", filename);
 
         match find_file(&state.file_index, &filename).await {
-            Some(path) => {
-                let metadata = fs::metadata(&path)
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                let mime = from_path(&path)
-                    .first()
-                    .map(|m| m.essence_str().to_string())
-                    .unwrap_or("application/octet-stream".into());
-                let size = metadata.len();
-
+            Some(file_metadata) => {
                 if req.method() == axum::http::Method::HEAD {
                     return Ok(Response::builder()
                         .status(StatusCode::OK)
-                        .header(header::CONTENT_TYPE, mime)
-                        .header(header::CONTENT_LENGTH, size)
+                        .header(header::CONTENT_TYPE, file_metadata.mime_type.unwrap_or_else(|| "application/octet-stream".into()))
+                        .header(header::CONTENT_LENGTH, file_metadata.size)
                         .body(Body::empty())
                         .unwrap());
                 } else {
-                    return serve_file_with_range(path, req).await;
+                    return serve_file_with_range(file_metadata.path, req).await;
                 }
             }
             None => Err(StatusCode::NOT_FOUND),
@@ -152,7 +119,7 @@ pub async fn upload_file(
     let sha256 = format!("{:x}", hasher.finalize());
     let size = buffer.len() as u64;
 
-    let filepath = match extension {
+    let filepath = match extension.clone() {
         Some(ext) => state.upload_dir.join(format!("{}.{}", sha256, ext)),
         None => state.upload_dir.join(&sha256),
     };
@@ -166,7 +133,16 @@ pub async fn upload_file(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let key = sha256[..64.min(sha256.len())].to_string();
-    state.file_index.write().await.insert(key.clone(), filepath);
+    state.file_index.write().await.insert(key.clone(), FileMetadata {
+        path: filepath.clone(),
+        extension: extension.clone(),
+        mime_type: content_type.clone(),
+        size,
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    });
 
     // After successful upload queue cleanup job
     let mut changes_pending = state.changes_pending.write().await;
@@ -264,14 +240,25 @@ pub async fn mirror_blob(
 
     info!("Blob saved successfully to: {}", filepath.display());
 
-    let descriptor =
-        state.create_blob_descriptor(&sha256, blob_bytes.len() as u64, Some(content_type));
-
+    let content_type_clone = content_type.clone();
+    let extension = content_type_clone.split('/').last().map(|s| s.to_string());
+    let descriptor_content_type = content_type_clone.clone();
+    let descriptor = state.create_blob_descriptor(&sha256, blob_bytes.len() as u64, Some(descriptor_content_type));
+    
     state
         .file_index
         .write()
         .await
-        .insert(sha256.clone(), filepath);
+        .insert(sha256.clone(), FileMetadata {
+            path: filepath.clone(),
+            extension,
+            mime_type: Some(content_type_clone),
+            size: blob_bytes.len() as u64,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        });
     info!("Blob descriptor created for SHA256: {}", sha256);
 
     // After successful mirroring

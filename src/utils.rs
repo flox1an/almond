@@ -5,10 +5,11 @@ use std::{
 };
 use tokio::{fs, sync::RwLock};
 use tracing::{info, warn};
+use mime_guess::from_path;
 
-use crate::models::AppState;
+use crate::models::{AppState, FileMetadata};
 
-pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, PathBuf>>) {
+pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, FileMetadata>>) {
     let mut map = HashMap::new();
     if let Ok(mut entries) = fs::read_dir(upload_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -16,7 +17,27 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
             if path.is_file() {
                 if let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) {
                     let key = name[..64.min(name.len())].to_string();
-                    map.insert(key, path);
+                    if let Ok(metadata) = entry.metadata().await {
+                        let extension = path.extension()
+                            .and_then(|ext| ext.to_str())
+                            .map(|s| s.to_string());
+                        let mime_type = from_path(&path)
+                            .first()
+                            .map(|m| m.essence_str().to_string());
+                        let created_at = metadata.created()
+                            .unwrap_or(std::time::SystemTime::now())
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        
+                        map.insert(key, FileMetadata {
+                            path,
+                            extension,
+                            mime_type,
+                            size: metadata.len(),
+                            created_at,
+                        });
+                    }
                 }
             }
         }
@@ -89,9 +110,9 @@ pub fn get_sha256_hash_from_filename(filename: &str) -> Option<String> {
 }
 
 pub async fn find_file(
-    index: &RwLock<HashMap<String, PathBuf>>,
+    index: &RwLock<HashMap<String, FileMetadata>>,
     base_name: &str,
-) -> Option<PathBuf> {
+) -> Option<FileMetadata> {
     let index = index.read().await;
     index.get(base_name).cloned()
 }

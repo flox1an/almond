@@ -8,9 +8,18 @@ use std::{
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
+pub struct FileMetadata {
+    pub path: PathBuf,
+    pub extension: Option<String>,
+    pub mime_type: Option<String>,
+    pub size: u64,
+    pub created_at: u64,
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub upload_dir: PathBuf,
-    pub file_index: Arc<RwLock<HashMap<String, PathBuf>>>,
+    pub file_index: Arc<RwLock<HashMap<String, FileMetadata>>>,
     pub max_total_size: u64,
     pub max_total_files: usize,
     pub bind_addr: String,
