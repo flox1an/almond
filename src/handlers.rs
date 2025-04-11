@@ -21,6 +21,7 @@ use tokio::{
 };
 use tokio_util::io::ReaderStream;
 use tracing::{error, info, warn};
+use uuid;
 
 use crate::models::{AppState, BlobDescriptor, ListQuery, FileMetadata};
 use crate::utils::{find_file, get_sha256_hash_from_filename, parse_range_header, get_nested_path};
@@ -108,20 +109,59 @@ pub async fn upload_file(
         .and_then(|ct| mime_guess::get_mime_extensions_str(ct))
         .and_then(|mime| mime.first().map(|ext| ext.to_string()));
 
-    let body = req.into_body();
+    let body: Body = req.into_body();
     let mut stream = body.into_data_stream();
-    let mut buffer = Vec::new();
     let mut hasher = Sha256::new();
 
+    // Create a temporary file
+    let temp_dir = state.upload_dir.join("temp");
+    fs::create_dir_all(&temp_dir).await.map_err(|e| {
+        error!("Failed to create temp directory: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let temp_path = temp_dir.join(format!("upload_{}", uuid::Uuid::new_v4()));
+    let mut temp_file = File::create(&temp_path).await.map_err(|e| {
+        error!("Failed to create temp file: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let mut total_bytes = 0;
+    let mut last_log_time = std::time::Instant::now();
+    const LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+    // Stream data to temp file and calculate hash
     while let Some(chunk) = stream.next().await {
-        let data = chunk.map_err(|_| StatusCode::BAD_REQUEST)?;
+        let data = chunk.map_err(|e| {
+            error!("Failed to read chunk: {}", e);
+            StatusCode::BAD_REQUEST
+        })?;
+        
         hasher.update(&data);
-        buffer.extend_from_slice(&data);
+        temp_file.write_all(&data).await.map_err(|e| {
+            error!("Failed to write to temp file: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        total_bytes += data.len();
+        
+        // Log progress every 5 seconds
+        if last_log_time.elapsed() >= LOG_INTERVAL {
+            info!("Upload progress: {} MB received", total_bytes / 1_048_576);
+            last_log_time = std::time::Instant::now();
+        }
     }
 
-    let sha256 = format!("{:x}", hasher.finalize());
-    let size = buffer.len() as u64;
+    // Ensure all data is written to disk
+    temp_file.sync_all().await.map_err(|e| {
+        error!("Failed to sync temp file: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    drop(temp_file);
 
+    info!("Upload complete: {} MB total", total_bytes / 1_048_576);
+
+    let sha256 = format!("{:x}", hasher.finalize());
     let filepath = get_nested_path(&state.upload_dir, &sha256, extension.as_deref());
     
     // Create parent directories if they don't exist
@@ -132,14 +172,17 @@ pub async fn upload_file(
         })?;
     }
 
-    let mut file = File::create(&filepath).await.map_err(|e| {
-        error!("File create error: {}", e);
+    // Move temp file to final location
+    fs::rename(&temp_path, &filepath).await.map_err(|e| {
+        error!("Failed to move temp file to final location: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    file.write_all(&buffer)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Get file size
+    let size = fs::metadata(&filepath).await.map_err(|e| {
+        error!("Failed to get file metadata: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?.len();
 
     let key = sha256[..64.min(sha256.len())].to_string();
     state.file_index.write().await.insert(key.clone(), FileMetadata {

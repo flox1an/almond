@@ -20,3 +20,4 @@ sha2 = "0.10.8"
 reqwest = { version = "0.11", features = ["json"] }
 hyper = "1.6.0"
 dotenv = "0.15.0"
+uuid = { version = "1.7", features = ["v4"] }

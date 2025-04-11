@@ -40,9 +40,11 @@ async fn load_app_state() -> AppState {
     dotenv().ok();
 
     let max_total_size = env::var("MAX_TOTAL_SIZE")
-        .unwrap_or_else(|_| "99999999999".to_string())
-        .parse()
-        .expect("Invalid value for MAX_TOTAL_SIZE");
+        .unwrap_or_else(|_| "99999".to_string())
+        .parse::<u64>()
+        .expect("Invalid value for MAX_TOTAL_SIZE")
+        .checked_mul(1024 * 1024)
+        .expect("MAX_TOTAL_SIZE value too large");
 
     let max_total_files = env::var("MAX_TOTAL_FILES")
         .unwrap_or_else(|_| "1000000".to_string())
