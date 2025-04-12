@@ -2,12 +2,14 @@ use axum::body::to_bytes;
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
-    http::{header, Request, StatusCode},
+    http::{header, Request, StatusCode, HeaderMap},
     response::Response,
     Json,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::StreamExt;
 use mime_guess::from_path;
+use nostr::prelude::*;
 use reqwest::{header as reqwest_header, Client};
 use serde_json::{self, Value};
 use sha2::{Digest, Sha256};
@@ -23,8 +25,8 @@ use tokio_util::io::ReaderStream;
 use tracing::{error, info, warn};
 use uuid;
 
-use crate::models::{AppState, BlobDescriptor, ListQuery, FileMetadata};
-use crate::utils::{find_file, get_sha256_hash_from_filename, parse_range_header, get_nested_path};
+use crate::models::{AppState, BlobDescriptor, FileMetadata, ListQuery};
+use crate::utils::{find_file, get_nested_path, get_sha256_hash_from_filename, parse_range_header};
 
 pub async fn list_blobs(
     State(state): State<AppState>,
@@ -79,7 +81,12 @@ pub async fn handle_file_request(
                 if req.method() == axum::http::Method::HEAD {
                     return Ok(Response::builder()
                         .status(StatusCode::OK)
-                        .header(header::CONTENT_TYPE, file_metadata.mime_type.unwrap_or_else(|| "application/octet-stream".into()))
+                        .header(
+                            header::CONTENT_TYPE,
+                            file_metadata
+                                .mime_type
+                                .unwrap_or_else(|| "application/octet-stream".into()),
+                        )
                         .header(header::CONTENT_LENGTH, file_metadata.size)
                         .body(Body::empty())
                         .unwrap());
@@ -90,14 +97,108 @@ pub async fn handle_file_request(
             None => Err(StatusCode::NOT_FOUND),
         }
     } else {
-        Err(StatusCode::BAD_REQUEST)
+        Err(StatusCode::NOT_FOUND)
     }
+}
+
+struct TempFileGuard {
+    path: PathBuf,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            if let Err(e) = std::fs::remove_file(&self.path) {
+                error!(
+                    "Failed to clean up temp file {}: {}",
+                    self.path.display(),
+                    e
+                );
+            }
+        }
+    }
+}
+
+async fn validate_nostr_auth(auth: &str) -> Result<Event, StatusCode> {
+    let auth_str = auth.to_string();
+
+    if !auth_str.starts_with("Nostr ") {
+        error!("Invalid Authorization header prefix");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let base64_str = &auth_str[6..]; // Remove "Nostr " prefix
+    let decoded_bytes = STANDARD.decode(base64_str).map_err(|e| {
+        error!("Failed to decode base64: {}", e);
+        StatusCode::UNAUTHORIZED
+    })?;
+
+    let json_str = String::from_utf8(decoded_bytes).map_err(|e| {
+        error!("Failed to convert to UTF-8: {}", e);
+        StatusCode::UNAUTHORIZED
+    })?;
+
+    info!("Decoded Nostr event JSON: {}", json_str);
+
+    let event: Event = serde_json::from_str(&json_str).map_err(|e| {
+        error!("Failed to parse event JSON: {}", e);
+        StatusCode::UNAUTHORIZED
+    })?;
+
+    // Verify the event signature
+    if let Err(e) = event.verify() {
+        error!("Invalid event signature: {}", e);
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // Check if the event is expired
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if let Some(expiration) = event.tags.iter().find(|t| t.as_vec()[0] == "expiration") {
+        if let Some(exp_time) = expiration.as_vec().get(1) {
+            if let Ok(exp_time) = exp_time.parse::<u64>() {
+                if now > exp_time {
+                    error!("Event expired");
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
+            }
+        }
+    }
+
+    // Check if the event kind is correct (24242 for upload)
+    if event.kind != Kind::Custom(24242) {
+        error!("Invalid event kind");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    Ok(event)
 }
 
 pub async fn upload_file(
     State(state): State<AppState>,
+    headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, StatusCode> {
+    // Validate Nostr authorization
+    let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
+        error!("Missing Authorization header");
+        StatusCode::UNAUTHORIZED
+    })?;
+
+    let _event: Event = validate_nostr_auth(auth.to_str().map_err(|_| {
+        error!("Invalid Authorization header format");
+        StatusCode::UNAUTHORIZED
+    })?).await?;
+
     let content_type = req
         .headers()
         .get(header::CONTENT_TYPE)
@@ -121,6 +222,8 @@ pub async fn upload_file(
     })?;
 
     let temp_path = temp_dir.join(format!("upload_{}", uuid::Uuid::new_v4()));
+    let _temp_guard = TempFileGuard::new(temp_path.clone());
+
     let mut temp_file = File::create(&temp_path).await.map_err(|e| {
         error!("Failed to create temp file: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
@@ -129,6 +232,7 @@ pub async fn upload_file(
     let mut total_bytes = 0;
     let mut last_log_time = std::time::Instant::now();
     const LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+    const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
 
     // Stream data to temp file and calculate hash
     while let Some(chunk) = stream.next().await {
@@ -136,18 +240,24 @@ pub async fn upload_file(
             error!("Failed to read chunk: {}", e);
             StatusCode::BAD_REQUEST
         })?;
-        
-        hasher.update(&data);
-        temp_file.write_all(&data).await.map_err(|e| {
-            error!("Failed to write to temp file: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
 
-        total_bytes += data.len();
-        
+        // Process data in chunks
+        for chunk in data.chunks(CHUNK_SIZE) {
+            hasher.update(chunk);
+            temp_file.write_all(chunk).await.map_err(|e| {
+                error!("Failed to write to temp file: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            total_bytes += chunk.len();
+        }
+
         // Log progress every 5 seconds
         if last_log_time.elapsed() >= LOG_INTERVAL {
-            info!("Upload progress: {} MB received", total_bytes / 1_048_576);
+            info!(
+                "Upload progress {}: {} MB received",
+                temp_path.display(),
+                total_bytes / 1_048_576
+            );
             last_log_time = std::time::Instant::now();
         }
     }
@@ -163,7 +273,7 @@ pub async fn upload_file(
 
     let sha256 = format!("{:x}", hasher.finalize());
     let filepath = get_nested_path(&state.upload_dir, &sha256, extension.as_deref());
-    
+
     // Create parent directories if they don't exist
     if let Some(parent) = filepath.parent() {
         fs::create_dir_all(parent).await.map_err(|e| {
@@ -179,22 +289,28 @@ pub async fn upload_file(
     })?;
 
     // Get file size
-    let size = fs::metadata(&filepath).await.map_err(|e| {
-        error!("Failed to get file metadata: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?.len();
+    let size = fs::metadata(&filepath)
+        .await
+        .map_err(|e| {
+            error!("Failed to get file metadata: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .len();
 
     let key = sha256[..64.min(sha256.len())].to_string();
-    state.file_index.write().await.insert(key.clone(), FileMetadata {
-        path: filepath.clone(),
-        extension: extension.clone(),
-        mime_type: content_type.clone(),
-        size,
-        created_at: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    });
+    state.file_index.write().await.insert(
+        key.clone(),
+        FileMetadata {
+            path: filepath.clone(),
+            extension: extension.clone(),
+            mime_type: content_type.clone(),
+            size,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        },
+    );
 
     // After successful upload queue cleanup job
     let mut changes_pending = state.changes_pending.write().await;
@@ -277,7 +393,7 @@ pub async fn mirror_blob(
 
     let extension = content_type.split('/').last().unwrap_or("bin");
     let filepath = get_nested_path(&state.upload_dir, &sha256, Some(extension));
-    
+
     // Create parent directories if they don't exist
     if let Some(parent) = filepath.parent() {
         fs::create_dir_all(parent).await.map_err(|e| {
@@ -300,13 +416,15 @@ pub async fn mirror_blob(
     let content_type_clone = content_type.clone();
     let extension = content_type_clone.split('/').last().map(|s| s.to_string());
     let descriptor_content_type = content_type_clone.clone();
-    let descriptor = state.create_blob_descriptor(&sha256, blob_bytes.len() as u64, Some(descriptor_content_type));
-    
-    state
-        .file_index
-        .write()
-        .await
-        .insert(sha256.clone(), FileMetadata {
+    let descriptor = state.create_blob_descriptor(
+        &sha256,
+        blob_bytes.len() as u64,
+        Some(descriptor_content_type),
+    );
+
+    state.file_index.write().await.insert(
+        sha256.clone(),
+        FileMetadata {
             path: filepath.clone(),
             extension,
             mime_type: Some(content_type_clone),
@@ -315,7 +433,8 @@ pub async fn mirror_blob(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-        });
+        },
+    );
     info!("Blob descriptor created for SHA256: {}", sha256);
 
     // After successful mirroring
