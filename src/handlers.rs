@@ -2,7 +2,7 @@ use axum::body::to_bytes;
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
-    http::{header, Request, StatusCode, HeaderMap},
+    http::{header, HeaderMap, Request, StatusCode},
     response::Response,
     Json,
 };
@@ -31,7 +31,22 @@ use crate::utils::{find_file, get_nested_path, get_sha256_hash_from_filename, pa
 pub async fn list_blobs(
     State(state): State<AppState>,
     Query(params): Query<ListQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<BlobDescriptor>>, (StatusCode, String)> {
+    // Validate Nostr authorization
+    let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
+        (StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string())
+    })?;
+
+    let _event: Event = validate_nostr_auth(
+        auth.to_str().map_err(|_| {
+            (StatusCode::UNAUTHORIZED, "Invalid Authorization header format".to_string())
+        })?,
+        &state.allowed_pubkeys,
+    )
+    .await
+    .map_err(|e| (e, "Invalid Nostr authorization".to_string()))?;
+
     let index = state.file_index.read().await;
     let mut blobs = Vec::new();
 
@@ -125,7 +140,10 @@ impl Drop for TempFileGuard {
     }
 }
 
-async fn validate_nostr_auth(auth: &str) -> Result<Event, StatusCode> {
+async fn validate_nostr_auth(
+    auth: &str,
+    allowed_pubkeys: &[PublicKey],
+) -> Result<Event, StatusCode> {
     let auth_str = auth.to_string();
 
     if !auth_str.starts_with("Nostr ") {
@@ -180,6 +198,12 @@ async fn validate_nostr_auth(auth: &str) -> Result<Event, StatusCode> {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
+    // Check if pubkey is allowed
+    if !allowed_pubkeys.is_empty() && !allowed_pubkeys.contains(&event.pubkey) {
+        error!("Pubkey not authorized");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     Ok(event)
 }
 
@@ -194,10 +218,14 @@ pub async fn upload_file(
         StatusCode::UNAUTHORIZED
     })?;
 
-    let _event: Event = validate_nostr_auth(auth.to_str().map_err(|_| {
-        error!("Invalid Authorization header format");
-        StatusCode::UNAUTHORIZED
-    })?).await?;
+    let auth_event: Event = validate_nostr_auth(
+        auth.to_str().map_err(|_| {
+            error!("Invalid Authorization header format");
+            StatusCode::UNAUTHORIZED
+        })?,
+        &state.allowed_pubkeys,
+    )
+    .await?;
 
     let content_type = req
         .headers()
@@ -274,6 +302,23 @@ pub async fn upload_file(
     let sha256 = format!("{:x}", hasher.finalize());
     let filepath = get_nested_path(&state.upload_dir, &sha256, extension.as_deref());
 
+    // Check if the x tag matches the expected hash
+    let x_tags: Vec<_> = auth_event
+        .tags
+        .iter()
+        .filter(|t| t.as_vec()[0] == "x")
+        .collect();
+
+    if x_tags.is_empty() {
+        error!("No x tag found in event");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    if !x_tags.iter().any(|t| t.as_vec().get(1) == Some(&sha256)) {
+        error!("No matching x tag found for hash {}", sha256);
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     // Create parent directories if they don't exist
     if let Some(parent) = filepath.parent() {
         fs::create_dir_all(parent).await.map_err(|e| {
@@ -327,8 +372,24 @@ pub async fn upload_file(
 
 pub async fn mirror_blob(
     State(state): State<AppState>,
+    headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, StatusCode> {
+    // Validate Nostr authorization
+    let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
+        error!("Missing Authorization header");
+        StatusCode::UNAUTHORIZED
+    })?;
+
+    let _event: Event = validate_nostr_auth(
+        auth.to_str().map_err(|_| {
+            error!("Invalid Authorization header format");
+            StatusCode::UNAUTHORIZED
+        })?,
+        &state.allowed_pubkeys,
+    )
+    .await?;
+
     let body_bytes = to_bytes(req.into_body(), usize::MAX)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

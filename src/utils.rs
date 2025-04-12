@@ -2,9 +2,10 @@ use regex::Regex;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{fs, sync::RwLock};
-use tracing::{info, warn};
+use tracing::{info, error};
 use mime_guess::from_path;
 
 use crate::models::{AppState, FileMetadata};
@@ -66,47 +67,8 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
     *index.write().await = map;
 }
 
-pub async fn enforce_storage_limits(state: &AppState) {
-    let mut index = state.file_index.write().await;
-    let mut files: Vec<(String, FileMetadata)> = vec![];
-    let mut total_size = 0;
-
-    // Collect all files and calculate total size
-    for (key, metadata) in index.iter() {
-        total_size += metadata.size;
-        files.push((key.clone(), metadata.clone()));
-    }
-
-    let total_files = files.len();
-    info!(
-        "Storage check: {} files using {:.2} MB",
-        total_files,
-        total_size as f64 / 1_048_576.0
-    );
-
-    if total_files <= state.max_total_files && total_size <= state.max_total_size {
-        return;
-    }
-
-    // Sort files by creation time (oldest first)
-    files.sort_by_key(|(_, metadata)| metadata.created_at);
-
-    let mut removed = 0;
-    let initial_files_count = files.len();
-    for (key, metadata) in files {
-        if fs::remove_file(&metadata.path).await.is_ok() {
-            index.remove(&key);
-            total_size = total_size.saturating_sub(metadata.size);
-            removed += 1;
-            warn!("Deleted file: {} ({} bytes)", metadata.path.display(), metadata.size);
-        }
-        if initial_files_count - removed <= state.max_total_files && total_size <= state.max_total_size {
-            break;
-        }
-    }
-
-    // Clean up empty directories using a stack-based approach
-    let mut dirs_to_process = vec![state.upload_dir.to_path_buf()];
+async fn cleanup_empty_dirs(root_dir: &Path) {
+    let mut dirs_to_process = vec![root_dir.to_path_buf()];
     let mut empty_dirs = vec![];
 
     // First pass: collect all empty directories
@@ -133,7 +95,7 @@ pub async fn enforce_storage_limits(state: &AppState) {
             info!("Removed empty directory: {}", dir.display());
             // Add parent directory to check if it becomes empty
             if let Some(parent) = dir.parent() {
-                if parent != state.upload_dir {
+                if parent != root_dir {
                     parent_dirs.push(parent.to_path_buf());
                 }
             }
@@ -155,8 +117,49 @@ pub async fn enforce_storage_limits(state: &AppState) {
             }
         }
     }
+}
 
-    info!("Deleted {} file(s) to enforce storage limits.", removed);
+pub async fn enforce_storage_limits(state: &AppState) {
+    let mut index = state.file_index.write().await;
+    let mut total_size = 0;
+    let mut files: Vec<(String, FileMetadata)> = index.iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    // Sort files by creation date (oldest first)
+    files.sort_by(|a, b| a.1.created_at.cmp(&b.1.created_at));
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let max_age_secs = state.max_file_age_days * 24 * 60 * 60;
+
+    for (sha256, metadata) in files {
+        // Check file age if max_age_days is set
+        if state.max_file_age_days > 0 && now - metadata.created_at > max_age_secs {
+            info!("Deleting expired file: {}", sha256);
+            if let Err(e) = fs::remove_file(&metadata.path).await {
+                error!("Failed to delete expired file {}: {}", sha256, e);
+            }
+            index.remove(&sha256);
+            continue;
+        }
+
+        // Check storage limits
+        if total_size + metadata.size > state.max_total_size || index.len() >= state.max_total_files {
+            info!("Deleting file to enforce limits: {}", sha256);
+            if let Err(e) = fs::remove_file(&metadata.path).await {
+                error!("Failed to delete file {}: {}", sha256, e);
+            }
+            index.remove(&sha256);
+        } else {
+            total_size += metadata.size;
+        }
+    }
+
+    // Clean up empty directories
+    cleanup_empty_dirs(&state.upload_dir).await;
 }
 
 pub fn get_sha256_hash_from_filename(filename: &str) -> Option<String> {

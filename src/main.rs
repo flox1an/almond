@@ -11,7 +11,9 @@ use axum_server;
 use dotenv::dotenv;
 use tokio::fs;
 use tokio::sync::RwLock;
+use tracing::error;
 use tracing_subscriber;
+use nostr::prelude::*;
 
 use axum::{
     middleware::from_fn,
@@ -49,7 +51,7 @@ async fn load_app_state() -> AppState {
 
     let max_total_files = env::var("MAX_TOTAL_FILES")
         .unwrap_or_else(|_| "1000000".to_string())
-        .parse()
+        .parse::<usize>()
         .expect("Invalid value for MAX_TOTAL_FILES");
 
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
@@ -67,6 +69,30 @@ async fn load_app_state() -> AppState {
         .parse()
         .expect("Invalid value for CLEANUP_INTERVAL_SECS");
 
+    let max_file_age_days = env::var("MAX_FILE_AGE_DAYS")
+        .unwrap_or_else(|_| "0".to_string())
+        .parse()
+        .expect("Invalid value for MAX_FILE_AGE_DAYS");
+
+    // Parse allowed pubkeys from environment variable
+    let allowed_pubkeys = env::var("ALLOWED_NPUBS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|npub| {
+            if npub.trim().is_empty() {
+                None
+            } else {
+                match PublicKey::from_bech32(npub.trim()) {
+                    Ok(pk) => Some(pk),
+                    Err(e) => {
+                        error!("Failed to parse npub {}: {}", npub, e);
+                        None
+                    }
+                }
+            }
+        })
+        .collect();
+
     AppState {
         upload_dir,
         file_index,
@@ -76,6 +102,8 @@ async fn load_app_state() -> AppState {
         public_url,
         cleanup_interval_secs,
         changes_pending: Arc::new(RwLock::new(true)),
+        allowed_pubkeys,
+        max_file_age_days,
     }
 }
 
