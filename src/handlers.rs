@@ -9,7 +9,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::StreamExt;
 use mime_guess::from_path;
-use nostr::prelude::*;
+use nostr_relay_pool::prelude::*;
 use reqwest::{header as reqwest_header, Client};
 use serde_json::{self, Value};
 use sha2::{Digest, Sha256};
@@ -35,14 +35,20 @@ pub async fn list_blobs(
 ) -> Result<Json<Vec<BlobDescriptor>>, (StatusCode, String)> {
     // Validate Nostr authorization
     let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
-        (StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string())
+        (
+            StatusCode::UNAUTHORIZED,
+            "Missing Authorization header".to_string(),
+        )
     })?;
 
     let _event: Event = validate_nostr_auth(
         auth.to_str().map_err(|_| {
-            (StatusCode::UNAUTHORIZED, "Invalid Authorization header format".to_string())
+            (
+                StatusCode::UNAUTHORIZED,
+                "Invalid Authorization header format".to_string(),
+            )
         })?,
-        &state.allowed_pubkeys,
+        &state,
     )
     .await
     .map_err(|e| (e, "Invalid Nostr authorization".to_string()))?;
@@ -142,7 +148,7 @@ impl Drop for TempFileGuard {
 
 async fn validate_nostr_auth(
     auth: &str,
-    allowed_pubkeys: &[PublicKey],
+    state: &AppState,
 ) -> Result<Event, StatusCode> {
     let auth_str = auth.to_string();
 
@@ -181,8 +187,8 @@ async fn validate_nostr_auth(
         .unwrap_or_default()
         .as_secs();
 
-    if let Some(expiration) = event.tags.iter().find(|t| t.as_vec()[0] == "expiration") {
-        if let Some(exp_time) = expiration.as_vec().get(1) {
+    if let Some(expiration) = event.tags.find(TagKind::Expiration) {
+        if let Some(exp_time) = expiration.content() {
             if let Ok(exp_time) = exp_time.parse::<u64>() {
                 if now > exp_time {
                     error!("Event expired");
@@ -198,8 +204,8 @@ async fn validate_nostr_auth(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Check if pubkey is allowed
-    if !allowed_pubkeys.is_empty() && !allowed_pubkeys.contains(&event.pubkey) {
+    // Check if pubkey is allowed or trusted
+    if !state.allowed_pubkeys.is_empty() && !state.allowed_pubkeys.contains(&event.pubkey) && !state.trusted_pubkeys.contains_key(&event.pubkey) {
         error!("Pubkey not authorized");
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -223,7 +229,7 @@ pub async fn upload_file(
             error!("Invalid Authorization header format");
             StatusCode::UNAUTHORIZED
         })?,
-        &state.allowed_pubkeys,
+        &state,
     )
     .await?;
 
@@ -303,18 +309,15 @@ pub async fn upload_file(
     let filepath = get_nested_path(&state.upload_dir, &sha256, extension.as_deref());
 
     // Check if the x tag matches the expected hash
-    let x_tags: Vec<_> = auth_event
+    let x_tag = auth_event
         .tags
-        .iter()
-        .filter(|t| t.as_vec()[0] == "x")
-        .collect();
+        .find(TagKind::x())
+        .ok_or_else(|| {
+            error!("No x tag found in event");
+            StatusCode::UNAUTHORIZED
+        })?;
 
-    if x_tags.is_empty() {
-        error!("No x tag found in event");
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    if !x_tags.iter().any(|t| t.as_vec().get(1) == Some(&sha256)) {
+    if x_tag.content() != Some(&sha256) {
         error!("No matching x tag found for hash {}", sha256);
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -386,7 +389,7 @@ pub async fn mirror_blob(
             error!("Invalid Authorization header format");
             StatusCode::UNAUTHORIZED
         })?,
-        &state.allowed_pubkeys,
+        &state,
     )
     .await?;
 

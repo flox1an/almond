@@ -7,7 +7,7 @@ use std::{
 };
 use tokio::sync::RwLock;
 use mime_guess;
-use nostr::prelude::*;
+use nostr_relay_pool::prelude::*;
 
 #[derive(Clone)]
 pub struct FileMetadata {
@@ -29,6 +29,7 @@ pub struct AppState {
     pub cleanup_interval_secs: u64,
     pub changes_pending: Arc<RwLock<bool>>,
     pub allowed_pubkeys: Vec<PublicKey>,
+    pub trusted_pubkeys: HashMap<PublicKey, usize>,
     pub max_file_age_days: u64,
 }
 

@@ -24,3 +24,4 @@ dotenv = "0.15.0"
 uuid = { version = "1.7", features = ["v4"] }
 base64 = "0.21"
 nostr = "0.28"
+nostr-relay-pool = "0.40.1"

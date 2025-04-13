@@ -40,8 +40,9 @@ The following environment variables can be used to configure the service:
 | `BIND_ADDR` | Address and port to bind the server to | 127.0.0.1:3000 |
 | `PUBLIC_URL` | Public URL of the service | http://127.0.0.1:3000 |
 | `CLEANUP_INTERVAL_SECS` | Interval in seconds between cleanup runs | 30 |
-| `ALLOWED_NPUBS` | Comma-separated list of authorized npubs | (empty) |
-| `MAX_FILE_AGE_DAYS` | Maximum age of files in days (0 = no age limit) | 0 |
+| `ALLOWED_NPUBS` | Comma-separated list of allowed Nostr public keys (npubs) | `` |
+| `MAX_FILE_AGE_DAYS` | Maximum age of files in days before deletion (0 = no age limit) | `0` |
+| `ALLOW_WOT` | Enable Web of Trust for additional pubkey authorization | `false` |
 
 ### Example Configuration
 

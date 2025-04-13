@@ -2,10 +2,13 @@ pub mod handlers;
 pub mod middleware;
 pub mod models;
 pub mod utils;
+pub mod trust_network;
+
 use std::{collections::HashMap, env, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use crate::models::AppState;
 use crate::utils::{build_file_index, enforce_storage_limits};
+use crate::trust_network::refresh_trust_network;
 use axum::Router;
 use axum_server;
 use dotenv::dotenv;
@@ -13,7 +16,7 @@ use tokio::fs;
 use tokio::sync::RwLock;
 use tracing::error;
 use tracing_subscriber;
-use nostr::prelude::*;
+use nostr_relay_pool::prelude::*;
 
 use axum::{
     middleware::from_fn,
@@ -75,7 +78,7 @@ async fn load_app_state() -> AppState {
         .expect("Invalid value for MAX_FILE_AGE_DAYS");
 
     // Parse allowed pubkeys from environment variable
-    let allowed_pubkeys = env::var("ALLOWED_NPUBS")
+    let allowed_pubkeys: Vec<PublicKey> = env::var("ALLOWED_NPUBS")
         .unwrap_or_default()
         .split(',')
         .filter_map(|npub| {
@@ -93,6 +96,18 @@ async fn load_app_state() -> AppState {
         })
         .collect();
 
+    let trusted_pubkeys: HashMap<PublicKey, usize> = if env::var("ALLOW_WOT").is_ok() && !allowed_pubkeys.is_empty() {
+        match refresh_trust_network(&allowed_pubkeys).await {
+            Ok(trusted) => trusted,
+            Err(e) => {
+                error!("Failed to refresh trust network: {}", e);
+                HashMap::new()
+            }
+        }
+    } else {
+        HashMap::new()
+    };
+
     AppState {
         upload_dir,
         file_index,
@@ -103,6 +118,7 @@ async fn load_app_state() -> AppState {
         cleanup_interval_secs,
         changes_pending: Arc::new(RwLock::new(true)),
         allowed_pubkeys,
+        trusted_pubkeys,
         max_file_age_days,
     }
 }
