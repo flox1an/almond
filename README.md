@@ -10,6 +10,7 @@ Rugpull Rodeo is a file storage service that:
 - Enforces storage limits and cleanup policies
 - Provides file listing and retrieval capabilities
 - Supports file mirroring from other sources
+- Web of trust authorization
 
 ## Build
 

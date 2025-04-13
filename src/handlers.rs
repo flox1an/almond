@@ -146,10 +146,7 @@ impl Drop for TempFileGuard {
     }
 }
 
-async fn validate_nostr_auth(
-    auth: &str,
-    state: &AppState,
-) -> Result<Event, StatusCode> {
+async fn validate_nostr_auth(auth: &str, state: &AppState) -> Result<Event, StatusCode> {
     let auth_str = auth.to_string();
 
     if !auth_str.starts_with("Nostr ") {
@@ -205,9 +202,12 @@ async fn validate_nostr_auth(
     }
 
     // Check if pubkey is allowed or trusted
-    if !state.allowed_pubkeys.is_empty() && !state.allowed_pubkeys.contains(&event.pubkey) && !state.trusted_pubkeys.contains_key(&event.pubkey) {
-        error!("Pubkey not authorized");
-        return Err(StatusCode::UNAUTHORIZED);
+    if !state.allowed_pubkeys.is_empty() && !state.allowed_pubkeys.contains(&event.pubkey) {
+        let trusted_pubkeys = state.trusted_pubkeys.read().await;
+        if !trusted_pubkeys.contains_key(&event.pubkey) {
+            error!("Pubkey not authorized");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
     }
 
     Ok(event)
@@ -309,13 +309,10 @@ pub async fn upload_file(
     let filepath = get_nested_path(&state.upload_dir, &sha256, extension.as_deref());
 
     // Check if the x tag matches the expected hash
-    let x_tag = auth_event
-        .tags
-        .find(TagKind::x())
-        .ok_or_else(|| {
-            error!("No x tag found in event");
-            StatusCode::UNAUTHORIZED
-        })?;
+    let x_tag = auth_event.tags.find(TagKind::x()).ok_or_else(|| {
+        error!("No x tag found in event");
+        StatusCode::UNAUTHORIZED
+    })?;
 
     if x_tag.content() != Some(&sha256) {
         error!("No matching x tag found for hash {}", sha256);

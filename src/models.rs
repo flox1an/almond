@@ -1,3 +1,5 @@
+use mime_guess;
+use nostr_relay_pool::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -6,8 +8,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::RwLock;
-use mime_guess;
-use nostr_relay_pool::prelude::*;
 
 #[derive(Clone)]
 pub struct FileMetadata {
@@ -29,7 +29,7 @@ pub struct AppState {
     pub cleanup_interval_secs: u64,
     pub changes_pending: Arc<RwLock<bool>>,
     pub allowed_pubkeys: Vec<PublicKey>,
-    pub trusted_pubkeys: HashMap<PublicKey, usize>,
+    pub trusted_pubkeys: Arc<RwLock<HashMap<PublicKey, usize>>>,
     pub max_file_age_days: u64,
 }
 
