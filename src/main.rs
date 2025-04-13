@@ -134,7 +134,7 @@ fn start_trust_network_refresh_job(state: AppState) {
             return;
         }
 
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(7200)); // 2 hours
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(4 * 3600)); 
         loop {
             interval.tick().await;
             if !state.allowed_pubkeys.is_empty() {

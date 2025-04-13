@@ -1,0 +1,25 @@
+# Ignore files directory
+files/
+**/files/
+
+# Ignore target directory
+target/
+**/target/
+
+# Ignore git files
+.git/
+.gitignore
+
+# Ignore environment files
+.env
+.env.*
+
+# Ignore editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore OS files
+.DS_Store
+Thumbs.db 
