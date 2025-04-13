@@ -165,7 +165,7 @@ async fn validate_nostr_auth(auth: &str, state: &AppState) -> Result<Event, Stat
         StatusCode::UNAUTHORIZED
     })?;
 
-    info!("Decoded Nostr event JSON: {}", json_str);
+    // info!("Decoded Nostr event JSON: {}", json_str);
 
     let event: Event = serde_json::from_str(&json_str).map_err(|e| {
         error!("Failed to parse event JSON: {}", e);

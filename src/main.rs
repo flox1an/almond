@@ -134,7 +134,7 @@ fn start_trust_network_refresh_job(state: AppState) {
             return;
         }
 
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(4 * 3600)); 
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(4 * 3600));
         loop {
             interval.tick().await;
             if !state.allowed_pubkeys.is_empty() {
@@ -167,7 +167,7 @@ async fn main() {
 
     let app = create_app(state).await;
 
-    println!("listening on {}", addr);
+    println!("🎧 blossom server listening on {}", addr);
 
     axum_server::bind(addr)
         .serve(app.into_make_service())

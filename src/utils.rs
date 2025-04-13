@@ -1,3 +1,4 @@
+use mime_guess::from_path;
 use regex::Regex;
 use std::{
     collections::HashMap,
@@ -5,8 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{fs, sync::RwLock};
-use tracing::{info, error};
-use mime_guess::from_path;
+use tracing::{error, info};
 
 use crate::models::{AppState, FileMetadata};
 
@@ -14,20 +14,20 @@ pub fn get_nested_path(upload_dir: &Path, hash: &str, extension: Option<&str>) -
     let first_level = &hash[..1];
     let second_level = &hash[1..2];
     let mut path = upload_dir.join(first_level).join(second_level);
-    
+
     if let Some(ext) = extension {
         path = path.join(format!("{}.{}", hash, ext));
     } else {
         path = path.join(hash);
     }
-    
+
     path
 }
 
 pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, FileMetadata>>) {
     let mut map = HashMap::new();
     let mut dirs_to_process = vec![upload_dir.to_path_buf()];
-    
+
     while let Some(current_dir) = dirs_to_process.pop() {
         if let Ok(mut entries) = fs::read_dir(&current_dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
@@ -36,25 +36,30 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
                     if let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) {
                         let key = name[..64.min(name.len())].to_string();
                         if let Ok(metadata) = entry.metadata().await {
-                            let extension = path.extension()
+                            let extension = path
+                                .extension()
                                 .and_then(|ext| ext.to_str())
                                 .map(|s| s.to_string());
                             let mime_type = from_path(&path)
                                 .first()
                                 .map(|m| m.essence_str().to_string());
-                            let created_at = metadata.created()
+                            let created_at = metadata
+                                .created()
                                 .unwrap_or(std::time::SystemTime::now())
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs();
-                            
-                            map.insert(key, FileMetadata {
-                                path,
-                                extension,
-                                mime_type,
-                                size: metadata.len(),
-                                created_at,
-                            });
+
+                            map.insert(
+                                key,
+                                FileMetadata {
+                                    path,
+                                    extension,
+                                    mime_type,
+                                    size: metadata.len(),
+                                    created_at,
+                                },
+                            );
                         }
                     }
                 } else if path.is_dir() {
@@ -122,9 +127,8 @@ async fn cleanup_empty_dirs(root_dir: &Path) {
 pub async fn enforce_storage_limits(state: &AppState) {
     let mut index = state.file_index.write().await;
     let mut total_size = 0;
-    let mut files: Vec<(String, FileMetadata)> = index.iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+    let mut files: Vec<(String, FileMetadata)> =
+        index.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
     // Sort files by creation date (oldest first)
     files.sort_by(|a, b| a.1.created_at.cmp(&b.1.created_at));
@@ -147,7 +151,8 @@ pub async fn enforce_storage_limits(state: &AppState) {
         }
 
         // Check storage limits
-        if total_size + metadata.size > state.max_total_size || index.len() >= state.max_total_files {
+        if total_size + metadata.size > state.max_total_size || index.len() >= state.max_total_files
+        {
             info!("Deleting file to enforce limits: {}", sha256);
             if let Err(e) = fs::remove_file(&metadata.path).await {
                 error!("Failed to delete file {}: {}", sha256, e);

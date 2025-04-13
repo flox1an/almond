@@ -58,7 +58,7 @@ async fn get_followers(
     let events = pool
         .fetch_events(filter, timeout, ReqExitPolicy::default())
         .await?;
-    println!("Received {} contact list events", events.len());
+    println!("💻 Received {} contact list events", events.len());
 
     for event in events.iter() {
         let author = event.pubkey;
@@ -88,7 +88,9 @@ async fn get_followers(
 }
 
 /// Simple trust network refresh logic (a pared‑down version of refreshTrustNetwork).
-pub async fn refresh_trust_network(owner_pubkeys: &[PublicKey]) -> Result<HashMap<PublicKey, usize>> {
+pub async fn refresh_trust_network(
+    owner_pubkeys: &[PublicKey],
+) -> Result<HashMap<PublicKey, usize>> {
     // Create and connect to the relay pool
     let pool = create_pool().await?;
 
@@ -100,7 +102,7 @@ pub async fn refresh_trust_network(owner_pubkeys: &[PublicKey]) -> Result<HashMa
     let one_hop_network = get_followers(&pool, owner_pubkeys).await?;
     let empty_vec = Vec::new();
     let followers = one_hop_network.get(&owner_pubkeys[0]).unwrap_or(&empty_vec);
-    println!("Found {} one-hop connections", followers.len());
+    println!("✋ Found {} one-hop connections", followers.len());
 
     // Phase 2: Query follows from one-hop network in batches
     println!(
@@ -131,11 +133,7 @@ pub async fn refresh_trust_network(owner_pubkeys: &[PublicKey]) -> Result<HashMa
     let trusted_pubkeys: HashMap<PublicKey, usize> = pubkey_follower_count
         .into_iter()
         .filter(|(_, count)| *count > 3)
-        .filter_map(|(pk_str, count)| {
-            PublicKey::from_hex(&pk_str)
-                .ok()
-                .map(|pk| (pk, count))
-        })
+        .filter_map(|(pk_str, count)| PublicKey::from_hex(&pk_str).ok().map(|pk| (pk, count)))
         .collect();
 
     println!(
