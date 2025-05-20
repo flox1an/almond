@@ -87,7 +87,7 @@ async fn cleanup_empty_dirs(root_dir: &Path) {
                 }
                 has_entries = true;
             }
-            if !has_entries {
+            if !has_entries && dir != root_dir {
                 empty_dirs.push(dir);
             }
         }
