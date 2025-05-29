@@ -5,6 +5,7 @@ pub mod trust_network;
 pub mod utils;
 
 use std::{collections::HashMap, env, net::SocketAddr, path::PathBuf, sync::Arc};
+use tokio::signal;
 
 use crate::models::AppState;
 use crate::trust_network::refresh_trust_network;
@@ -15,7 +16,7 @@ use dotenv::dotenv;
 use nostr_relay_pool::prelude::*;
 use tokio::fs;
 use tokio::sync::RwLock;
-use tracing::error;
+use tracing::{error, info};
 use tracing_subscriber;
 
 use axum::{
@@ -167,10 +168,22 @@ async fn main() {
 
     let app = create_app(state).await;
 
-    println!("🎧 blossom server listening on {}", addr);
+    info!("🎧 blossom server listening on {}", addr);
 
-    axum_server::bind(addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    // Create a shutdown signal handler
+    let shutdown = signal::ctrl_c();
+
+    // Start the server with graceful shutdown
+    let server = axum_server::bind(addr)
+        .serve(app.into_make_service());
+
+    // Wait for either the server to complete or a shutdown signal
+    tokio::select! {
+        _ = server => {
+            info!("Server completed");
+        }
+        _ = shutdown => {
+            info!("Shutting down gracefully...");
+        }
+    }
 }
