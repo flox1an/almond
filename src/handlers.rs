@@ -24,6 +24,9 @@ use tokio::{
 use tokio_util::io::ReaderStream;
 use tracing::{error, info, warn};
 use uuid;
+use axum::http::header::{CACHE_CONTROL, EXPIRES};
+use chrono::{Duration, Utc};
+use hyper::http::HeaderValue;
 
 use crate::models::{AppState, BlobDescriptor, FileMetadata, ListQuery};
 use crate::utils::{find_file, get_nested_path, get_sha256_hash_from_filename, parse_range_header};
@@ -530,6 +533,11 @@ async fn serve_file_with_range(path: PathBuf, req: Request<Body>) -> Result<Resp
     use axum::http::header::RANGE;
     let range_header = req.headers().get(RANGE).and_then(|r| r.to_str().ok());
 
+    let expires_dt = Utc::now() + Duration::days(365);
+    let expires_str = expires_dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+    let expires_header = HeaderValue::from_str(&expires_str).unwrap();
+
+
     let mut file = File::open(&path)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -561,6 +569,11 @@ async fn serve_file_with_range(path: PathBuf, req: Request<Body>) -> Result<Resp
                     header::CONTENT_RANGE,
                     format!("bytes {}-{}/{}", start, end, total_size),
                 )
+                .header(
+                    CACHE_CONTROL,
+                    "public, max-age=31536000, immutable",
+                )
+                .header(EXPIRES, expires_header.clone())
                 .body(body)
                 .unwrap());
         }
@@ -578,6 +591,11 @@ async fn serve_file_with_range(path: PathBuf, req: Request<Body>) -> Result<Resp
                 .map(|m| m.essence_str().to_string())
                 .unwrap_or("application/octet-stream".into()),
         )
+        .header(
+            CACHE_CONTROL,
+            "public, max-age=31536000, immutable",
+        )
+        .header(EXPIRES, expires_header.clone())
         .body(body)
         .unwrap())
 }
