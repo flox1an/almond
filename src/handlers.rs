@@ -537,6 +537,10 @@ async fn serve_file_with_range(path: PathBuf, req: Request<Body>) -> Result<Resp
     let expires_str = expires_dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
     let expires_header = HeaderValue::from_str(&expires_str).unwrap();
 
+    let filename = path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let content_disposition = format!("inline; filename=\"{}\"", filename);
 
     let mut file = File::open(&path)
         .await
@@ -569,11 +573,9 @@ async fn serve_file_with_range(path: PathBuf, req: Request<Body>) -> Result<Resp
                     header::CONTENT_RANGE,
                     format!("bytes {}-{}/{}", start, end, total_size),
                 )
-                .header(
-                    CACHE_CONTROL,
-                    "public, max-age=31536000, immutable",
-                )
+                .header(CACHE_CONTROL, "public, max-age=31536000, immutable")
                 .header(EXPIRES, expires_header.clone())
+                .header(header::CONTENT_DISPOSITION, content_disposition.clone())
                 .body(body)
                 .unwrap());
         }
@@ -591,11 +593,9 @@ async fn serve_file_with_range(path: PathBuf, req: Request<Body>) -> Result<Resp
                 .map(|m| m.essence_str().to_string())
                 .unwrap_or("application/octet-stream".into()),
         )
-        .header(
-            CACHE_CONTROL,
-            "public, max-age=31536000, immutable",
-        )
+        .header(CACHE_CONTROL, "public, max-age=31536000, immutable")
         .header(EXPIRES, expires_header.clone())
+        .header(header::CONTENT_DISPOSITION, content_disposition)
         .body(body)
         .unwrap())
 }
