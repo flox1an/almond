@@ -28,7 +28,7 @@ use middleware::cors_middleware;
 
 pub async fn create_app(state: AppState) -> Router {
     Router::new()
-        .route("/upload", put(upload_file))
+        .route("/upload", put(upload_file).head(head_upload))
         .route("/list", get(list_blobs))
         .route("/list/:id", get(list_blobs))
         .route("/mirror", put(mirror_blob))

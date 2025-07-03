@@ -599,3 +599,39 @@ async fn serve_file_with_range(path: PathBuf, req: Request<Body>) -> Result<Resp
         .body(body)
         .unwrap())
 }
+
+/// Handles HEAD /upload to indicate upload capability and requirements.
+pub async fn head_upload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    // Validate Nostr authorization
+    let auth = match headers.get(header::AUTHORIZATION) {
+        Some(a) => a,
+        None => return Ok(Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::empty()).unwrap()),
+    };
+    match validate_nostr_auth(
+        match auth.to_str() {
+            Ok(s) => s,
+            Err(_) => return Ok(Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::empty()).unwrap()),
+        },
+        &state,
+    ).await {
+        Ok(e) => e,
+        Err(_) => return Ok(Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::empty()).unwrap()),
+    };
+
+    // Check storage limits
+    let index = state.file_index.read().await;
+    let total_files = index.len();
+    let total_size: u64 = index.values().map(|m| m.size).sum();
+    if total_files >= state.max_total_files || total_size >= state.max_total_size {
+        return Ok(Response::builder().status(StatusCode::INSUFFICIENT_STORAGE).body(Body::empty()).unwrap());
+    }
+
+    // Compose headers per spec
+    let builder = Response::builder()
+        .status(StatusCode::OK);
+    // Optionally add more headers as needed by spec
+    Ok(builder.body(Body::empty()).unwrap())
+}
