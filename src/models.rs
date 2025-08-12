@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH, Instant},
 };
 use tokio::sync::RwLock;
 
@@ -31,6 +31,10 @@ pub struct AppState {
     pub allowed_pubkeys: Vec<PublicKey>,
     pub trusted_pubkeys: Arc<RwLock<HashMap<PublicKey, usize>>>,
     pub max_file_age_days: u64,
+    pub files_uploaded: Arc<RwLock<u64>>,
+    pub files_downloaded: Arc<RwLock<u64>>,
+    pub upload_throughput_data: Arc<RwLock<Vec<(Instant, u64)>>>,
+    pub download_throughput_data: Arc<RwLock<Vec<(Instant, u64)>>>,
 }
 
 impl AppState {
@@ -61,6 +65,70 @@ impl AppState {
                 .as_secs(),
         }
     }
+
+    pub async fn get_stats(&self) -> Stats {
+        let index = self.file_index.read().await;
+        let total_files = index.len();
+        let total_size_bytes: u64 = index.values().map(|m| m.size).sum();
+        let total_size_mb = total_size_bytes as f64 / (1024.0 * 1024.0);
+        let max_total_size_mb = self.max_total_size as f64 / (1024.0 * 1024.0);
+        let storage_usage_percent = (total_size_bytes as f64 / self.max_total_size as f64) * 100.0;
+
+        // Calculate throughput over the last hour
+        let upload_throughput_data = self.upload_throughput_data.read().await;
+        let one_hour_ago = Instant::now() - std::time::Duration::from_secs(3600);
+        let recent_upload_data: Vec<_> = upload_throughput_data
+            .iter()
+            .filter(|(timestamp, _)| *timestamp > one_hour_ago)
+            .collect();
+
+        let upload_throughput_mbps = if recent_upload_data.len() > 1 {
+            let total_bytes: u64 = recent_upload_data.iter().map(|(_, bytes)| bytes).sum();
+            let time_span = recent_upload_data.last().unwrap().0.duration_since(recent_upload_data.first().unwrap().0);
+            if time_span.as_secs() > 0 {
+                (total_bytes as f64 / (1024.0 * 1024.0)) / (time_span.as_secs() as f64)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        let download_throughput_data = self.download_throughput_data.read().await;
+        let one_hour_ago = Instant::now() - std::time::Duration::from_secs(3600);
+        let recent_download_data: Vec<_> = download_throughput_data
+            .iter()
+            .filter(|(timestamp, _)| *timestamp > one_hour_ago)
+            .collect();
+
+        let download_throughput_mbps = if recent_download_data.len() > 1 {
+            let total_bytes: u64 = recent_download_data.iter().map(|(_, bytes)| bytes).sum();
+            let time_span = recent_download_data.last().unwrap().0.duration_since(recent_download_data.first().unwrap().0);
+            if time_span.as_secs() > 0 {
+                (total_bytes as f64 / (1024.0 * 1024.0)) / (time_span.as_secs() as f64)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        let files_uploaded = *self.files_uploaded.read().await;
+        let files_downloaded = *self.files_downloaded.read().await;
+
+        Stats {
+            total_files,
+            total_size_bytes,
+            total_size_mb,
+            upload_throughput_mbps,
+            download_throughput_mbps,
+            files_uploaded,
+            files_downloaded,
+            max_total_size_mb,
+            max_total_files: self.max_total_files,
+            storage_usage_percent,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -71,6 +139,20 @@ pub struct BlobDescriptor {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
     pub uploaded: u64,
+}
+
+#[derive(Serialize)]
+pub struct Stats {
+    pub total_files: usize,
+    pub total_size_bytes: u64,
+    pub total_size_mb: f64,
+    pub upload_throughput_mbps: f64,
+    pub download_throughput_mbps: f64,
+    pub files_uploaded: u64,
+    pub files_downloaded: u64,
+    pub max_total_size_mb: f64,
+    pub max_total_files: usize,
+    pub storage_usage_percent: f64,
 }
 
 #[derive(Debug, Deserialize)]

@@ -32,6 +32,7 @@ pub async fn create_app(state: AppState) -> Router {
         .route("/list", get(list_blobs))
         .route("/list/:id", get(list_blobs))
         .route("/mirror", put(mirror_blob))
+        .route("/_stats", get(get_stats))
         .route("/", get(serve_index))
         .route("/index.html", get(serve_index))
         .route("/:filename", delete(method_not_allowed))
@@ -109,6 +110,10 @@ async fn load_app_state() -> AppState {
         allowed_pubkeys,
         trusted_pubkeys: Arc::new(RwLock::new(HashMap::new())),
         max_file_age_days,
+        files_uploaded: Arc::new(RwLock::new(0)),
+        files_downloaded: Arc::new(RwLock::new(0)),
+        upload_throughput_data: Arc::new(RwLock::new(Vec::new())),
+        download_throughput_data: Arc::new(RwLock::new(Vec::new())),
     }
 }
 

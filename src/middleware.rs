@@ -40,5 +40,6 @@ pub async fn cors_middleware(req: Request<Body>, next: Next) -> Response {
         "Content-Length".parse().unwrap(),
     );
     headers.insert(header::ACCESS_CONTROL_MAX_AGE, "86400".parse().unwrap());
+    
     response
 }

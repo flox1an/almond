@@ -28,7 +28,7 @@ use axum::http::header::{CACHE_CONTROL, EXPIRES};
 use chrono::{Duration, Utc};
 use hyper::http::HeaderValue;
 
-use crate::models::{AppState, BlobDescriptor, FileMetadata, ListQuery};
+use crate::models::{AppState, BlobDescriptor, FileMetadata, ListQuery, Stats};
 use crate::utils::{find_file, get_nested_path, get_sha256_hash_from_filename, parse_range_header};
 
 pub async fn list_blobs(
@@ -36,6 +36,7 @@ pub async fn list_blobs(
     Query(params): Query<ListQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<BlobDescriptor>>, (StatusCode, String)> {
+    
     // Validate Nostr authorization
     let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
         (
@@ -95,6 +96,7 @@ pub async fn handle_file_request(
     State(state): State<AppState>,
     req: Request<Body>,
 ) -> Result<Response, StatusCode> {
+    
     info!("get for url: {}", filename);
 
     if let Some(filename) = get_sha256_hash_from_filename(&filename) {
@@ -115,10 +117,26 @@ pub async fn handle_file_request(
                         .body(Body::empty())
                         .unwrap());
                 } else {
+                    // Track download statistics
+                    {
+                        let mut files_downloaded = state.files_downloaded.write().await;
+                        *files_downloaded += 1;
+                        
+                        // Track download throughput
+                        let mut download_throughput_data = state.download_throughput_data.write().await;
+                        download_throughput_data.push((std::time::Instant::now(), file_metadata.size));
+                        
+                        // Keep only last 1000 entries to prevent memory bloat
+                        if download_throughput_data.len() > 1000 {
+                            download_throughput_data.drain(0..100);
+                        }
+                    }
                     return serve_file_with_range(file_metadata.path, req).await;
                 }
             }
-            None => Err(StatusCode::NOT_FOUND),
+            None => {
+                Err(StatusCode::NOT_FOUND)
+            }
         }
     } else {
         Err(StatusCode::NOT_FOUND)
@@ -221,6 +239,7 @@ pub async fn upload_file(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, StatusCode> {
+    
     // Validate Nostr authorization
     let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
         error!("Missing Authorization header");
@@ -364,6 +383,20 @@ pub async fn upload_file(
     let mut changes_pending = state.changes_pending.write().await;
     *changes_pending = true;
 
+    // Track upload statistics
+    {
+        let mut files_uploaded = state.files_uploaded.write().await;
+        *files_uploaded += 1;
+        
+        let mut upload_throughput_data = state.upload_throughput_data.write().await;
+        upload_throughput_data.push((std::time::Instant::now(), total_bytes as u64));
+        
+        // Keep only last 1000 entries to prevent memory bloat
+        if upload_throughput_data.len() > 1000 {
+            upload_throughput_data.drain(0..100);
+        }
+    }
+
     let descriptor = state.create_blob_descriptor(&sha256, size, content_type);
 
     Ok(Response::builder()
@@ -378,6 +411,7 @@ pub async fn mirror_blob(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, StatusCode> {
+    
     // Validate Nostr authorization
     let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
         error!("Missing Authorization header");
@@ -501,6 +535,21 @@ pub async fn mirror_blob(
     );
     info!("Blob descriptor created for SHA256: {}", sha256);
 
+    // Track mirror upload statistics
+    {
+        let mut files_uploaded = state.files_uploaded.write().await;
+        *files_uploaded += 1;
+        
+        // Track upload throughput for mirrored files
+        let mut upload_throughput_data = state.upload_throughput_data.write().await;
+        upload_throughput_data.push((std::time::Instant::now(), blob_bytes.len() as u64));
+        
+        // Keep only last 1000 entries to prevent memory bloat
+        if upload_throughput_data.len() > 1000 {
+            upload_throughput_data.drain(0..100);
+        }
+    }
+
     // After successful mirroring
     let mut changes_pending = state.changes_pending.write().await;
     *changes_pending = true;
@@ -605,20 +654,27 @@ pub async fn head_upload(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
+    
     // Validate Nostr authorization
     let auth = match headers.get(header::AUTHORIZATION) {
         Some(a) => a,
-        None => return Ok(Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::empty()).unwrap()),
+        None => {
+            return Ok(Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::empty()).unwrap());
+        }
     };
     match validate_nostr_auth(
         match auth.to_str() {
             Ok(s) => s,
-            Err(_) => return Ok(Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::empty()).unwrap()),
+            Err(_) => {
+                return Ok(Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::empty()).unwrap());
+            }
         },
         &state,
     ).await {
         Ok(e) => e,
-        Err(_) => return Ok(Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::empty()).unwrap()),
+        Err(_) => {
+            return Ok(Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::empty()).unwrap());
+        }
     };
 
     // Check storage limits
@@ -633,5 +689,14 @@ pub async fn head_upload(
     let builder = Response::builder()
         .status(StatusCode::OK);
     // Optionally add more headers as needed by spec
+    
     Ok(builder.body(Body::empty()).unwrap())
+}
+
+/// Handles GET /_stats to return application statistics.
+pub async fn get_stats(
+    State(state): State<AppState>,
+) -> Result<Json<Stats>, StatusCode> {
+    let stats = state.get_stats().await;
+    Ok(Json(stats))
 }
