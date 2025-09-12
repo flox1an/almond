@@ -7,7 +7,7 @@
       \/           \/            \/      \/  
 ```
 
-All Large Media ON Demand - A temporary file storage service with Nostr-based authorization and web of trust support.
+Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-based authorization and web of trust support.
 
 ## Features
  - 🌸 Blossom API (BUD-1, BUD-2, BUD-4)
