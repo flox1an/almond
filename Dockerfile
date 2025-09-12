@@ -28,10 +28,10 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the binary from builder
-COPY --from=builder /usr/src/app/target/release/temp-st /app/temp-st
+COPY --from=builder /usr/src/app/target/release/almond /app/almond
 
 # Ensure binary is executable
-RUN chmod +x /app/temp-st
+RUN chmod +x /app/almond
 
 # Create directory for files
 RUN mkdir -p /app/files
@@ -49,4 +49,4 @@ ENV MAX_FILE_AGE_DAYS=0
 EXPOSE 3000
 
 # Run the binary
-CMD ["/app/temp-st"] 
+CMD ["/app/almond"] 

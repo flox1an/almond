@@ -1,6 +1,6 @@
-# temp.st
+# almond
 
-A temporary file storage service with Nostr-based authorization and web of trust support.
+All Large Media ON Demand - A temporary file storage service with Nostr-based authorization and web of trust support.
 
 ## Features
 
@@ -27,14 +27,14 @@ A temporary file storage service with Nostr-based authorization and web of trust
 ### Building the Image
 
 ```bash
-docker build -t temp-st .
+docker build -t almond .
 ```
 
 ### Running the Container
 
 Basic run:
 ```bash
-docker run -p 3000:3000 -v /path/to/files:/app/files temp-st
+docker run -p 3000:3000 -v /path/to/files:/app/files almond
 ```
 
 With custom configuration:
@@ -46,7 +46,7 @@ docker run -p 3000:3000 \
   -e ALLOWED_NPUBS=npub1... \
   -e MAX_TOTAL_SIZE=1000 \
   -e MAX_FILE_AGE_DAYS=7 \
-  temp-st
+  almond
 ```
 
 ### Environment Variables
@@ -67,7 +67,7 @@ All environment variables can be overridden when running the container:
 The `/app/files` directory in the container is used for file storage. Mount a host directory to persist files:
 
 ```bash
-docker run -p 3000:3000 -v /host/path:/app/files temp-st
+docker run -p 3000:3000 -v /host/path:/app/files almond
 ```
 
 ## Development
