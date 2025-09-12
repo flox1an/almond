@@ -1,15 +1,20 @@
-# almond
+```
+        .__                             .___
+ _____  |  |   _____   ____   ____    __| _/
+ \__  \ |  |  /     \ /  _ \ /    \  / __ | 
+  / __ \|  |_|  Y Y  (  <_> )   |  \/ /_/ | 
+ (____  /____/__|_|  /\____/|___|  /\____ | 
+      \/           \/            \/      \/  
+```
 
 All Large Media ON Demand - A temporary file storage service with Nostr-based authorization and web of trust support.
 
 ## Features
-
-- Temporary file storage with automatic cleanup
-- Nostr-based authorization
-- Web of trust support for trusted pubkeys
-- Automatic trust network refresh every 4 hours
-- File size and count limits
-- Automatic file expiration
+ - 🌸 Blossom API (BUD-1, BUD-2, BUD-4)
+ - 🌸 Temporary file storage with automatic cleanup, first in; first out
+ - 🌸 No ownership, no manual delete
+ - 🌸 Filesystem only, no database
+ - 🌸 Web of trust authorization 
 
 ## Environment Variables
 
