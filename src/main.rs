@@ -93,6 +93,10 @@ async fn load_app_state() -> AppState {
         })
         .collect();
 
+    if !upstream_servers.is_empty() {
+        info!("Upstream servers: {:?}", upstream_servers);
+    }
+
     // Parse max upstream download size in MB
     let max_upstream_download_size_mb = env::var("MAX_UPSTREAM_DOWNLOAD_SIZE_MB")
         .unwrap_or_else(|_| "100".to_string()) // Default: 100MB
