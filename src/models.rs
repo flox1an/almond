@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH, Instant},
+    sync::{Arc, atomic::AtomicU64},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::RwLock;
+use tokio::{sync::{RwLock, Notify}};
 
 #[derive(Clone)]
 pub struct FileMetadata {
@@ -35,6 +35,9 @@ pub struct AppState {
     pub files_downloaded: Arc<RwLock<u64>>,
     pub upload_throughput_data: Arc<RwLock<Vec<(Instant, u64)>>>,
     pub download_throughput_data: Arc<RwLock<Vec<(Instant, u64)>>>,
+    pub upstream_servers: Vec<String>,
+    pub max_upstream_download_size_mb: u64,
+    pub ongoing_downloads: Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>,
 }
 
 impl AppState {
@@ -84,7 +87,11 @@ impl AppState {
 
         let upload_throughput_mbps = if recent_upload_data.len() > 1 {
             let total_bytes: u64 = recent_upload_data.iter().map(|(_, bytes)| bytes).sum();
-            let time_span = recent_upload_data.last().unwrap().0.duration_since(recent_upload_data.first().unwrap().0);
+            let time_span = recent_upload_data
+                .last()
+                .unwrap()
+                .0
+                .duration_since(recent_upload_data.first().unwrap().0);
             if time_span.as_secs() > 0 {
                 (total_bytes as f64 / (1024.0 * 1024.0)) / (time_span.as_secs() as f64)
             } else {
@@ -103,7 +110,11 @@ impl AppState {
 
         let download_throughput_mbps = if recent_download_data.len() > 1 {
             let total_bytes: u64 = recent_download_data.iter().map(|(_, bytes)| bytes).sum();
-            let time_span = recent_download_data.last().unwrap().0.duration_since(recent_download_data.first().unwrap().0);
+            let time_span = recent_download_data
+                .last()
+                .unwrap()
+                .0
+                .duration_since(recent_download_data.first().unwrap().0);
             if time_span.as_secs() > 0 {
                 (total_bytes as f64 / (1024.0 * 1024.0)) / (time_span.as_secs() as f64)
             } else {

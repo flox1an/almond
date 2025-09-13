@@ -24,6 +24,8 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 - `MAX_TOTAL_FILES`: Maximum number of files (default: 1000000)
 - `CLEANUP_INTERVAL_SECS`: Interval for cleanup checks in seconds (default: 30)
 - `MAX_FILE_AGE_DAYS`: Maximum age of files in days, 0 for no limit (default: 0)
+- `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback (optional)
+- `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: 100)
 - `ALLOW_WOT`: Enable web of trust (optional)
 - `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys (optional)
 
@@ -39,7 +41,7 @@ docker build -t almond .
 
 Basic run:
 ```bash
-docker run -p 3000:3000 -v /path/to/files:/app/files almond
+docker run -p 3000:3000 -v /path/to/files:/app/files ghcr.io/flox1an/almond
 ```
 
 With custom configuration:
@@ -51,6 +53,8 @@ docker run -p 3000:3000 \
   -e ALLOWED_NPUBS=npub1... \
   -e MAX_TOTAL_SIZE=1000 \
   -e MAX_FILE_AGE_DAYS=7 \
+  -e UPSTREAM_SERVERS=https://backup1.com,https://backup2.com \
+  -e MAX_UPSTREAM_DOWNLOAD_SIZE_MB=500 \
   almond
 ```
 
@@ -64,6 +68,8 @@ All environment variables can be overridden when running the container:
 - `MAX_TOTAL_FILES`: Maximum number of files
 - `CLEANUP_INTERVAL_SECS`: Cleanup interval in seconds
 - `MAX_FILE_AGE_DAYS`: Maximum file age in days
+- `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback
+- `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB
 - `ALLOW_WOT`: Enable web of trust
 - `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys
 

@@ -1,18 +1,27 @@
 use axum::body::to_bytes;
+use axum::http::header::{CACHE_CONTROL, EXPIRES};
 use axum::{
     body::Body,
-    extract::{Path as AxumPath, Query, State},
-    http::{header, HeaderMap, Request, StatusCode},
+    extract::{Path as AxumPath, Query, Request, State},
+    http::{header, HeaderMap, Method, StatusCode},
     response::Response,
     Json,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use bytes::Bytes;
+use chrono::{Duration, Utc};
+use futures_util::stream;
 use futures_util::StreamExt;
+use hyper::http::HeaderValue;
 use mime_guess::from_path;
 use nostr_relay_pool::prelude::*;
 use reqwest::{header as reqwest_header, Client};
 use serde_json::{self, Value};
 use sha2::{Digest, Sha256};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -20,13 +29,11 @@ use std::{
 use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
+    sync::Notify,
 };
 use tokio_util::io::ReaderStream;
 use tracing::{error, info, warn};
 use uuid;
-use axum::http::header::{CACHE_CONTROL, EXPIRES};
-use chrono::{Duration, Utc};
-use hyper::http::HeaderValue;
 
 use crate::models::{AppState, BlobDescriptor, FileMetadata, ListQuery, Stats};
 use crate::utils::{find_file, get_nested_path, get_sha256_hash_from_filename, parse_range_header};
@@ -36,7 +43,6 @@ pub async fn list_blobs(
     Query(params): Query<ListQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<BlobDescriptor>>, (StatusCode, String)> {
-    
     // Validate Nostr authorization
     let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
         (
@@ -94,9 +100,8 @@ pub async fn list_blobs(
 pub async fn handle_file_request(
     AxumPath(filename): AxumPath<String>,
     State(state): State<AppState>,
-    req: Request<Body>,
+    req: Request,
 ) -> Result<Response, StatusCode> {
-    
     info!("get for url: {}", filename);
 
     if let Some(filename) = get_sha256_hash_from_filename(&filename) {
@@ -104,7 +109,7 @@ pub async fn handle_file_request(
 
         match find_file(&state.file_index, &filename).await {
             Some(file_metadata) => {
-                if req.method() == axum::http::Method::HEAD {
+                if req.method() == Method::HEAD {
                     return Ok(Response::builder()
                         .status(StatusCode::OK)
                         .header(
@@ -121,26 +126,415 @@ pub async fn handle_file_request(
                     {
                         let mut files_downloaded = state.files_downloaded.write().await;
                         *files_downloaded += 1;
-                        
+
                         // Track download throughput
-                        let mut download_throughput_data = state.download_throughput_data.write().await;
-                        download_throughput_data.push((std::time::Instant::now(), file_metadata.size));
-                        
+                        let mut download_throughput_data =
+                            state.download_throughput_data.write().await;
+                        download_throughput_data
+                            .push((std::time::Instant::now(), file_metadata.size));
+
                         // Keep only last 1000 entries to prevent memory bloat
                         if download_throughput_data.len() > 1000 {
                             download_throughput_data.drain(0..100);
                         }
                     }
-                    return serve_file_with_range(file_metadata.path, req).await;
+                    return serve_file_with_range(file_metadata.path, req.headers().clone()).await;
                 }
             }
             None => {
-                Err(StatusCode::NOT_FOUND)
+                // File not found locally, try upstream servers
+                info!(
+                    "File not found locally, checking upstream servers for: {}",
+                    filename
+                );
+                match try_upstream_servers(&state, &filename, req.headers()).await {
+                    Ok(response) => Ok(response),
+                    Err(_) => Err(StatusCode::NOT_FOUND),
+                }
             }
         }
     } else {
         Err(StatusCode::NOT_FOUND)
     }
+}
+
+/// Try to fetch file from upstream servers, stream it to client and save locally
+async fn try_upstream_servers(
+    state: &AppState,
+    filename: &str,
+    headers: &HeaderMap,
+) -> Result<Response, StatusCode> {
+    // For upstream servers, ignore range requests and return full file
+    if headers.get(header::RANGE).is_some() {
+        info!("Range request detected for upstream server, ignoring range and returning full file");
+    }
+
+    // Check if this file is already being downloaded
+    if let Some((written_len, notify, temp_path, content_type)) = {
+        let ongoing_downloads = state.ongoing_downloads.read().await;
+        ongoing_downloads.get(filename).map(|(_, written_len, notify, temp_path, content_type)| (written_len.clone(), notify.clone(), temp_path.clone(), content_type.clone()))
+    } {
+        info!("File {} is already being downloaded, joining the stream immediately", filename);
+        
+        // Join the existing download stream immediately
+        return stream_from_ongoing_download(state, filename, headers, written_len, notify, temp_path, content_type).await;
+    }
+
+    let client = Client::new();
+
+    // Try each upstream server
+    for upstream_url in &state.upstream_servers {
+        let file_url = format!("{}/{}", upstream_url.trim_end_matches('/'), filename);
+        info!("Trying upstream server: {}", file_url);
+
+        // Create request without range headers for upstream servers
+        let mut request = client.get(&file_url);
+
+        // Copy relevant headers from original request, but exclude range headers
+        if let Some(user_agent) = headers.get(header::USER_AGENT) {
+            request = request.header(header::USER_AGENT, user_agent);
+        }
+        if let Some(accept) = headers.get(header::ACCEPT) {
+            request = request.header(header::ACCEPT, accept);
+        }
+        // Explicitly exclude RANGE header - we want the full file
+
+        match request.send().await {
+            Ok(response) if response.status().is_success() => {
+                info!("Found file on upstream server: {}", file_url);
+                
+                // Get content type from upstream response
+                let content_type = response
+                    .headers()
+                    .get(reqwest_header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                
+                // Derive extension from content type
+                let file_extension = mime_guess::get_mime_extensions_str(&content_type)
+                    .and_then(|exts| exts.first().map(|ext| format!(".{}", ext)))
+                    .unwrap_or_default();
+                
+                // Create temp file with proper extension derived from content type
+                let temp_dir = state.upload_dir.join("temp");
+                let temp_filename = format!("upstream_{}{}", uuid::Uuid::new_v4(), file_extension);
+                let temp_path = temp_dir.join(temp_filename);
+                
+                // Mark this file as being downloaded with shared state
+                let written_len = Arc::new(AtomicU64::new(0));
+                let notify = Arc::new(Notify::new());
+                {
+                    let mut ongoing_downloads = state.ongoing_downloads.write().await;
+                    ongoing_downloads.insert(filename.to_string(), (std::time::Instant::now(), written_len.clone(), notify.clone(), temp_path.clone(), content_type.clone()));
+                    info!("Marked {} as being downloaded with shared state at {} (content-type: {}, extension: {})", filename, temp_path.display(), content_type, file_extension);
+                }
+                
+                return stream_and_save_from_upstream(state, &file_url, response, filename, written_len, notify, temp_path).await;
+            }
+            Ok(response) => {
+                info!(
+                    "Upstream server {} returned status: {}",
+                    file_url,
+                    response.status()
+                );
+            }
+            Err(e) => {
+                warn!("Failed to fetch from upstream {}: {}", file_url, e);
+            }
+        }
+    }
+
+    Err(StatusCode::NOT_FOUND)
+}
+
+/// Stream from an ongoing download (for subsequent requests)
+async fn stream_from_ongoing_download(
+    _state: &AppState,
+    filename: &str,
+    _headers: &HeaderMap,
+    written_len: Arc<AtomicU64>,
+    notify: Arc<Notify>,
+    temp_path: PathBuf,
+    content_type: String,
+) -> Result<Response<Body>, StatusCode> {
+    info!("Streaming immediately from ongoing download for: {}", filename);
+    
+    // Create a reader for the temp file
+    let reader = File::open(&temp_path).await.map_err(|e| {
+        error!("Failed to open temp file for streaming: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    
+    // Create streaming response using helper function
+    let stream = create_tailing_stream(reader, written_len, notify).await;
+    
+    info!("Using stored content type: {} for ongoing download: {}", content_type, filename);
+    
+    // Build response with proper headers using the stored content type
+    let body = Body::from_stream(stream);
+    let mut response = build_streaming_response_headers(&content_type, filename);
+    
+    // Replace the placeholder body with the actual stream
+    *response.body_mut() = body;
+    
+    info!("🚀 Started immediate streaming from ongoing download for: {}", filename);
+    Ok(response)
+}
+
+/// Stream file from upstream server to client while saving to local storage
+async fn stream_and_save_from_upstream(
+    state: &AppState,
+    file_url: &str,
+    upstream_resp: reqwest::Response,
+    filename: &str,
+    written_len: Arc<AtomicU64>,
+    notify: Arc<Notify>,
+    temp_path: PathBuf,
+) -> Result<Response<Body>, StatusCode> {
+    // ---- Header vom Upstream übernehmen
+    let content_type = upstream_resp
+        .headers()
+        .get(reqwest_header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let content_length = upstream_resp.content_length();
+
+    // Check size limit before starting download
+    let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024; // Convert MB to bytes
+    
+    if let Some(content_length) = content_length {
+        if content_length > max_size_bytes {
+            error!(
+                "Upstream file {} too large: {} bytes (max allowed: {} bytes / {} MB)",
+                file_url, content_length, max_size_bytes, state.max_upstream_download_size_mb
+            );
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        info!(
+            "Upstream file size check passed: {} bytes (limit: {} MB)",
+            content_length, state.max_upstream_download_size_mb
+        );
+    } else {
+        warn!(
+            "Upstream file {} has no Content-Length header, proceeding with download (limit: {} MB)",
+            file_url, state.max_upstream_download_size_mb
+        );
+    }
+
+    let extension = content_type.split('/').last().map(|s| s.to_string());
+
+    info!("Starting download from upstream: {} to temp file: {}", file_url, temp_path.display());
+    
+    // Ensure temp directory exists
+    if let Some(parent) = temp_path.parent() {
+        fs::create_dir_all(parent).await.map_err(|e| {
+            error!("create temp dir: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
+
+    // zwei unabhängige Handles
+    info!("Creating writer file handle...");
+    let mut writer = File::create(&temp_path).await.map_err(|e| {
+        error!("create temp file: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    info!("✅ Writer file handle created successfully");
+
+    // Check if file was actually created
+    if !temp_path.exists() {
+        error!("Temp file was not created: {}", temp_path.display());
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    info!(
+        "✅ Temp file exists after creation: {}",
+        temp_path.display()
+    );
+
+    info!("Creating reader file handle...");
+    let reader = File::open(&temp_path).await.map_err(|e| {
+        error!("open temp file for read: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    info!("✅ Reader file handle created successfully");
+
+    // ---- Shared Fortschritt + Notify (passed as parameters)
+
+    // ---- Downloader: liest reqwest-Stream → schreibt Datei, hash, progress++
+    let mut hasher = Sha256::new();
+    let mut body_size: u64 = 0;
+
+    let written_len_dl = written_len.clone();
+    let notify_dl = notify.clone();
+
+    let mut chunks = upstream_resp.bytes_stream(); // echtes Streaming!
+
+    let max_size_bytes_clone = max_size_bytes;
+    let download_task = tokio::spawn(async move {
+        info!("Download task started, beginning to read from upstream stream");
+
+        while let Some(next) = chunks.next().await {
+            let chunk =
+                next.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            
+            // Check size limit during download (in case Content-Length was missing or wrong)
+            let new_size = body_size + chunk.len() as u64;
+            if new_size > max_size_bytes_clone {
+                error!(
+                    "Download exceeded size limit: {} bytes > {} bytes ({} MB limit)",
+                    new_size, max_size_bytes_clone, max_size_bytes_clone / (1024 * 1024)
+                );
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other, 
+                    format!("File too large: {} bytes exceeds limit of {} MB", 
+                        new_size, max_size_bytes_clone / (1024 * 1024))
+                ));
+            }
+            
+            writer.write_all(&chunk).await?;
+            hasher.update(&chunk);
+            body_size += chunk.len() as u64;
+
+            // Fortschritt publizieren und Leser wecken
+            written_len_dl.fetch_add(chunk.len() as u64, Ordering::Release);
+            notify_dl.notify_waiters();
+
+            // Log progress every 1MB
+            if body_size % (1024 * 1024) == 0 {
+                info!(
+                    "Download progress: {} bytes written to temp file (limit: {} MB)",
+                    body_size, max_size_bytes_clone / (1024 * 1024)
+                );
+            }
+        }
+
+        info!("Upstream stream finished, flushing temp file");
+        // Wichtig: flushen, damit Leser alle Bytes sicher sieht
+        writer.flush().await?;
+        info!(
+            "Download completed: {} total bytes, temp file flushed",
+            body_size
+        );
+        std::io::Result::<(String, u64)>::Ok((format!("{:x}", hasher.finalize()), body_size))
+    });
+
+    // ---- Streamer: liest die wachsende Datei ohne den Downloader zu blocken
+    // Use helper function to create the tailing stream
+    let stream = create_tailing_stream(reader, written_len.clone(), notify.clone()).await;
+
+    // ---- Response bauen (Streaming startet sofort)
+    info!("🚀 Starting immediate streaming to client (download runs in background)");
+    let body = Body::from_stream(stream);
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .body(body)
+        .unwrap();
+    
+    // Apply streaming headers
+    response = apply_streaming_headers(response, &content_type, filename);
+    
+    // Add Content-Length if available from upstream
+    if let Some(len) = content_length {
+        response.headers_mut().insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
+    }
+
+    // ---- Nachlauf: Download abschließen, Datei finalisieren & indexieren
+    let state_clone = state.clone();
+    let content_type_clone = content_type.clone();
+    let extension_clone = extension.clone();
+    let file_url_clone = file_url.to_string();
+    let filename_clone = filename.to_string();
+    tokio::spawn(async move {
+        info!("Waiting for download task to complete...");
+        match download_task.await {
+            Ok(Ok((sha256, total))) => {
+                info!("Download task completed successfully, finalizing file");
+                info!("SHA256: {}", sha256);
+                info!("Total bytes: {}", total);
+
+                // final path berechnen
+                let final_path =
+                    get_nested_path(&state_clone.upload_dir, &sha256, extension_clone.as_deref());
+                info!(
+                    "Moving temp file {} to final location: {}",
+                    temp_path.display(),
+                    final_path.display()
+                );
+
+                if let Some(parent) = final_path.parent() {
+                    let _ = fs::create_dir_all(parent).await;
+                }
+                if let Err(e) = fs::rename(&temp_path, &final_path).await {
+                    error!("rename temp -> final failed: {e}");
+                    // Clean up temp file on error
+                    let _ = std::fs::remove_file(&temp_path);
+                    return;
+                }
+                info!("Successfully moved temp file to final location");
+
+                // Index & Stats
+                let key = sha256[..sha256.len().min(64)].to_string();
+                info!("Adding file to index with key: {}", key);
+                state_clone.file_index.write().await.insert(
+                    key.clone(),
+                    FileMetadata {
+                        path: final_path,
+                        extension: extension_clone,
+                        mime_type: Some(content_type_clone),
+                        size: total,
+                        created_at: SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    },
+                );
+                info!("Successfully added file to index");
+
+                let mut n = state_clone.files_downloaded.write().await;
+                *n += 1;
+                let mut t = state_clone.download_throughput_data.write().await;
+                t.push((std::time::Instant::now(), total));
+                if t.len() > 1000 {
+                    t.drain(0..100);
+                }
+
+                info!(
+                    "✅ UPSTREAM DOWNLOAD COMPLETED: {} -> {} ({} bytes)",
+                    file_url_clone, sha256, total
+                );
+                
+                // Remove from ongoing downloads
+                {
+                    let mut ongoing_downloads = state_clone.ongoing_downloads.write().await;
+                    ongoing_downloads.remove(&filename_clone);
+                    info!("Removed {} from ongoing downloads", filename_clone);
+                }
+            }
+            Ok(Err(e)) => {
+                error!("❌ Download task failed: {e}");
+                // Remove from ongoing downloads on error too
+                {
+                    let mut ongoing_downloads = state_clone.ongoing_downloads.write().await;
+                    ongoing_downloads.remove(&filename_clone);
+                    info!("Removed {} from ongoing downloads due to error", filename_clone);
+                }
+            }
+            Err(e) => {
+                error!("❌ Join error: {e}");
+                // Remove from ongoing downloads on error too
+                {
+                    let mut ongoing_downloads = state_clone.ongoing_downloads.write().await;
+                    ongoing_downloads.remove(&filename_clone);
+                    info!("Removed {} from ongoing downloads due to join error", filename_clone);
+                }
+            }
+        }
+    });
+
+    Ok(response)
 }
 
 struct TempFileGuard {
@@ -239,7 +633,6 @@ pub async fn upload_file(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, StatusCode> {
-    
     // Validate Nostr authorization
     let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
         error!("Missing Authorization header");
@@ -387,10 +780,10 @@ pub async fn upload_file(
     {
         let mut files_uploaded = state.files_uploaded.write().await;
         *files_uploaded += 1;
-        
+
         let mut upload_throughput_data = state.upload_throughput_data.write().await;
         upload_throughput_data.push((std::time::Instant::now(), total_bytes as u64));
-        
+
         // Keep only last 1000 entries to prevent memory bloat
         if upload_throughput_data.len() > 1000 {
             upload_throughput_data.drain(0..100);
@@ -411,7 +804,6 @@ pub async fn mirror_blob(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, StatusCode> {
-    
     // Validate Nostr authorization
     let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
         error!("Missing Authorization header");
@@ -539,11 +931,11 @@ pub async fn mirror_blob(
     {
         let mut files_uploaded = state.files_uploaded.write().await;
         *files_uploaded += 1;
-        
+
         // Track upload throughput for mirrored files
         let mut upload_throughput_data = state.upload_throughput_data.write().await;
         upload_throughput_data.push((std::time::Instant::now(), blob_bytes.len() as u64));
-        
+
         // Keep only last 1000 entries to prevent memory bloat
         if upload_throughput_data.len() > 1000 {
             upload_throughput_data.drain(0..100);
@@ -571,6 +963,107 @@ pub async fn serve_index() -> Result<Response, StatusCode> {
         .unwrap())
 }
 
+// ===== HELPER FUNCTIONS FOR STREAMING =====
+
+/// Create a streaming response that reads from a growing file
+async fn create_tailing_stream(
+    reader: File,
+    written_len: Arc<AtomicU64>,
+    notify: Arc<Notify>,
+) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> {
+    stream::unfold(
+        (reader, written_len, notify, 0u64),
+        |state| async move {
+            let (mut reader, written_len, notify, mut pos) = state;
+
+            loop {
+                let available = written_len.load(Ordering::Acquire);
+                if pos < available {
+                    // Es gibt neue Bytes; lese einen moderaten Block
+                    let to_read = std::cmp::min(64 * 1024, (available - pos) as usize);
+                    let mut buf = vec![0u8; to_read];
+
+                    // Seek to current position and read
+                    if let Err(_) = reader.seek(SeekFrom::Start(pos)).await {
+                        return None;
+                    }
+                    let n = match reader.read(&mut buf).await {
+                        Ok(n) => n,
+                        Err(_) => return None,
+                    };
+
+                    if n == 0 {
+                        // EOF erreicht, warten auf mehr Daten
+                        notify.notified().await;
+                        continue;
+                    }
+
+                    pos += n as u64;
+                    buf.truncate(n); // Nur die tatsächlich gelesenen Bytes
+
+                    return Some((
+                        Ok::<Bytes, std::io::Error>(Bytes::from(buf)),
+                        (reader, written_len, notify, pos),
+                    ));
+                } else {
+                    // Warten bis Downloader mehr geschrieben hat
+                    notify.notified().await;
+                }
+            }
+        },
+    )
+}
+
+/// Build response headers for streaming content
+fn build_streaming_response_headers(
+    content_type: &str,
+    filename: &str,
+) -> Response<Body> {
+    let body = Body::from(vec![]); // Placeholder, will be replaced
+    let mut builder = Response::builder().status(StatusCode::OK);
+    
+    builder = builder.header(header::CONTENT_TYPE, content_type);
+    builder = builder.header(header::CACHE_CONTROL, "public, max-age=31536000, immutable");
+    builder = builder.header(header::ACCEPT_RANGES, "bytes");
+    
+    // Add Content-Disposition header to prevent save dialog
+    let filename_display = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let content_disposition = format!("inline; filename=\"{}\"", filename_display);
+    builder = builder.header(header::CONTENT_DISPOSITION, content_disposition);
+    
+    info!("Built response headers: Content-Type={}, Content-Disposition=inline; filename=\"{}\"", content_type, filename_display);
+    
+    builder.body(body).unwrap()
+}
+
+/// Apply streaming headers to an existing response
+fn apply_streaming_headers(
+    mut response: Response<Body>,
+    content_type: &str,
+    filename: &str,
+) -> Response<Body> {
+    let headers = response.headers_mut();
+    
+    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "public, max-age=31536000, immutable".parse().unwrap());
+    headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    
+    // Add Content-Disposition header to prevent save dialog
+    let filename_display = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let content_disposition = format!("inline; filename=\"{}\"", filename_display);
+    headers.insert(header::CONTENT_DISPOSITION, content_disposition.parse().unwrap());
+    
+    info!("Applied streaming headers: Content-Type={}, Content-Disposition=inline; filename=\"{}\"", content_type, filename_display);
+    
+    response
+}
+
 pub async fn method_not_allowed() -> Result<Response, StatusCode> {
     Ok(Response::builder()
         .status(StatusCode::METHOD_NOT_ALLOWED)
@@ -578,17 +1071,15 @@ pub async fn method_not_allowed() -> Result<Response, StatusCode> {
         .unwrap())
 }
 
-async fn serve_file_with_range(path: PathBuf, req: Request<Body>) -> Result<Response, StatusCode> {
+async fn serve_file_with_range(path: PathBuf, headers: HeaderMap) -> Result<Response, StatusCode> {
     use axum::http::header::RANGE;
-    let range_header = req.headers().get(RANGE).and_then(|r| r.to_str().ok());
+    let range_header = headers.get(RANGE).and_then(|r| r.to_str().ok());
 
     let expires_dt = Utc::now() + Duration::days(365);
     let expires_str = expires_dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
     let expires_header = HeaderValue::from_str(&expires_str).unwrap();
 
-    let filename = path.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
+    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let content_disposition = format!("inline; filename=\"{}\"", filename);
 
     let mut file = File::open(&path)
@@ -654,26 +1145,36 @@ pub async fn head_upload(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    
     // Validate Nostr authorization
     let auth = match headers.get(header::AUTHORIZATION) {
         Some(a) => a,
         None => {
-            return Ok(Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::empty()).unwrap());
+            return Ok(Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Body::empty())
+                .unwrap());
         }
     };
     match validate_nostr_auth(
         match auth.to_str() {
             Ok(s) => s,
             Err(_) => {
-                return Ok(Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::empty()).unwrap());
+                return Ok(Response::builder()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .body(Body::empty())
+                    .unwrap());
             }
         },
         &state,
-    ).await {
+    )
+    .await
+    {
         Ok(e) => e,
         Err(_) => {
-            return Ok(Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::empty()).unwrap());
+            return Ok(Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Body::empty())
+                .unwrap());
         }
     };
 
@@ -682,21 +1183,21 @@ pub async fn head_upload(
     let total_files = index.len();
     let total_size: u64 = index.values().map(|m| m.size).sum();
     if total_files >= state.max_total_files || total_size >= state.max_total_size {
-        return Ok(Response::builder().status(StatusCode::INSUFFICIENT_STORAGE).body(Body::empty()).unwrap());
+        return Ok(Response::builder()
+            .status(StatusCode::INSUFFICIENT_STORAGE)
+            .body(Body::empty())
+            .unwrap());
     }
 
     // Compose headers per spec
-    let builder = Response::builder()
-        .status(StatusCode::OK);
+    let builder = Response::builder().status(StatusCode::OK);
     // Optionally add more headers as needed by spec
-    
+
     Ok(builder.body(Body::empty()).unwrap())
 }
 
 /// Handles GET /_stats to return application statistics.
-pub async fn get_stats(
-    State(state): State<AppState>,
-) -> Result<Json<Stats>, StatusCode> {
+pub async fn get_stats(State(state): State<AppState>) -> Result<Json<Stats>, StatusCode> {
     let stats = state.get_stats().await;
     Ok(Json(stats))
 }

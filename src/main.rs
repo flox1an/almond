@@ -79,6 +79,28 @@ async fn load_app_state() -> AppState {
         .parse()
         .expect("Invalid value for MAX_FILE_AGE_DAYS");
 
+    // Parse upstream servers from environment variable
+    let upstream_servers: Vec<String> = env::var("UPSTREAM_SERVERS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|server| {
+            let server = server.trim();
+            if server.is_empty() {
+                None
+            } else {
+                Some(server.to_string())
+            }
+        })
+        .collect();
+
+    // Parse max upstream download size in MB
+    let max_upstream_download_size_mb = env::var("MAX_UPSTREAM_DOWNLOAD_SIZE_MB")
+        .unwrap_or_else(|_| "100".to_string()) // Default: 100MB
+        .parse()
+        .expect("Invalid value for MAX_UPSTREAM_DOWNLOAD_SIZE_MB");
+    
+    info!("Upstream download size limit: {} MB", max_upstream_download_size_mb);
+
     // Parse allowed pubkeys from environment variable
     let allowed_pubkeys: Vec<PublicKey> = env::var("ALLOWED_NPUBS")
         .unwrap_or_default()
@@ -114,6 +136,9 @@ async fn load_app_state() -> AppState {
         files_downloaded: Arc::new(RwLock::new(0)),
         upload_throughput_data: Arc::new(RwLock::new(Vec::new())),
         download_throughput_data: Arc::new(RwLock::new(Vec::new())),
+        upstream_servers,
+        max_upstream_download_size_mb,
+        ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
     }
 }
 
@@ -179,8 +204,7 @@ async fn main() {
     let shutdown = signal::ctrl_c();
 
     // Start the server with graceful shutdown
-    let server = axum_server::bind(addr)
-        .serve(app.into_make_service());
+    let server = axum_server::bind(addr).serve(app.into_make_service());
 
     // Wait for either the server to complete or a shutdown signal
     tokio::select! {
