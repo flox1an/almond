@@ -172,12 +172,33 @@ async fn try_upstream_servers(
     // Check if this file is already being downloaded
     if let Some((written_len, notify, temp_path, content_type)) = {
         let ongoing_downloads = state.ongoing_downloads.read().await;
-        ongoing_downloads.get(filename).map(|(_, written_len, notify, temp_path, content_type)| (written_len.clone(), notify.clone(), temp_path.clone(), content_type.clone()))
+        ongoing_downloads
+            .get(filename)
+            .map(|(_, written_len, notify, temp_path, content_type)| {
+                (
+                    written_len.clone(),
+                    notify.clone(),
+                    temp_path.clone(),
+                    content_type.clone(),
+                )
+            })
     } {
-        info!("File {} is already being downloaded, joining the stream immediately", filename);
-        
+        info!(
+            "File {} is already being downloaded, joining the stream immediately",
+            filename
+        );
+
         // Join the existing download stream immediately
-        return stream_from_ongoing_download(state, filename, headers, written_len, notify, temp_path, content_type).await;
+        return stream_from_ongoing_download(
+            state,
+            filename,
+            headers,
+            written_len,
+            notify,
+            temp_path,
+            content_type,
+        )
+        .await;
     }
 
     let client = Client::new();
@@ -202,7 +223,7 @@ async fn try_upstream_servers(
         match request.send().await {
             Ok(response) if response.status().is_success() => {
                 info!("Found file on upstream server: {}", file_url);
-                
+
                 // Get content type from upstream response
                 let content_type = response
                     .headers()
@@ -210,27 +231,45 @@ async fn try_upstream_servers(
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("application/octet-stream")
                     .to_string();
-                
+
                 // Derive extension from content type
                 let file_extension = mime_guess::get_mime_extensions_str(&content_type)
                     .and_then(|exts| exts.first().map(|ext| format!(".{}", ext)))
                     .unwrap_or_default();
-                
+
                 // Create temp file with proper extension derived from content type
                 let temp_dir = state.upload_dir.join("temp");
                 let temp_filename = format!("upstream_{}{}", uuid::Uuid::new_v4(), file_extension);
                 let temp_path = temp_dir.join(temp_filename);
-                
+
                 // Mark this file as being downloaded with shared state
                 let written_len = Arc::new(AtomicU64::new(0));
                 let notify = Arc::new(Notify::new());
                 {
                     let mut ongoing_downloads = state.ongoing_downloads.write().await;
-                    ongoing_downloads.insert(filename.to_string(), (std::time::Instant::now(), written_len.clone(), notify.clone(), temp_path.clone(), content_type.clone()));
+                    ongoing_downloads.insert(
+                        filename.to_string(),
+                        (
+                            std::time::Instant::now(),
+                            written_len.clone(),
+                            notify.clone(),
+                            temp_path.clone(),
+                            content_type.clone(),
+                        ),
+                    );
                     info!("Marked {} as being downloaded with shared state at {} (content-type: {}, extension: {})", filename, temp_path.display(), content_type, file_extension);
                 }
-                
-                return stream_and_save_from_upstream(state, &file_url, response, filename, written_len, notify, temp_path).await;
+
+                return stream_and_save_from_upstream(
+                    state,
+                    &file_url,
+                    response,
+                    filename,
+                    written_len,
+                    notify,
+                    temp_path,
+                )
+                .await;
             }
             Ok(response) => {
                 info!(
@@ -258,27 +297,36 @@ async fn stream_from_ongoing_download(
     temp_path: PathBuf,
     content_type: String,
 ) -> Result<Response<Body>, StatusCode> {
-    info!("Streaming immediately from ongoing download for: {}", filename);
-    
+    info!(
+        "Streaming immediately from ongoing download for: {}",
+        filename
+    );
+
     // Create a reader for the temp file
     let reader = File::open(&temp_path).await.map_err(|e| {
         error!("Failed to open temp file for streaming: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    
+
     // Create streaming response using helper function
     let stream = create_tailing_stream(reader, written_len, notify).await;
-    
-    info!("Using stored content type: {} for ongoing download: {}", content_type, filename);
-    
+
+    info!(
+        "Using stored content type: {} for ongoing download: {}",
+        content_type, filename
+    );
+
     // Build response with proper headers using the stored content type
     let body = Body::from_stream(stream);
     let mut response = build_streaming_response_headers(&content_type, filename);
-    
+
     // Replace the placeholder body with the actual stream
     *response.body_mut() = body;
-    
-    info!("🚀 Started immediate streaming from ongoing download for: {}", filename);
+
+    info!(
+        "🚀 Started immediate streaming from ongoing download for: {}",
+        filename
+    );
     Ok(response)
 }
 
@@ -304,7 +352,7 @@ async fn stream_and_save_from_upstream(
 
     // Check size limit before starting download
     let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024; // Convert MB to bytes
-    
+
     if let Some(content_length) = content_length {
         if content_length > max_size_bytes {
             error!(
@@ -326,8 +374,12 @@ async fn stream_and_save_from_upstream(
 
     let extension = content_type.split('/').last().map(|s| s.to_string());
 
-    info!("Starting download from upstream: {} to temp file: {}", file_url, temp_path.display());
-    
+    info!(
+        "Starting download from upstream: {} to temp file: {}",
+        file_url,
+        temp_path.display()
+    );
+
     // Ensure temp directory exists
     if let Some(parent) = temp_path.parent() {
         fs::create_dir_all(parent).await.map_err(|e| {
@@ -379,21 +431,26 @@ async fn stream_and_save_from_upstream(
         while let Some(next) = chunks.next().await {
             let chunk =
                 next.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-            
+
             // Check size limit during download (in case Content-Length was missing or wrong)
             let new_size = body_size + chunk.len() as u64;
             if new_size > max_size_bytes_clone {
                 error!(
                     "Download exceeded size limit: {} bytes > {} bytes ({} MB limit)",
-                    new_size, max_size_bytes_clone, max_size_bytes_clone / (1024 * 1024)
+                    new_size,
+                    max_size_bytes_clone,
+                    max_size_bytes_clone / (1024 * 1024)
                 );
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other, 
-                    format!("File too large: {} bytes exceeds limit of {} MB", 
-                        new_size, max_size_bytes_clone / (1024 * 1024))
+                    std::io::ErrorKind::Other,
+                    format!(
+                        "File too large: {} bytes exceeds limit of {} MB",
+                        new_size,
+                        max_size_bytes_clone / (1024 * 1024)
+                    ),
                 ));
             }
-            
+
             writer.write_all(&chunk).await?;
             hasher.update(&chunk);
             body_size += chunk.len() as u64;
@@ -406,7 +463,8 @@ async fn stream_and_save_from_upstream(
             if body_size % (1024 * 1024) == 0 {
                 info!(
                     "Download progress: {} bytes written to temp file (limit: {} MB)",
-                    body_size, max_size_bytes_clone / (1024 * 1024)
+                    body_size,
+                    max_size_bytes_clone / (1024 * 1024)
                 );
             }
         }
@@ -432,13 +490,15 @@ async fn stream_and_save_from_upstream(
         .status(StatusCode::OK)
         .body(body)
         .unwrap();
-    
+
     // Apply streaming headers
     response = apply_streaming_headers(response, &content_type, filename);
-    
+
     // Add Content-Length if available from upstream
     if let Some(len) = content_length {
-        response.headers_mut().insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
+        response
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
     }
 
     // ---- Nachlauf: Download abschließen, Datei finalisieren & indexieren
@@ -505,7 +565,7 @@ async fn stream_and_save_from_upstream(
                     "✅ UPSTREAM DOWNLOAD COMPLETED: {} -> {} ({} bytes)",
                     file_url_clone, sha256, total
                 );
-                
+
                 // Remove from ongoing downloads
                 {
                     let mut ongoing_downloads = state_clone.ongoing_downloads.write().await;
@@ -519,7 +579,10 @@ async fn stream_and_save_from_upstream(
                 {
                     let mut ongoing_downloads = state_clone.ongoing_downloads.write().await;
                     ongoing_downloads.remove(&filename_clone);
-                    info!("Removed {} from ongoing downloads due to error", filename_clone);
+                    info!(
+                        "Removed {} from ongoing downloads due to error",
+                        filename_clone
+                    );
                 }
             }
             Err(e) => {
@@ -528,7 +591,10 @@ async fn stream_and_save_from_upstream(
                 {
                     let mut ongoing_downloads = state_clone.ongoing_downloads.write().await;
                     ongoing_downloads.remove(&filename_clone);
-                    info!("Removed {} from ongoing downloads due to join error", filename_clone);
+                    info!(
+                        "Removed {} from ongoing downloads due to join error",
+                        filename_clone
+                    );
                 }
             }
         }
@@ -971,61 +1037,55 @@ async fn create_tailing_stream(
     written_len: Arc<AtomicU64>,
     notify: Arc<Notify>,
 ) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> {
-    stream::unfold(
-        (reader, written_len, notify, 0u64),
-        |state| async move {
-            let (mut reader, written_len, notify, mut pos) = state;
+    stream::unfold((reader, written_len, notify, 0u64), |state| async move {
+        let (mut reader, written_len, notify, mut pos) = state;
 
-            loop {
-                let available = written_len.load(Ordering::Acquire);
-                if pos < available {
-                    // Es gibt neue Bytes; lese einen moderaten Block
-                    let to_read = std::cmp::min(64 * 1024, (available - pos) as usize);
-                    let mut buf = vec![0u8; to_read];
+        loop {
+            let available = written_len.load(Ordering::Acquire);
+            if pos < available {
+                // Es gibt neue Bytes; lese einen moderaten Block
+                let to_read = std::cmp::min(64 * 1024, (available - pos) as usize);
+                let mut buf = vec![0u8; to_read];
 
-                    // Seek to current position and read
-                    if let Err(_) = reader.seek(SeekFrom::Start(pos)).await {
-                        return None;
-                    }
-                    let n = match reader.read(&mut buf).await {
-                        Ok(n) => n,
-                        Err(_) => return None,
-                    };
-
-                    if n == 0 {
-                        // EOF erreicht, warten auf mehr Daten
-                        notify.notified().await;
-                        continue;
-                    }
-
-                    pos += n as u64;
-                    buf.truncate(n); // Nur die tatsächlich gelesenen Bytes
-
-                    return Some((
-                        Ok::<Bytes, std::io::Error>(Bytes::from(buf)),
-                        (reader, written_len, notify, pos),
-                    ));
-                } else {
-                    // Warten bis Downloader mehr geschrieben hat
-                    notify.notified().await;
+                // Seek to current position and read
+                if let Err(_) = reader.seek(SeekFrom::Start(pos)).await {
+                    return None;
                 }
+                let n = match reader.read(&mut buf).await {
+                    Ok(n) => n,
+                    Err(_) => return None,
+                };
+
+                if n == 0 {
+                    // EOF erreicht, warten auf mehr Daten
+                    notify.notified().await;
+                    continue;
+                }
+
+                pos += n as u64;
+                buf.truncate(n); // Nur die tatsächlich gelesenen Bytes
+
+                return Some((
+                    Ok::<Bytes, std::io::Error>(Bytes::from(buf)),
+                    (reader, written_len, notify, pos),
+                ));
+            } else {
+                // Warten bis Downloader mehr geschrieben hat
+                notify.notified().await;
             }
-        },
-    )
+        }
+    })
 }
 
 /// Build response headers for streaming content
-fn build_streaming_response_headers(
-    content_type: &str,
-    filename: &str,
-) -> Response<Body> {
+fn build_streaming_response_headers(content_type: &str, filename: &str) -> Response<Body> {
     let body = Body::from(vec![]); // Placeholder, will be replaced
     let mut builder = Response::builder().status(StatusCode::OK);
-    
+
     builder = builder.header(header::CONTENT_TYPE, content_type);
     builder = builder.header(header::CACHE_CONTROL, "public, max-age=31536000, immutable");
     builder = builder.header(header::ACCEPT_RANGES, "bytes");
-    
+
     // Add Content-Disposition header to prevent save dialog
     let filename_display = std::path::Path::new(filename)
         .file_name()
@@ -1033,9 +1093,12 @@ fn build_streaming_response_headers(
         .unwrap_or("file");
     let content_disposition = format!("inline; filename=\"{}\"", filename_display);
     builder = builder.header(header::CONTENT_DISPOSITION, content_disposition);
-    
-    info!("Built response headers: Content-Type={}, Content-Disposition=inline; filename=\"{}\"", content_type, filename_display);
-    
+
+    info!(
+        "Built response headers: Content-Type={}, Content-Disposition=inline; filename=\"{}\"",
+        content_type, filename_display
+    );
+
     builder.body(body).unwrap()
 }
 
@@ -1046,21 +1109,30 @@ fn apply_streaming_headers(
     filename: &str,
 ) -> Response<Body> {
     let headers = response.headers_mut();
-    
+
     headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
-    headers.insert(header::CACHE_CONTROL, "public, max-age=31536000, immutable".parse().unwrap());
+    headers.insert(
+        header::CACHE_CONTROL,
+        "public, max-age=31536000, immutable".parse().unwrap(),
+    );
     headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-    
+
     // Add Content-Disposition header to prevent save dialog
     let filename_display = std::path::Path::new(filename)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("file");
     let content_disposition = format!("inline; filename=\"{}\"", filename_display);
-    headers.insert(header::CONTENT_DISPOSITION, content_disposition.parse().unwrap());
-    
-    info!("Applied streaming headers: Content-Type={}, Content-Disposition=inline; filename=\"{}\"", content_type, filename_display);
-    
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        content_disposition.parse().unwrap(),
+    );
+
+    info!(
+        "Applied streaming headers: Content-Type={}, Content-Disposition=inline; filename=\"{}\"",
+        content_type, filename_display
+    );
+
     response
 }
 

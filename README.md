@@ -9,6 +9,14 @@
 
 Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-based authorization and web of trust support.
 
+## Overview
+- Anyone can upload by default, can be locked down by specifing allowed NPUBs or additionally with a web of trust for those NPUBs.
+- Ownership of blobs is NOT tracked, that's why deletion is not supported.
+- The project is best for some specific Blossom usecases:
+  - Personal server locked to one or a few users (`ALLOWED_NPUBS`)
+  - Public upload server with very limited TTL (`MAX_FILE_AGE_DAYS`) or limited size (`MAX_TOTAL_SIZE`).
+  - Caching edge server that serves content from upstream blossom servers (`UPSTREAM_SERVERS`).
+
 ## Features
  - 🌸 Blossom API (BUD-1, BUD-2, BUD-4)
  - 🌸 Temporary file storage with automatic cleanup, first in; first out
@@ -20,8 +28,8 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 
 - `BIND_ADDR`: Address to bind the server to (default: "127.0.0.1:3000")
 - `PUBLIC_URL`: Public URL for the service (default: "http://127.0.0.1:3000")
-- `MAX_TOTAL_SIZE`: Maximum total storage size in MB (default: 99999)
-- `MAX_TOTAL_FILES`: Maximum number of files (default: 1000000)
+- `MAX_TOTAL_SIZE`: Maximum total storage size in MB (default: 99999999)
+- `MAX_TOTAL_FILES`: Maximum number of files (default: 99999999)
 - `CLEANUP_INTERVAL_SECS`: Interval for cleanup checks in seconds (default: 30)
 - `MAX_FILE_AGE_DAYS`: Maximum age of files in days, 0 for no limit (default: 0)
 - `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback (optional)

@@ -55,7 +55,7 @@ async fn load_app_state() -> AppState {
         .expect("MAX_TOTAL_SIZE value too large");
 
     let max_total_files = env::var("MAX_TOTAL_FILES")
-        .unwrap_or_else(|_| "1000000".to_string())
+        .unwrap_or_else(|_| "99999999".to_string())
         .parse::<usize>()
         .expect("Invalid value for MAX_TOTAL_FILES");
 
@@ -79,6 +79,12 @@ async fn load_app_state() -> AppState {
         .parse()
         .expect("Invalid value for MAX_FILE_AGE_DAYS");
 
+    // Parse max upstream download size in MB
+    let max_upstream_download_size_mb = env::var("MAX_UPSTREAM_DOWNLOAD_SIZE_MB")
+        .unwrap_or_else(|_| "100".to_string()) // Default: 100MB
+        .parse()
+        .expect("Invalid value for MAX_UPSTREAM_DOWNLOAD_SIZE_MB");
+
     // Parse upstream servers from environment variable
     let upstream_servers: Vec<String> = env::var("UPSTREAM_SERVERS")
         .unwrap_or_default()
@@ -95,15 +101,11 @@ async fn load_app_state() -> AppState {
 
     if !upstream_servers.is_empty() {
         info!("Upstream servers: {:?}", upstream_servers);
+        info!(
+            "Upstream download size limit: {} MB",
+            max_upstream_download_size_mb
+        );
     }
-
-    // Parse max upstream download size in MB
-    let max_upstream_download_size_mb = env::var("MAX_UPSTREAM_DOWNLOAD_SIZE_MB")
-        .unwrap_or_else(|_| "100".to_string()) // Default: 100MB
-        .parse()
-        .expect("Invalid value for MAX_UPSTREAM_DOWNLOAD_SIZE_MB");
-    
-    info!("Upstream download size limit: {} MB", max_upstream_download_size_mb);
 
     // Parse allowed pubkeys from environment variable
     let allowed_pubkeys: Vec<PublicKey> = env::var("ALLOWED_NPUBS")
