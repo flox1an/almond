@@ -10,7 +10,7 @@
 Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-based authorization and web of trust support.
 
 ## Overview
-- Anyone can upload by default, can be locked down by specifing allowed NPUBs or additionally with a web of trust for those NPUBs.
+- Anyone can upload by default, can be locked down by specifying allowed NPUBs or additionally with a web of trust for those NPUBs.
 - Ownership of blobs is NOT tracked, that's why deletion is not supported.
 - The project is best for some specific Blossom usecases:
   - Personal server locked to one or a few users (`ALLOWED_NPUBS`)
@@ -28,6 +28,7 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 
 - `BIND_ADDR`: Address to bind the server to (default: "127.0.0.1:3000")
 - `PUBLIC_URL`: Public URL for the service (default: "http://127.0.0.1:3000")
+- `STORAGE_PATH`: Path where files are stored (default: "./files")
 - `MAX_TOTAL_SIZE`: Maximum total storage size in MB (default: 99999999)
 - `MAX_TOTAL_FILES`: Maximum number of files (default: 99999999)
 - `CLEANUP_INTERVAL_SECS`: Interval for cleanup checks in seconds (default: 30)
@@ -36,6 +37,14 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 - `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: 100)
 - `ALLOW_WOT`: Enable web of trust (optional)
 - `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys (optional)
+
+## Internals
+- Blobs are stored in `STORAGE_PATH` within a folder structure with a two layer hierarchy of folders with the first and second letter of the SHA256 storage hash, e.g. 
+  ```bash
+  ./files/5/3/53860ca3a463ad7170fe1f1e5b08bf4b66422c72b594a329e001a69e07f2e50e.mp4
+  ```
+- File age is tracked by using the file creation date.
+- When starting `almond` the folder structure is read into memory, i.e. changes to the folders are not recognized until the app is restarted.
 
 ## Docker
 
@@ -52,10 +61,16 @@ Basic run:
 docker run -p 3000:3000 -v /path/to/files:/app/files ghcr.io/flox1an/almond
 ```
 
+With custom storage path:
+```bash
+docker run -p 3000:3000 -v /custom/storage:/custom/storage -e STORAGE_PATH=/custom/storage ghcr.io/flox1an/almond
+```
+
 With custom configuration:
 ```bash
 docker run -p 3000:3000 \
   -v /path/to/files:/app/files \
+  -e STORAGE_PATH=/app/files \
   -e PUBLIC_URL=https://your-domain.com \
   -e ALLOW_WOT=true \
   -e ALLOWED_NPUBS=npub1... \
@@ -72,6 +87,7 @@ All environment variables can be overridden when running the container:
 
 - `BIND_ADDR`: Server bind address
 - `PUBLIC_URL`: Public URL for the service
+- `STORAGE_PATH`: Path where files are stored
 - `MAX_TOTAL_SIZE`: Maximum storage size in MB
 - `MAX_TOTAL_FILES`: Maximum number of files
 - `CLEANUP_INTERVAL_SECS`: Cleanup interval in seconds

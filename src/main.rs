@@ -63,8 +63,11 @@ async fn load_app_state() -> AppState {
 
     let public_url = env::var("PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
 
-    let upload_dir = PathBuf::from("./files");
+    // Parse storage path from environment variable
+    let storage_path = env::var("STORAGE_PATH").unwrap_or_else(|_| "./files".to_string());
+    let upload_dir = PathBuf::from(&storage_path);
     fs::create_dir_all(&upload_dir).await.unwrap();
+    info!("Storage path: {}", upload_dir.display());
 
     let file_index = Arc::new(RwLock::new(HashMap::new()));
     build_file_index(&upload_dir, &file_index).await;
