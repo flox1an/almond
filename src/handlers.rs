@@ -1500,12 +1500,13 @@ async fn validate_chunk_upload_auth(event: &Event, sha256: &str, chunk_length: &
             }
         }
     }
-
+ /* ignore chunk x tags in auth for now 
+ 
     if !has_chunk_hash {
         error!("Chunk hash {} not found in x tags", chunk_length);
         return false;
     }
-
+*/
     if !has_final_hash {
         error!("Final blob hash {} not found in x tags", sha256);
         return false;
