@@ -352,7 +352,7 @@ async fn stream_and_save_from_upstream(
 
     // Check size limit before starting download
     let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024; // Convert MB to bytes
-
+//TODO this check should already be done in the try_upstream_servers function
     if let Some(content_length) = content_length {
         if content_length > max_size_bytes {
             error!(
@@ -1381,6 +1381,14 @@ pub async fn patch_upload(
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    // Validate chunk size doesn't exceed maximum allowed chunk size
+    let max_chunk_size_bytes = state.max_chunk_size_mb * 1024 * 1024;
+    if content_length > max_chunk_size_bytes {
+        error!("Chunk size {} exceeds maximum allowed chunk size {} MB", 
+               content_length, state.max_chunk_size_mb);
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     // Validate offset + length doesn't exceed upload length
     if upload_offset + content_length > upload_length {
         error!("Chunk exceeds upload length: offset {} + length {} > {}", 
@@ -1487,13 +1495,13 @@ async fn validate_chunk_upload_auth(event: &Event, sha256: &str, chunk_length: &
 
     // For chunk uploads, we need to validate that the chunk hash is in the x tags
     // and that the final blob hash is also present
-    let mut has_chunk_hash = false;
+    let mut _has_chunk_hash = false;
     let mut has_final_hash = false;
 
     for x_tag in x_tags {
         if let Some(content) = x_tag.content() {
             if content == chunk_length {
-                has_chunk_hash = true;
+                _has_chunk_hash = true;
             }
             if content == sha256 {
                 has_final_hash = true;
@@ -1502,7 +1510,7 @@ async fn validate_chunk_upload_auth(event: &Event, sha256: &str, chunk_length: &
     }
  /* ignore chunk x tags in auth for now 
  
-    if !has_chunk_hash {
+    if !_has_chunk_hash {
         error!("Chunk hash {} not found in x tags", chunk_length);
         return false;
     }

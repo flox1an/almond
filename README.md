@@ -35,6 +35,7 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 - `MAX_FILE_AGE_DAYS`: Maximum age of files in days, 0 for no limit (default: 0)
 - `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback (optional)
 - `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: 100)
+- `MAX_CHUNK_SIZE_MB`: Maximum size for individual chunks in chunked uploads in MB (default: 100)
 - `ALLOW_WOT`: Enable web of trust (optional)
 - `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys (optional)
 
@@ -78,6 +79,7 @@ docker run -p 3000:3000 \
   -e MAX_FILE_AGE_DAYS=7 \
   -e UPSTREAM_SERVERS=https://backup1.com,https://backup2.com \
   -e MAX_UPSTREAM_DOWNLOAD_SIZE_MB=500 \
+  -e MAX_CHUNK_SIZE_MB=200 \
   almond
 ```
 

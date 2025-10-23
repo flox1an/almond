@@ -20,6 +20,7 @@ use tracing::{error, info};
 use tracing_subscriber;
 
 use axum::{
+    extract::DefaultBodyLimit,
     middleware::from_fn,
     routing::{delete, get, options, patch, put},
 };
@@ -27,6 +28,9 @@ use handlers::*;
 use middleware::cors_middleware;
 
 pub async fn create_app(state: AppState) -> Router {
+    // Calculate max chunk size in bytes
+    let max_chunk_size_bytes = (state.max_chunk_size_mb * 1024 * 1024) as usize;
+    
     Router::new()
         .route("/upload", put(upload_file).head(head_upload).options(options_upload).patch(patch_upload))
         .route("/list", get(list_blobs))
@@ -40,6 +44,7 @@ pub async fn create_app(state: AppState) -> Router {
             "/:filename",
             get(handle_file_request).head(handle_file_request),
         )
+        .layer(DefaultBodyLimit::max(max_chunk_size_bytes))
         .layer(from_fn(cors_middleware))
         .with_state(state)
 }
@@ -87,6 +92,12 @@ async fn load_app_state() -> AppState {
         .unwrap_or_else(|_| "100".to_string()) // Default: 100MB
         .parse()
         .expect("Invalid value for MAX_UPSTREAM_DOWNLOAD_SIZE_MB");
+
+    // Parse max chunk size in MB for chunked uploads
+    let max_chunk_size_mb = env::var("MAX_CHUNK_SIZE_MB")
+        .unwrap_or_else(|_| "100".to_string()) // Default: 100MB
+        .parse()
+        .expect("Invalid value for MAX_CHUNK_SIZE_MB");
 
     // Parse upstream servers from environment variable
     let upstream_servers: Vec<String> = env::var("UPSTREAM_SERVERS")
@@ -147,6 +158,7 @@ async fn load_app_state() -> AppState {
         download_throughput_data: Arc::new(RwLock::new(Vec::new())),
         upstream_servers,
         max_upstream_download_size_mb,
+        max_chunk_size_mb,
         ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
         chunk_uploads: Arc::new(RwLock::new(HashMap::new())),
     }
