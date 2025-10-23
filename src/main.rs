@@ -21,14 +21,14 @@ use tracing_subscriber;
 
 use axum::{
     middleware::from_fn,
-    routing::{delete, get, put},
+    routing::{delete, get, options, patch, put},
 };
 use handlers::*;
 use middleware::cors_middleware;
 
 pub async fn create_app(state: AppState) -> Router {
     Router::new()
-        .route("/upload", put(upload_file).head(head_upload))
+        .route("/upload", put(upload_file).head(head_upload).options(options_upload).patch(patch_upload))
         .route("/list", get(list_blobs))
         .route("/list/:id", get(list_blobs))
         .route("/mirror", put(mirror_blob))
@@ -148,6 +148,7 @@ async fn load_app_state() -> AppState {
         upstream_servers,
         max_upstream_download_size_mb,
         ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
+        chunk_uploads: Arc::new(RwLock::new(HashMap::new())),
     }
 }
 

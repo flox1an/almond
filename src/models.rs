@@ -39,6 +39,7 @@ pub struct AppState {
     pub max_upstream_download_size_mb: u64,
     pub ongoing_downloads:
         Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>,
+    pub chunk_uploads: Arc<RwLock<HashMap<String, ChunkUpload>>>,
 }
 
 impl AppState {
@@ -171,4 +172,21 @@ pub struct Stats {
 pub struct ListQuery {
     pub since: Option<u64>,
     pub until: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct ChunkUpload {
+    pub sha256: String,
+    pub upload_type: String,
+    pub upload_length: u64,
+    pub temp_path: PathBuf,
+    pub chunks: Vec<ChunkInfo>,
+    pub created_at: Instant,
+}
+
+#[derive(Clone)]
+pub struct ChunkInfo {
+    pub offset: u64,
+    pub length: u64,
+    pub data: Vec<u8>,
 }

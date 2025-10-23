@@ -35,7 +35,7 @@ use tokio_util::io::ReaderStream;
 use tracing::{error, info, warn};
 use uuid;
 
-use crate::models::{AppState, BlobDescriptor, FileMetadata, ListQuery, Stats};
+use crate::models::{AppState, BlobDescriptor, ChunkInfo, ChunkUpload, FileMetadata, ListQuery, Stats};
 use crate::utils::{find_file, get_nested_path, get_sha256_hash_from_filename, parse_range_header};
 
 pub async fn list_blobs(
@@ -1272,4 +1272,326 @@ pub async fn head_upload(
 pub async fn get_stats(State(state): State<AppState>) -> Result<Json<Stats>, StatusCode> {
     let stats = state.get_stats().await;
     Ok(Json(stats))
+}
+
+/// Handles OPTIONS /upload to signal support for multi-part uploads
+pub async fn options_upload() -> Result<Response, StatusCode> {
+    Ok(Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(header::ALLOW, "PUT, HEAD, OPTIONS, PATCH")
+        .body(Body::empty())
+        .unwrap())
+}
+
+/// Handles PATCH /upload for chunked uploads
+pub async fn patch_upload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    req: Request<Body>,
+) -> Result<Response, StatusCode> {
+    // Extract required headers
+    let sha256 = headers.get("X-SHA-256")
+        .and_then(|h| h.to_str().ok())
+        .ok_or_else(|| {
+            error!("Missing X-SHA-256 header");
+            StatusCode::BAD_REQUEST
+        })?;
+
+    let upload_type = headers.get("Upload-Type")
+        .and_then(|h| h.to_str().ok())
+        .ok_or_else(|| {
+            error!("Missing Upload-Type header");
+            StatusCode::BAD_REQUEST
+        })?;
+
+    let upload_length = headers.get("Upload-Length")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or_else(|| {
+            error!("Missing or invalid Upload-Length header");
+            StatusCode::BAD_REQUEST
+        })?;
+
+    let content_length = headers.get(header::CONTENT_LENGTH)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or_else(|| {
+            error!("Missing or invalid Content-Length header");
+            StatusCode::BAD_REQUEST
+        })?;
+
+    let upload_offset = headers.get("Upload-Offset")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or_else(|| {
+            error!("Missing or invalid Upload-Offset header");
+            StatusCode::BAD_REQUEST
+        })?;
+
+    let content_type = headers.get(header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .ok_or_else(|| {
+            error!("Missing Content-Type header");
+            StatusCode::BAD_REQUEST
+        })?;
+
+    // Validate Content-Type is application/octet-stream
+    if content_type != "application/octet-stream" {
+        error!("Invalid Content-Type: {}", content_type);
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Validate Nostr authorization
+    let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
+        error!("Missing Authorization header");
+        StatusCode::UNAUTHORIZED
+    })?;
+
+    let auth_event: Event = validate_nostr_auth(
+        auth.to_str().map_err(|_| {
+            error!("Invalid Authorization header format");
+            StatusCode::UNAUTHORIZED
+        })?,
+        &state,
+    )
+    .await?;
+
+    // Validate authorization event has required tags
+    if !validate_chunk_upload_auth(&auth_event, sha256, &content_length.to_string()).await {
+        error!("Invalid authorization event for chunk upload");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // Read chunk data
+    let body: Body = req.into_body();
+    let mut stream = body.into_data_stream();
+    let mut chunk_data = Vec::new();
+
+    while let Some(chunk) = stream.next().await {
+        let data = chunk.map_err(|e| {
+            error!("Failed to read chunk: {}", e);
+            StatusCode::BAD_REQUEST
+        })?;
+        chunk_data.extend_from_slice(&data);
+    }
+
+    // Validate chunk size matches Content-Length
+    if chunk_data.len() as u64 != content_length {
+        error!("Chunk size mismatch: expected {}, got {}", content_length, chunk_data.len());
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Validate offset + length doesn't exceed upload length
+    if upload_offset + content_length > upload_length {
+        error!("Chunk exceeds upload length: offset {} + length {} > {}", 
+               upload_offset, content_length, upload_length);
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Get or create chunk upload
+    let mut chunk_uploads = state.chunk_uploads.write().await;
+    let chunk_upload = chunk_uploads.entry(sha256.to_string()).or_insert_with(|| {
+        let temp_dir = state.upload_dir.join("temp");
+        let temp_path = temp_dir.join(format!("chunk_upload_{}", uuid::Uuid::new_v4()));
+        ChunkUpload {
+            sha256: sha256.to_string(),
+            upload_type: upload_type.to_string(),
+            upload_length,
+            temp_path,
+            chunks: Vec::new(),
+            created_at: std::time::Instant::now(),
+        }
+    });
+
+    // Validate upload parameters match
+    if chunk_upload.upload_type != upload_type || chunk_upload.upload_length != upload_length {
+        error!("Upload parameters mismatch for existing upload");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Add chunk info
+    let chunk_info = ChunkInfo {
+        offset: upload_offset,
+        length: content_length,
+        data: chunk_data,
+    };
+
+    chunk_upload.chunks.push(chunk_info);
+
+    // Check if upload is complete
+    let total_received: u64 = chunk_upload.chunks.iter().map(|c| c.length).sum();
+    
+    if total_received >= upload_length {
+        // Upload is complete, reconstruct the final blob
+        match reconstruct_final_blob(&state, chunk_upload, sha256).await {
+            Ok(descriptor) => {
+                // Remove from chunk uploads
+                chunk_uploads.remove(sha256);
+                
+                // Track upload statistics
+                {
+                    let mut files_uploaded = state.files_uploaded.write().await;
+                    *files_uploaded += 1;
+
+                    let mut upload_throughput_data = state.upload_throughput_data.write().await;
+                    upload_throughput_data.push((std::time::Instant::now(), upload_length));
+
+                    if upload_throughput_data.len() > 1000 {
+                        upload_throughput_data.drain(0..100);
+                    }
+                }
+
+                // Queue cleanup job
+                let mut changes_pending = state.changes_pending.write().await;
+                *changes_pending = true;
+
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_string(&descriptor).unwrap()))
+                    .unwrap())
+            }
+            Err(e) => {
+                error!("Failed to reconstruct final blob: {}", e);
+                chunk_uploads.remove(sha256);
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        }
+    } else {
+        // Upload not complete, return 204 No Content
+        Ok(Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Body::empty())
+            .unwrap())
+    }
+}
+
+/// Validate authorization event for chunk uploads
+async fn validate_chunk_upload_auth(event: &Event, sha256: &str, chunk_length: &str) -> bool {
+    // Check if the event has a 't' tag set to 'upload'
+    let t_tag = event.tags.find(TagKind::Custom("t".into()));
+    if t_tag.is_none() || t_tag.unwrap().content() != Some("upload") {
+        error!("Missing or invalid 't' tag for chunk upload");
+        return false;
+    }
+
+    // Check if the event has an 'x' tag with the chunk hash
+    let x_tags: Vec<_> = event.tags.iter()
+        .filter(|tag| tag.kind() == TagKind::Custom("x".into()))
+        .collect();
+
+    if x_tags.is_empty() {
+        error!("No 'x' tags found for chunk upload");
+        return false;
+    }
+
+    // For chunk uploads, we need to validate that the chunk hash is in the x tags
+    // and that the final blob hash is also present
+    let mut has_chunk_hash = false;
+    let mut has_final_hash = false;
+
+    for x_tag in x_tags {
+        if let Some(content) = x_tag.content() {
+            if content == chunk_length {
+                has_chunk_hash = true;
+            }
+            if content == sha256 {
+                has_final_hash = true;
+            }
+        }
+    }
+
+    if !has_chunk_hash {
+        error!("Chunk hash {} not found in x tags", chunk_length);
+        return false;
+    }
+
+    if !has_final_hash {
+        error!("Final blob hash {} not found in x tags", sha256);
+        return false;
+    }
+
+    true
+}
+
+/// Reconstruct the final blob from chunks
+async fn reconstruct_final_blob(
+    state: &AppState,
+    chunk_upload: &ChunkUpload,
+    expected_sha256: &str,
+) -> Result<BlobDescriptor, String> {
+    // Sort chunks by offset
+    let mut sorted_chunks = chunk_upload.chunks.clone();
+    sorted_chunks.sort_by_key(|c| c.offset);
+
+    // Validate that chunks cover the entire upload length
+    let mut expected_offset = 0;
+    for chunk in &sorted_chunks {
+        if chunk.offset != expected_offset {
+            return Err(format!("Gap in chunk coverage at offset {}", expected_offset));
+        }
+        expected_offset += chunk.length;
+    }
+
+    if expected_offset != chunk_upload.upload_length {
+        return Err(format!("Chunks don't cover full upload length: {} vs {}", 
+                           expected_offset, chunk_upload.upload_length));
+    }
+
+    // Create temp file for reconstruction
+    let temp_dir = state.upload_dir.join("temp");
+    fs::create_dir_all(&temp_dir).await.map_err(|e| format!("Failed to create temp dir: {}", e))?;
+
+    let temp_path = temp_dir.join(format!("reconstruct_{}", uuid::Uuid::new_v4()));
+    let mut temp_file = File::create(&temp_path).await.map_err(|e| format!("Failed to create temp file: {}", e))?;
+
+    // Write chunks to temp file in order
+    let mut hasher = Sha256::new();
+    for chunk in &sorted_chunks {
+        temp_file.write_all(&chunk.data).await.map_err(|e| format!("Failed to write chunk: {}", e))?;
+        hasher.update(&chunk.data);
+    }
+
+    temp_file.sync_all().await.map_err(|e| format!("Failed to sync temp file: {}", e))?;
+    drop(temp_file);
+
+    // Verify SHA256 hash of the reconstructed file matches the expected hash
+    let calculated_sha256 = format!("{:x}", hasher.finalize());
+    if calculated_sha256 != expected_sha256 {
+        let _ = fs::remove_file(&temp_path).await; // Clean up temp file
+        return Err(format!("SHA256 mismatch: expected {}, got {}", expected_sha256, calculated_sha256));
+    }
+
+    // Move to final location using the expected SHA256 (which we just verified matches)
+    let extension = chunk_upload.upload_type
+        .split('/')
+        .last()
+        .map(|s| s.to_string());
+    
+    let final_path = get_nested_path(&state.upload_dir, expected_sha256, extension.as_deref());
+    
+    if let Some(parent) = final_path.parent() {
+        fs::create_dir_all(parent).await.map_err(|e| format!("Failed to create directory: {}", e))?;
+    }
+
+    fs::rename(&temp_path, &final_path).await.map_err(|e| format!("Failed to move temp file: {}", e))?;
+
+    // Add to file index using the expected SHA256 (which we just verified matches)
+    let key = expected_sha256[..64.min(expected_sha256.len())].to_string();
+    state.file_index.write().await.insert(
+        key.clone(),
+        FileMetadata {
+            path: final_path.clone(),
+            extension: extension.clone(),
+            mime_type: Some(chunk_upload.upload_type.clone()),
+            size: chunk_upload.upload_length,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        },
+    );
+
+    // Create blob descriptor using the expected SHA256
+    Ok(state.create_blob_descriptor(expected_sha256, chunk_upload.upload_length, Some(chunk_upload.upload_type.clone())))
 }
