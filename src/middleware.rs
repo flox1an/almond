@@ -16,7 +16,7 @@ pub async fn cors_middleware(req: Request<Body>, next: Next) -> Response {
             )
             .header(
                 header::ACCESS_CONTROL_ALLOW_HEADERS,
-                "Content-Type, authorization, x-sha-256, x-content-length, Content-Length, x-content-type, upload-type, upload-length, upload-offset, content-range",
+                "Content-Type, authorization, x-sha-256, x-content-length, Content-Length, x-content-type, upload-type, upload-length, upload-offset",
             )
             .header(header::ACCESS_CONTROL_EXPOSE_HEADERS, "Content-Length, Allow")
             .header(header::ACCESS_CONTROL_MAX_AGE, "86400")

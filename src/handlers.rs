@@ -1446,6 +1446,14 @@ pub async fn patch_upload(
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    // Check for duplicate chunks with the same offset
+    if chunk_upload.chunks.iter().any(|c| c.offset == upload_offset) {
+        error!("Duplicate chunk at offset {} for upload {}", upload_offset, sha256);
+        // Clean up the chunk file
+        let _ = fs::remove_file(&chunk_path).await;
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     // Add chunk info
     let chunk_info = ChunkInfo {
         offset: upload_offset,
@@ -1458,8 +1466,14 @@ pub async fn patch_upload(
     // Check if upload is complete
     let total_received: u64 = chunk_upload.chunks.iter().map(|c| c.length).sum();
     
+    info!("Chunk upload progress: {}/{} bytes ({} chunks)", total_received, upload_length, chunk_upload.chunks.len());
+    
     if total_received >= upload_length {
         // Upload is complete, reconstruct the final blob
+        if total_received > upload_length {
+            warn!("Received more data than expected: {} > {} (possible overlapping chunks)", total_received, upload_length);
+        }
+        info!("Upload complete! Reconstructing final blob for {} (received: {}, expected: {})", sha256, total_received, upload_length);
         match reconstruct_final_blob(&state, chunk_upload, sha256).await {
             Ok(descriptor) => {
                 // Remove from chunk uploads
@@ -1482,6 +1496,7 @@ pub async fn patch_upload(
                 let mut changes_pending = state.changes_pending.write().await;
                 *changes_pending = true;
 
+                info!("Successfully reconstructed blob: {} ({} bytes)", sha256, descriptor.size);
                 Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "application/json")
@@ -1496,6 +1511,7 @@ pub async fn patch_upload(
         }
     } else {
         // Upload not complete, return 204 No Content
+        info!("Chunk accepted for upload {}: {}/{} bytes remaining", sha256, upload_length - total_received, upload_length);
         Ok(Response::builder()
             .status(StatusCode::NO_CONTENT)
             .body(Body::empty())
