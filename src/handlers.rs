@@ -1371,7 +1371,8 @@ pub async fn patch_upload(
 
     // Create a unique file for this chunk
     let chunk_filename = format!("chunk_{}_{}_{}", sha256, upload_offset, uuid::Uuid::new_v4());
-    let chunk_path = temp_dir.join(chunk_filename);
+    let chunk_path = temp_dir.join(&chunk_filename);
+    info!("💾 Creating chunk file: {} (offset: {}, length: {})", chunk_filename, upload_offset, content_length);
     
     // Stream chunk data directly to file
     let body: Body = req.into_body();
@@ -1382,6 +1383,7 @@ pub async fn patch_upload(
     })?;
 
     let mut total_written = 0u64;
+    let mut chunk_count = 0;
     while let Some(chunk) = stream.next().await {
         let data = chunk.map_err(|e| {
             error!("Failed to read chunk: {}", e);
@@ -1393,7 +1395,15 @@ pub async fn patch_upload(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
         total_written += data.len() as u64;
+        chunk_count += 1;
+        
+        // Log progress for large chunks
+        if data.len() > 1024 * 1024 { // Log for chunks > 1MB
+            info!("📊 Chunk streaming progress: {} bytes written ({} sub-chunks)", total_written, chunk_count);
+        }
     }
+    
+    info!("✅ Chunk data written to file: {} bytes in {} sub-chunks", total_written, chunk_count);
 
     // Ensure all data is written to disk
     chunk_file.sync_all().await.map_err(|e| {
@@ -1404,11 +1414,13 @@ pub async fn patch_upload(
 
     // Validate chunk size matches Content-Length
     if total_written != content_length {
-        error!("Chunk size mismatch: expected {}, got {}", content_length, total_written);
+        error!("❌ Chunk size mismatch: expected {}, got {}", content_length, total_written);
         // Clean up the chunk file on error
         let _ = fs::remove_file(&chunk_path).await;
         return Err(StatusCode::BAD_REQUEST);
     }
+    
+    info!("✅ Chunk validation passed: {} bytes (offset: {})", total_written, upload_offset);
 
     // Validate chunk size doesn't exceed maximum allowed chunk size
     let max_chunk_size_bytes = state.max_chunk_size_mb * 1024 * 1024;
@@ -1427,6 +1439,7 @@ pub async fn patch_upload(
 
     // Get or create chunk upload
     let mut chunk_uploads = state.chunk_uploads.write().await;
+    let is_new_upload = !chunk_uploads.contains_key(sha256);
     let chunk_upload = chunk_uploads.entry(sha256.to_string()).or_insert_with(|| {
         let temp_dir = state.upload_dir.join("temp");
         let temp_path = temp_dir.join(format!("chunk_upload_{}", uuid::Uuid::new_v4()));
@@ -1439,6 +1452,12 @@ pub async fn patch_upload(
             created_at: std::time::Instant::now(),
         }
     });
+
+    if is_new_upload {
+        info!("🚀 Starting new chunked upload: {} ({} bytes, type: {})", sha256, upload_length, upload_type);
+    } else {
+        info!("📦 Adding chunk to existing upload: {} (offset: {}, length: {})", sha256, upload_offset, content_length);
+    }
 
     // Validate upload parameters match
     if chunk_upload.upload_type != upload_type || chunk_upload.upload_length != upload_length {
@@ -1465,19 +1484,31 @@ pub async fn patch_upload(
 
     // Check if upload is complete
     let total_received: u64 = chunk_upload.chunks.iter().map(|c| c.length).sum();
+    let progress_percent = (total_received as f64 / upload_length as f64 * 100.0) as u8;
     
-    info!("Chunk upload progress: {}/{} bytes ({} chunks)", total_received, upload_length, chunk_upload.chunks.len());
+    info!("📈 Chunk upload progress: {}/{} bytes ({}%) - {} chunks", 
+          total_received, upload_length, progress_percent, chunk_upload.chunks.len());
     
     if total_received >= upload_length {
         // Upload is complete, reconstruct the final blob
         if total_received > upload_length {
-            warn!("Received more data than expected: {} > {} (possible overlapping chunks)", total_received, upload_length);
+            warn!("⚠️  Received more data than expected: {} > {} (possible overlapping chunks)", total_received, upload_length);
         }
-        info!("Upload complete! Reconstructing final blob for {} (received: {}, expected: {})", sha256, total_received, upload_length);
-        match reconstruct_final_blob(&state, chunk_upload, sha256).await {
+        info!("🎉 Upload complete! Reconstructing final blob for {} (received: {}, expected: {})", sha256, total_received, upload_length);
+        
+        // Clone the chunk upload data and release the lock before reconstruction
+        let chunk_upload_data = chunk_upload.clone();
+        drop(chunk_uploads);
+        
+        let result = reconstruct_final_blob(&state, &chunk_upload_data, sha256).await;
+        
+        match result {
             Ok(descriptor) => {
-                // Remove from chunk uploads
-                chunk_uploads.remove(sha256);
+                // Remove from chunk uploads after reconstruction
+                {
+                    let mut chunk_uploads = state.chunk_uploads.write().await;
+                    chunk_uploads.remove(sha256);
+                }
                 
                 // Track upload statistics
                 {
@@ -1496,7 +1527,9 @@ pub async fn patch_upload(
                 let mut changes_pending = state.changes_pending.write().await;
                 *changes_pending = true;
 
-                info!("Successfully reconstructed blob: {} ({} bytes)", sha256, descriptor.size);
+                info!("🎯 Successfully reconstructed blob: {} ({} bytes) - URL: {}", 
+                      sha256, descriptor.size, descriptor.url);
+                info!("🏁 Chunked upload completed successfully: {} in {} chunks", sha256, chunk_upload_data.chunks.len());
                 Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "application/json")
@@ -1505,13 +1538,19 @@ pub async fn patch_upload(
             }
             Err(e) => {
                 error!("Failed to reconstruct final blob: {}", e);
-                chunk_uploads.remove(sha256);
+                {
+                    let mut chunk_uploads = state.chunk_uploads.write().await;
+                    chunk_uploads.remove(sha256);
+                }
                 Err(StatusCode::INTERNAL_SERVER_ERROR)
             }
         }
     } else {
         // Upload not complete, return 204 No Content
-        info!("Chunk accepted for upload {}: {}/{} bytes remaining", sha256, upload_length - total_received, upload_length);
+        let remaining_bytes = upload_length - total_received;
+        let remaining_percent = (remaining_bytes as f64 / upload_length as f64 * 100.0) as u8;
+        info!("⏳ Chunk accepted for upload {}: {} bytes remaining ({}%) - {} chunks received", 
+              sha256, remaining_bytes, remaining_percent, chunk_upload.chunks.len());
         Ok(Response::builder()
             .status(StatusCode::NO_CONTENT)
             .body(Body::empty())
@@ -1574,34 +1613,50 @@ async fn reconstruct_final_blob(
     chunk_upload: &ChunkUpload,
     expected_sha256: &str,
 ) -> Result<BlobDescriptor, String> {
+    info!("🔧 Starting blob reconstruction for {} ({} chunks, {} bytes)", 
+          expected_sha256, chunk_upload.chunks.len(), chunk_upload.upload_length);
+    
     // Sort chunks by offset
     let mut sorted_chunks = chunk_upload.chunks.clone();
     sorted_chunks.sort_by_key(|c| c.offset);
+    
+    info!("📋 Chunk order: {:?}", sorted_chunks.iter().map(|c| (c.offset, c.length)).collect::<Vec<_>>());
 
     // Validate that chunks cover the entire upload length
     let mut expected_offset = 0;
-    for chunk in &sorted_chunks {
+    for (i, chunk) in sorted_chunks.iter().enumerate() {
         if chunk.offset != expected_offset {
-            return Err(format!("Gap in chunk coverage at offset {}", expected_offset));
+            return Err(format!("Gap in chunk coverage at offset {} (chunk {}: offset {}, length {})", 
+                              expected_offset, i, chunk.offset, chunk.length));
         }
         expected_offset += chunk.length;
+        info!("✅ Chunk {} validated: offset {}, length {} -> total: {}", 
+              i, chunk.offset, chunk.length, expected_offset);
     }
 
     if expected_offset != chunk_upload.upload_length {
         return Err(format!("Chunks don't cover full upload length: {} vs {}", 
                            expected_offset, chunk_upload.upload_length));
     }
+    
+    info!("✅ All chunks validated successfully: {} bytes total", expected_offset);
 
     // Create temp file for reconstruction
     let temp_dir = state.upload_dir.join("temp");
     fs::create_dir_all(&temp_dir).await.map_err(|e| format!("Failed to create temp dir: {}", e))?;
 
     let temp_path = temp_dir.join(format!("reconstruct_{}", uuid::Uuid::new_v4()));
+    info!("📁 Creating reconstruction temp file: {}", temp_path.display());
     let mut temp_file = File::create(&temp_path).await.map_err(|e| format!("Failed to create temp file: {}", e))?;
 
     // Write chunks to temp file in order
     let mut hasher = Sha256::new();
-    for chunk in &sorted_chunks {
+    let mut total_written = 0u64;
+    
+    for (i, chunk) in sorted_chunks.iter().enumerate() {
+        info!("📖 Reading chunk {} from file: {} (offset: {}, length: {})", 
+              i, chunk.chunk_path.display(), chunk.offset, chunk.length);
+        
         // Read chunk data from file
         let mut chunk_file = File::open(&chunk.chunk_path).await.map_err(|e| format!("Failed to open chunk file: {}", e))?;
         let mut chunk_data = Vec::with_capacity(chunk.length as usize);
@@ -1614,14 +1669,23 @@ async fn reconstruct_final_blob(
         
         temp_file.write_all(&chunk_data).await.map_err(|e| format!("Failed to write chunk: {}", e))?;
         hasher.update(&chunk_data);
+        total_written += chunk_data.len() as u64;
+        
+        info!("✅ Chunk {} written to reconstruction file: {} bytes (total: {})", 
+              i, chunk_data.len(), total_written);
     }
 
     temp_file.sync_all().await.map_err(|e| format!("Failed to sync temp file: {}", e))?;
     drop(temp_file);
+    
+    info!("📊 Reconstruction complete: {} bytes written to temp file", total_written);
 
     // Verify SHA256 hash of the reconstructed file matches the expected hash
     let calculated_sha256 = format!("{:x}", hasher.finalize());
+    info!("🔍 SHA256 verification: calculated {} vs expected {}", calculated_sha256, expected_sha256);
+    
     if calculated_sha256 != expected_sha256 {
+        error!("❌ SHA256 mismatch: expected {}, got {}", expected_sha256, calculated_sha256);
         let _ = fs::remove_file(&temp_path).await; // Clean up temp file
         // Clean up chunk files on error
         for chunk in &sorted_chunks {
@@ -1629,6 +1693,8 @@ async fn reconstruct_final_blob(
         }
         return Err(format!("SHA256 mismatch: expected {}, got {}", expected_sha256, calculated_sha256));
     }
+    
+    info!("✅ SHA256 verification passed: {}", calculated_sha256);
 
     // Move to final location using the expected SHA256 (which we just verified matches)
     let extension = chunk_upload.upload_type
@@ -1637,17 +1703,22 @@ async fn reconstruct_final_blob(
         .map(|s| s.to_string());
     
     let final_path = get_nested_path(&state.upload_dir, expected_sha256, extension.as_deref());
+    info!("📁 Moving reconstructed file to final location: {}", final_path.display());
     
     if let Some(parent) = final_path.parent() {
         fs::create_dir_all(parent).await.map_err(|e| format!("Failed to create directory: {}", e))?;
     }
 
     fs::rename(&temp_path, &final_path).await.map_err(|e| format!("Failed to move temp file: {}", e))?;
+    info!("✅ File moved to final location: {}", final_path.display());
 
     // Clean up chunk files after successful reconstruction
-    for chunk in &sorted_chunks {
+    info!("🧹 Cleaning up {} chunk files", sorted_chunks.len());
+    for (i, chunk) in sorted_chunks.iter().enumerate() {
         if let Err(e) = fs::remove_file(&chunk.chunk_path).await {
             error!("Failed to clean up chunk file {}: {}", chunk.chunk_path.display(), e);
+        } else {
+            info!("🗑️  Cleaned up chunk file {}: {}", i, chunk.chunk_path.display());
         }
     }
 
