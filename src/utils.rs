@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{fs, sync::RwLock};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::models::{AppState, FileMetadata};
 
@@ -203,4 +203,81 @@ pub fn parse_range_header(header_value: &str, total_size: u64) -> Option<(u64, u
         return None;
     }
     Some((start, end))
+}
+
+/// Clean up abandoned chunked uploads and their associated files
+pub async fn cleanup_abandoned_chunks(state: &AppState) {
+    let timeout_duration = std::time::Duration::from_secs(state.chunk_cleanup_timeout_minutes * 60);
+    let cutoff_time = std::time::Instant::now() - timeout_duration;
+    
+    // Get chunk uploads that are older than the timeout
+    let mut chunk_uploads = state.chunk_uploads.write().await;
+    let mut to_remove = Vec::new();
+    
+    for (sha256, chunk_upload) in chunk_uploads.iter() {
+        if chunk_upload.created_at < cutoff_time {
+            info!("Cleaning up abandoned chunked upload: {}", sha256);
+            to_remove.push(sha256.clone());
+        }
+    }
+    
+    // Remove abandoned uploads and clean up their files
+    for sha256 in to_remove {
+        if let Some(chunk_upload) = chunk_uploads.remove(&sha256) {
+            let chunk_count = chunk_upload.chunks.len();
+            // Clean up all chunk files for this upload
+            for chunk in chunk_upload.chunks {
+                if let Err(e) = fs::remove_file(&chunk.chunk_path).await {
+                    warn!("Failed to clean up chunk file {}: {}", chunk.chunk_path.display(), e);
+                }
+            }
+            info!("Cleaned up {} chunk files for abandoned upload: {}", chunk_count, sha256);
+        }
+    }
+    
+    // Also clean up orphaned chunk files in the temp/chunks directory
+    cleanup_orphaned_chunk_files(state).await;
+}
+
+/// Clean up orphaned chunk files that don't belong to any active upload
+async fn cleanup_orphaned_chunk_files(state: &AppState) {
+    let chunks_dir = state.upload_dir.join("temp").join("chunks");
+    
+    if !chunks_dir.exists() {
+        return;
+    }
+    
+    let timeout_duration = std::time::Duration::from_secs(state.chunk_cleanup_timeout_minutes * 60);
+    let cutoff_time = std::time::SystemTime::now() - timeout_duration;
+    
+    let mut entries = match fs::read_dir(&chunks_dir).await {
+        Ok(entries) => entries,
+        Err(e) => {
+            error!("Failed to read chunks directory: {}", e);
+            return;
+        }
+    };
+    
+    let mut cleaned_count = 0;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.is_file() {
+            // Check if the file is older than the timeout
+            if let Ok(metadata) = entry.metadata().await {
+                if let Ok(modified) = metadata.modified() {
+                    if modified < cutoff_time {
+                        if let Err(e) = fs::remove_file(&path).await {
+                            warn!("Failed to clean up orphaned chunk file {}: {}", path.display(), e);
+                        } else {
+                            cleaned_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if cleaned_count > 0 {
+        info!("Cleaned up {} orphaned chunk files", cleaned_count);
+    }
 }

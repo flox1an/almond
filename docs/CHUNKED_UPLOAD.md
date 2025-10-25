@@ -78,16 +78,17 @@ curl -X PATCH http://localhost:3000/upload \
 ### Data Structures
 
 - `ChunkUpload`: Tracks ongoing chunked uploads
-- `ChunkInfo`: Stores individual chunk data and metadata
-- In-memory storage of chunk data during upload process
+- `ChunkInfo`: Stores individual chunk metadata and file paths
+- File-based storage of chunk data during upload process (prevents memory exhaustion for large files)
 
 ### Chunk Processing
 
 1. **Validation**: Headers and chunk data are validated
-2. **Storage**: Chunks are stored in memory with their offset and data
-3. **Reconstruction**: When upload is complete, chunks are sorted by offset and reconstructed
+2. **Storage**: Chunks are streamed directly to temporary files (prevents memory exhaustion)
+3. **Reconstruction**: When upload is complete, chunks are sorted by offset and read from files
 4. **Verification**: Final blob SHA256 is verified against expected hash
 5. **Persistence**: Reconstructed blob is saved to final location and indexed
+6. **Cleanup**: Temporary chunk files are automatically cleaned up after successful reconstruction
 
 ### Error Handling
 

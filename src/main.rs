@@ -9,7 +9,7 @@ use tokio::signal;
 
 use crate::models::AppState;
 use crate::trust_network::refresh_trust_network;
-use crate::utils::{build_file_index, enforce_storage_limits};
+use crate::utils::{build_file_index, enforce_storage_limits, cleanup_abandoned_chunks};
 use axum::Router;
 use axum_server;
 use dotenv::dotenv;
@@ -22,7 +22,7 @@ use tracing_subscriber;
 use axum::{
     extract::DefaultBodyLimit,
     middleware::from_fn,
-    routing::{delete, get, options, patch, put},
+    routing::{delete, get, put},
 };
 use handlers::*;
 use middleware::cors_middleware;
@@ -99,6 +99,12 @@ async fn load_app_state() -> AppState {
         .parse()
         .expect("Invalid value for MAX_CHUNK_SIZE_MB");
 
+    // Parse chunk cleanup timeout in minutes
+    let chunk_cleanup_timeout_minutes = env::var("CHUNK_CLEANUP_TIMEOUT_MINUTES")
+        .unwrap_or_else(|_| "30".to_string()) // Default: 30 minutes
+        .parse()
+        .expect("Invalid value for CHUNK_CLEANUP_TIMEOUT_MINUTES");
+
     // Parse upstream servers from environment variable
     let upstream_servers: Vec<String> = env::var("UPSTREAM_SERVERS")
         .unwrap_or_default()
@@ -159,6 +165,7 @@ async fn load_app_state() -> AppState {
         upstream_servers,
         max_upstream_download_size_mb,
         max_chunk_size_mb,
+        chunk_cleanup_timeout_minutes,
         ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
         chunk_uploads: Arc::new(RwLock::new(HashMap::new())),
     }
@@ -176,6 +183,17 @@ fn start_cleanup_job(state: AppState) {
                 enforce_storage_limits(&state).await;
                 *changes = false;
             }
+        }
+    });
+}
+
+fn start_chunk_cleanup_job(state: AppState) {
+    tokio::spawn(async move {
+        // Run chunk cleanup every 5 minutes
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
+        loop {
+            interval.tick().await;
+            cleanup_abandoned_chunks(&state).await;
         }
     });
 }
@@ -216,6 +234,7 @@ async fn main() {
         .expect("Invalid address format");
 
     start_cleanup_job(state.clone());
+    start_chunk_cleanup_job(state.clone());
     start_trust_network_refresh_job(state.clone());
 
     let app = create_app(state).await;

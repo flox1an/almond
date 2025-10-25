@@ -1362,22 +1362,51 @@ pub async fn patch_upload(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Read chunk data
+    // Create temp directory for chunk files
+    let temp_dir = state.upload_dir.join("temp").join("chunks");
+    fs::create_dir_all(&temp_dir).await.map_err(|e| {
+        error!("Failed to create chunk temp directory: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Create a unique file for this chunk
+    let chunk_filename = format!("chunk_{}_{}_{}", sha256, upload_offset, uuid::Uuid::new_v4());
+    let chunk_path = temp_dir.join(chunk_filename);
+    
+    // Stream chunk data directly to file
     let body: Body = req.into_body();
     let mut stream = body.into_data_stream();
-    let mut chunk_data = Vec::new();
+    let mut chunk_file = File::create(&chunk_path).await.map_err(|e| {
+        error!("Failed to create chunk file: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
+    let mut total_written = 0u64;
     while let Some(chunk) = stream.next().await {
         let data = chunk.map_err(|e| {
             error!("Failed to read chunk: {}", e);
             StatusCode::BAD_REQUEST
         })?;
-        chunk_data.extend_from_slice(&data);
+        
+        chunk_file.write_all(&data).await.map_err(|e| {
+            error!("Failed to write chunk data: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        total_written += data.len() as u64;
     }
 
+    // Ensure all data is written to disk
+    chunk_file.sync_all().await.map_err(|e| {
+        error!("Failed to sync chunk file: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    drop(chunk_file);
+
     // Validate chunk size matches Content-Length
-    if chunk_data.len() as u64 != content_length {
-        error!("Chunk size mismatch: expected {}, got {}", content_length, chunk_data.len());
+    if total_written != content_length {
+        error!("Chunk size mismatch: expected {}, got {}", content_length, total_written);
+        // Clean up the chunk file on error
+        let _ = fs::remove_file(&chunk_path).await;
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -1421,7 +1450,7 @@ pub async fn patch_upload(
     let chunk_info = ChunkInfo {
         offset: upload_offset,
         length: content_length,
-        data: chunk_data,
+        chunk_path,
     };
 
     chunk_upload.chunks.push(chunk_info);
@@ -1557,8 +1586,18 @@ async fn reconstruct_final_blob(
     // Write chunks to temp file in order
     let mut hasher = Sha256::new();
     for chunk in &sorted_chunks {
-        temp_file.write_all(&chunk.data).await.map_err(|e| format!("Failed to write chunk: {}", e))?;
-        hasher.update(&chunk.data);
+        // Read chunk data from file
+        let mut chunk_file = File::open(&chunk.chunk_path).await.map_err(|e| format!("Failed to open chunk file: {}", e))?;
+        let mut chunk_data = Vec::with_capacity(chunk.length as usize);
+        chunk_file.read_to_end(&mut chunk_data).await.map_err(|e| format!("Failed to read chunk file: {}", e))?;
+        
+        // Validate chunk file size
+        if chunk_data.len() as u64 != chunk.length {
+            return Err(format!("Chunk file size mismatch: expected {}, got {}", chunk.length, chunk_data.len()));
+        }
+        
+        temp_file.write_all(&chunk_data).await.map_err(|e| format!("Failed to write chunk: {}", e))?;
+        hasher.update(&chunk_data);
     }
 
     temp_file.sync_all().await.map_err(|e| format!("Failed to sync temp file: {}", e))?;
@@ -1568,6 +1607,10 @@ async fn reconstruct_final_blob(
     let calculated_sha256 = format!("{:x}", hasher.finalize());
     if calculated_sha256 != expected_sha256 {
         let _ = fs::remove_file(&temp_path).await; // Clean up temp file
+        // Clean up chunk files on error
+        for chunk in &sorted_chunks {
+            let _ = fs::remove_file(&chunk.chunk_path).await;
+        }
         return Err(format!("SHA256 mismatch: expected {}, got {}", expected_sha256, calculated_sha256));
     }
 
@@ -1584,6 +1627,13 @@ async fn reconstruct_final_blob(
     }
 
     fs::rename(&temp_path, &final_path).await.map_err(|e| format!("Failed to move temp file: {}", e))?;
+
+    // Clean up chunk files after successful reconstruction
+    for chunk in &sorted_chunks {
+        if let Err(e) = fs::remove_file(&chunk.chunk_path).await {
+            error!("Failed to clean up chunk file {}: {}", chunk.chunk_path.display(), e);
+        }
+    }
 
     // Add to file index using the expected SHA256 (which we just verified matches)
     let key = expected_sha256[..64.min(expected_sha256.len())].to_string();

@@ -38,6 +38,7 @@ pub struct AppState {
     pub upstream_servers: Vec<String>,
     pub max_upstream_download_size_mb: u64,
     pub max_chunk_size_mb: u64,
+    pub chunk_cleanup_timeout_minutes: u64,
     pub ongoing_downloads:
         Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>,
     pub chunk_uploads: Arc<RwLock<HashMap<String, ChunkUpload>>>,
@@ -189,5 +190,5 @@ pub struct ChunkUpload {
 pub struct ChunkInfo {
     pub offset: u64,
     pub length: u64,
-    pub data: Vec<u8>,
+    pub chunk_path: PathBuf,
 }
