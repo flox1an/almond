@@ -1,4 +1,6 @@
+pub mod constants;
 pub mod handlers;
+pub mod helpers;
 pub mod middleware;
 pub mod models;
 pub mod trust_network;
@@ -26,6 +28,32 @@ use axum::{
 };
 use handlers::*;
 use middleware::cors_middleware;
+
+// Missing handler functions
+async fn head_upload() -> &'static str {
+    "Method not allowed"
+}
+
+async fn options_upload() -> &'static str {
+    "Method not allowed"
+}
+
+async fn serve_index() -> axum::response::Response<axum::body::Body> {
+    use axum::{
+        http::{header, StatusCode},
+        response::Response,
+    };
+    
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(axum::body::Body::from(include_str!("index.html")))
+        .unwrap()
+}
+
+async fn method_not_allowed() -> &'static str {
+    "Method not allowed"
+}
 
 pub async fn create_app(state: AppState) -> Router {
     // Calculate max chunk size in bytes

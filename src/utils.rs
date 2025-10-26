@@ -111,14 +111,11 @@ async fn cleanup_empty_dirs(root_dir: &Path) {
     for parent_dir in parent_dirs {
         if let Ok(mut entries) = fs::read_dir(&parent_dir).await {
             let mut has_entries = false;
-            while let Ok(Some(_)) = entries.next_entry().await {
+            if let Ok(Some(_)) = entries.next_entry().await {
                 has_entries = true;
-                break;
             }
-            if !has_entries {
-                if fs::remove_dir(&parent_dir).await.is_ok() {
-                    info!("Removed empty parent directory: {}", parent_dir.display());
-                }
+            if !has_entries && fs::remove_dir(&parent_dir).await.is_ok() {
+                info!("Removed empty parent directory: {}", parent_dir.display());
             }
         }
     }
@@ -169,11 +166,7 @@ pub async fn enforce_storage_limits(state: &AppState) {
 
 pub fn get_sha256_hash_from_filename(filename: &str) -> Option<String> {
     let re = Regex::new(r"^([a-fA-F0-9]{64})(\.[a-zA-Z0-9]+)?$").unwrap();
-    if let Some(captures) = re.captures(filename) {
-        Some(captures[1].to_string()) // Return the first capture group (the hash)
-    } else {
-        None
-    }
+    re.captures(filename).map(|captures| captures[1].to_string())
 }
 
 pub async fn find_file(

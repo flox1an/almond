@@ -74,7 +74,7 @@ async fn get_followers(
         followers.dedup();
 
         // Aggregate with existing followers for this author
-        let existing_followers = followers_by_pubkey.entry(author).or_insert_with(Vec::new);
+        let existing_followers = followers_by_pubkey.entry(author).or_default();
         existing_followers.extend(followers);
     }
 
