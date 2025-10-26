@@ -42,6 +42,7 @@ pub struct AppState {
     pub ongoing_downloads:
         Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>,
     pub chunk_uploads: Arc<RwLock<HashMap<String, ChunkUpload>>>,
+    pub failed_upstream_lookups: Arc<RwLock<HashMap<String, Instant>>>,
 }
 
 impl AppState {

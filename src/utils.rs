@@ -274,3 +274,17 @@ async fn cleanup_orphaned_chunk_files(state: &AppState) {
         info!("Cleaned up {} orphaned chunk files", cleaned_count);
     }
 }
+
+/// Clean up expired failed upstream lookups (older than 1 hour)
+pub async fn cleanup_expired_failed_lookups(state: &AppState) {
+    let one_hour_ago = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+    let mut failed_lookups = state.failed_upstream_lookups.write().await;
+    let initial_count = failed_lookups.len();
+    
+    failed_lookups.retain(|_, &mut timestamp| timestamp > one_hour_ago);
+    
+    let cleaned_count = initial_count - failed_lookups.len();
+    if cleaned_count > 0 {
+        info!("Cleaned up {} expired failed upstream lookups", cleaned_count);
+    }
+}

@@ -63,6 +63,20 @@ pub async fn handle_file_request(
                 }
             }
             None => {
+                // File not found locally, check if we've already tried upstream servers recently
+                let failed_lookups = state.failed_upstream_lookups.read().await;
+                if let Some(failed_time) = failed_lookups.get(&filename) {
+                    let one_hour_ago = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+                    if *failed_time > one_hour_ago {
+                        debug!(
+                            "File {} not found in upstream servers recently (cached), returning 404",
+                            filename
+                        );
+                        return Err(StatusCode::NOT_FOUND);
+                    }
+                }
+                drop(failed_lookups); // Release the read lock
+
                 // File not found locally, try upstream servers
                 debug!(
                     "File not found locally, checking upstream servers for: {}",
@@ -70,7 +84,13 @@ pub async fn handle_file_request(
                 );
                 match try_upstream_servers(&state, &filename, req.headers()).await {
                     Ok(response) => Ok(response),
-                    Err(_) => Err(StatusCode::NOT_FOUND),
+                    Err(_) => {
+                        // Add to failed lookups cache
+                        let mut failed_lookups = state.failed_upstream_lookups.write().await;
+                        failed_lookups.insert(filename.clone(), std::time::Instant::now());
+                        debug!("Added {} to failed upstream lookups cache", filename);
+                        Err(StatusCode::NOT_FOUND)
+                    }
                 }
             }
         }

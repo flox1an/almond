@@ -11,7 +11,7 @@ use tokio::signal;
 
 use crate::models::AppState;
 use crate::trust_network::refresh_trust_network;
-use crate::utils::{build_file_index, enforce_storage_limits, cleanup_abandoned_chunks};
+use crate::utils::{build_file_index, enforce_storage_limits, cleanup_abandoned_chunks, cleanup_expired_failed_lookups};
 use axum::Router;
 use axum_server;
 use dotenv::dotenv;
@@ -197,6 +197,7 @@ async fn load_app_state() -> AppState {
         chunk_cleanup_timeout_minutes,
         ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
         chunk_uploads: Arc::new(RwLock::new(HashMap::new())),
+        failed_upstream_lookups: Arc::new(RwLock::new(HashMap::new())),
     }
 }
 
@@ -212,6 +213,9 @@ fn start_cleanup_job(state: AppState) {
                 enforce_storage_limits(&state).await;
                 *changes = false;
             }
+            
+            // Clean up expired failed upstream lookups
+            cleanup_expired_failed_lookups(&state).await;
         }
     });
 }
