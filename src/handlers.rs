@@ -164,41 +164,20 @@ async fn try_upstream_servers(
     filename: &str,
     headers: &HeaderMap,
 ) -> Result<Response, StatusCode> {
-    // For upstream servers, ignore range requests and return full file
+    // Forward range requests to upstream servers
     if headers.get(header::RANGE).is_some() {
-        info!("Range request detected for upstream server, ignoring range and returning full file");
+        info!("Range request detected, forwarding to upstream server");
     }
 
     // Check if this file is already being downloaded
-    if let Some((written_len, notify, temp_path, content_type)) = {
-        let ongoing_downloads = state.ongoing_downloads.read().await;
-        ongoing_downloads
-            .get(filename)
-            .map(|(_, written_len, notify, temp_path, content_type)| {
-                (
-                    written_len.clone(),
-                    notify.clone(),
-                    temp_path.clone(),
-                    content_type.clone(),
-                )
-            })
-    } {
+    if state.ongoing_downloads.read().await.contains_key(filename) {
         info!(
-            "File {} is already being downloaded, joining the stream immediately",
+            "File {} is already being downloaded, proxying request to upstream",
             filename
         );
 
-        // Join the existing download stream immediately
-        return stream_from_ongoing_download(
-            state,
-            filename,
-            headers,
-            written_len,
-            notify,
-            temp_path,
-            content_type,
-        )
-        .await;
+        // Proxy the request to upstream while download is in progress
+        return proxy_request_to_upstream(state, filename, headers).await;
     }
 
     let client = Client::new();
@@ -208,17 +187,20 @@ async fn try_upstream_servers(
         let file_url = format!("{}/{}", upstream_url.trim_end_matches('/'), filename);
         info!("Trying upstream server: {}", file_url);
 
-        // Create request without range headers for upstream servers
+        // Create request with all relevant headers for upstream servers
         let mut request = client.get(&file_url);
 
-        // Copy relevant headers from original request, but exclude range headers
+        // Copy relevant headers from original request, including range headers
         if let Some(user_agent) = headers.get(header::USER_AGENT) {
             request = request.header(header::USER_AGENT, user_agent);
         }
         if let Some(accept) = headers.get(header::ACCEPT) {
             request = request.header(header::ACCEPT, accept);
         }
-        // Explicitly exclude RANGE header - we want the full file
+        if let Some(range) = headers.get(header::RANGE) {
+            request = request.header(header::RANGE, range);
+            info!("Forwarding range request to upstream: {}", range.to_str().unwrap_or("invalid"));
+        }
 
         match request.send().await {
             Ok(response) if response.status().is_success() => {
@@ -232,6 +214,13 @@ async fn try_upstream_servers(
                     .unwrap_or("application/octet-stream")
                     .to_string();
 
+                // Check if this is a range request - if so, proxy it directly
+                if headers.get(header::RANGE).is_some() {
+                    info!("Proxying range request directly from upstream for: {}", filename);
+                    return proxy_upstream_response(response, &content_type, filename).await;
+                }
+
+                // For non-range requests, start the download process
                 // Derive extension from content type
                 let file_extension = mime_guess::get_mime_extensions_str(&content_type)
                     .and_then(|exts| exts.first().map(|ext| format!(".{}", ext)))
@@ -287,48 +276,137 @@ async fn try_upstream_servers(
     Err(StatusCode::NOT_FOUND)
 }
 
-/// Stream from an ongoing download (for subsequent requests)
-async fn stream_from_ongoing_download(
-    _state: &AppState,
+/// Proxy request to upstream server while download is in progress
+async fn proxy_request_to_upstream(
+    state: &AppState,
     filename: &str,
-    _headers: &HeaderMap,
-    written_len: Arc<AtomicU64>,
-    notify: Arc<Notify>,
-    temp_path: PathBuf,
-    content_type: String,
+    headers: &HeaderMap,
 ) -> Result<Response<Body>, StatusCode> {
-    info!(
-        "Streaming immediately from ongoing download for: {}",
-        filename
-    );
+    info!("Proxying request to upstream for ongoing download: {}", filename);
+    
+    let client = Client::new();
+    
+    // Try each upstream server
+    for upstream_url in &state.upstream_servers {
+        let file_url = format!("{}/{}", upstream_url.trim_end_matches('/'), filename);
+        info!("Proxying to upstream server: {}", file_url);
 
-    // Create a reader for the temp file
-    let reader = File::open(&temp_path).await.map_err(|e| {
-        error!("Failed to open temp file for streaming: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+        // Create request with all relevant headers
+        let mut request = client.get(&file_url);
 
-    // Create streaming response using helper function
-    let stream = create_tailing_stream(reader, written_len, notify).await;
+        // Copy all relevant headers from original request
+        if let Some(user_agent) = headers.get(header::USER_AGENT) {
+            request = request.header(header::USER_AGENT, user_agent);
+        }
+        if let Some(accept) = headers.get(header::ACCEPT) {
+            request = request.header(header::ACCEPT, accept);
+        }
+        if let Some(range) = headers.get(header::RANGE) {
+            request = request.header(header::RANGE, range);
+            info!("Proxying range request to upstream: {}", range.to_str().unwrap_or("invalid"));
+        }
+        if let Some(if_range) = headers.get(header::IF_RANGE) {
+            request = request.header(header::IF_RANGE, if_range);
+        }
+        if let Some(if_match) = headers.get(header::IF_MATCH) {
+            request = request.header(header::IF_MATCH, if_match);
+        }
+        if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH) {
+            request = request.header(header::IF_NONE_MATCH, if_none_match);
+        }
+        if let Some(if_modified_since) = headers.get(header::IF_MODIFIED_SINCE) {
+            request = request.header(header::IF_MODIFIED_SINCE, if_modified_since);
+        }
+        if let Some(if_unmodified_since) = headers.get(header::IF_UNMODIFIED_SINCE) {
+            request = request.header(header::IF_UNMODIFIED_SINCE, if_unmodified_since);
+        }
 
-    info!(
-        "Using stored content type: {} for ongoing download: {}",
-        content_type, filename
-    );
+        match request.send().await {
+            Ok(response) if response.status().is_success() => {
+                info!("Successfully proxied request to upstream: {}", file_url);
+                
+                // Get content type from upstream response
+                let content_type = response
+                    .headers()
+                    .get(reqwest_header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
 
-    // Build response with proper headers using the stored content type
-    let body = Body::from_stream(stream);
-    let mut response = build_streaming_response_headers(&content_type, filename);
+                return proxy_upstream_response(response, &content_type, filename).await;
+            }
+            Ok(response) => {
+                info!(
+                    "Upstream server {} returned status: {}",
+                    file_url,
+                    response.status()
+                );
+            }
+            Err(e) => {
+                warn!("Failed to proxy to upstream {}: {}", file_url, e);
+            }
+        }
+    }
 
-    // Replace the placeholder body with the actual stream
-    *response.body_mut() = body;
-
-    info!(
-        "🚀 Started immediate streaming from ongoing download for: {}",
-        filename
-    );
-    Ok(response)
+    Err(StatusCode::NOT_FOUND)
 }
+
+/// Proxy upstream response directly to client
+async fn proxy_upstream_response(
+    response: reqwest::Response,
+    content_type: &str,
+    filename: &str,
+) -> Result<Response<Body>, StatusCode> {
+    info!("Proxying upstream response for: {}", filename);
+    
+    // Get all relevant headers before consuming the response
+    let content_range = response.headers().get(reqwest_header::CONTENT_RANGE).cloned();
+    let content_length = response.headers().get(reqwest_header::CONTENT_LENGTH).cloned();
+    let accept_ranges = response.headers().get(reqwest_header::ACCEPT_RANGES).cloned();
+    let cache_control = response.headers().get(reqwest_header::CACHE_CONTROL).cloned();
+    let etag = response.headers().get(reqwest_header::ETAG).cloned();
+    let last_modified = response.headers().get(reqwest_header::LAST_MODIFIED).cloned();
+    
+    let status = if response.status().is_success() {
+        if response.headers().get(reqwest_header::CONTENT_RANGE).is_some() {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        }
+    } else {
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::OK)
+    };
+
+    // Stream the response directly to client
+    let body = Body::from_stream(response.bytes_stream());
+    let mut response_builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCEPT_RANGES, "bytes");
+
+    // Copy all relevant headers from upstream
+    if let Some(content_range) = content_range {
+        response_builder = response_builder.header(header::CONTENT_RANGE, content_range);
+    }
+    if let Some(content_length) = content_length {
+        response_builder = response_builder.header(header::CONTENT_LENGTH, content_length);
+    }
+    if let Some(accept_ranges) = accept_ranges {
+        response_builder = response_builder.header(header::ACCEPT_RANGES, accept_ranges);
+    }
+    if let Some(cache_control) = cache_control {
+        response_builder = response_builder.header(header::CACHE_CONTROL, cache_control);
+    }
+    if let Some(etag) = etag {
+        response_builder = response_builder.header(header::ETAG, etag);
+    }
+    if let Some(last_modified) = last_modified {
+        response_builder = response_builder.header(header::LAST_MODIFIED, last_modified);
+    }
+
+    Ok(response_builder.body(body).unwrap())
+}
+
 
 /// Stream file from upstream server to client while saving to local storage
 async fn stream_and_save_from_upstream(
@@ -1075,31 +1153,6 @@ async fn create_tailing_stream(
             }
         }
     })
-}
-
-/// Build response headers for streaming content
-fn build_streaming_response_headers(content_type: &str, filename: &str) -> Response<Body> {
-    let body = Body::from(vec![]); // Placeholder, will be replaced
-    let mut builder = Response::builder().status(StatusCode::OK);
-
-    builder = builder.header(header::CONTENT_TYPE, content_type);
-    builder = builder.header(header::CACHE_CONTROL, "public, max-age=31536000, immutable");
-    builder = builder.header(header::ACCEPT_RANGES, "bytes");
-
-    // Add Content-Disposition header to prevent save dialog
-    let filename_display = std::path::Path::new(filename)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
-    let content_disposition = format!("inline; filename=\"{}\"", filename_display);
-    builder = builder.header(header::CONTENT_DISPOSITION, content_disposition);
-
-    info!(
-        "Built response headers: Content-Type={}, Content-Disposition=inline; filename=\"{}\"",
-        content_type, filename_display
-    );
-
-    builder.body(body).unwrap()
 }
 
 /// Apply streaming headers to an existing response
