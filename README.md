@@ -24,6 +24,52 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
  - 🌸 Filesystem only, no database
  - 🌸 Web of trust authorization 
 
+## API Endpoints
+
+### File Operations
+- `PUT /upload` - Upload a file (BUD-1)
+- `PATCH /upload` - Chunked upload (BUD-2) 
+- `GET /:filename` - Download a file by SHA256 hash
+- `HEAD /:filename` - Get file metadata
+- `GET /list` - List all stored files
+- `PUT /mirror` - Mirror a file from another server (BUD-4)
+
+### System Information
+- `GET /_stats` - Get server statistics and performance metrics
+- `GET /_upstream` - Get configured upstream servers information
+
+#### `/_stats` Response
+```json
+{
+  "stats": {
+    "files_uploaded": 1234,
+    "files_downloaded": 5678,
+    "total_files": 90,
+    "total_size_bytes": 1048576000,
+    "total_size_mb": 1000.0,
+    "upload_throughput_mbps": 0.0,
+    "download_throughput_mbps": 0.0,
+    "max_total_size_mb": 0.0,
+    "max_total_files": 0,
+    "storage_usage_percent": 0.0
+  },
+  "upload_throughput": 0,
+  "download_throughput": 0
+}
+```
+
+#### `/_upstream` Response
+```json
+{
+  "upstream_servers": [
+    "https://backup1.example.com",
+    "https://backup2.example.com"
+  ],
+  "count": 2,
+  "max_download_size_mb": 100
+}
+```
+
 ## Environment Variables
 
 - `BIND_ADDR`: Address to bind the server to (default: "127.0.0.1:3000")
