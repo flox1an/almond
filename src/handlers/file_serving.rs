@@ -434,7 +434,7 @@ async fn stream_and_save_from_upstream(
             notify_dl.notify_waiters();
 
             // Log progress every 1MB
-            if body_size.is_multiple_of(1024 * 1024) {
+            if body_size % (1024 * 1024) == 0 {
                 info!(
                     "Download progress: {} bytes written to temp file (limit: {} MB)",
                     body_size,
