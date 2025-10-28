@@ -15,6 +15,8 @@ pub struct BloomQuery {
 	pub format: Option<String>,
 	// false positive rate (default ~0.01)
 	pub fp: Option<f64>,
+    // optional hex sha256 to test against the filter
+    pub test: Option<String>,
 }
 
 pub async fn get_bloom(
@@ -31,7 +33,38 @@ pub async fn get_bloom(
 		// Keys in index are filename prefixes (first 64 chars of sha256). Insert as bytes.
 		bloom.set(key.as_bytes());
 	}
-	let bits = bloom.bitmap();
+    let bits = bloom.bitmap();
+
+    // If a test hash is provided, respond with JSON test result regardless of format
+    if let Some(mut probe) = q.test {
+        // normalize: lowercase and take first 64 chars (index stores 64-char hex)
+        probe = probe.trim().to_lowercase();
+        if probe.len() < 64 || !probe.chars().take(64).all(|c| c.is_ascii_hexdigit()) {
+            let payload = serde_json::json!({
+                "error": "invalid sha256 hex (need at least 64 hex chars)",
+            });
+            let resp = Response::builder()
+                .status(axum::http::StatusCode::BAD_REQUEST)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&payload).unwrap()))
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+            return Ok(resp);
+        }
+        let key = &probe[..64];
+        let maybe = bloom.check(key.as_bytes());
+        let payload = serde_json::json!({
+            "test": key,
+            "maybe": maybe,
+            "count": num_items,
+            "fp": fp,
+        });
+        let resp = Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(serde_json::to_vec(&payload).unwrap()))
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(resp);
+    }
 
 	let want_json = q
 		.format
