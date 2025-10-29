@@ -102,7 +102,7 @@ async fn load_app_state() -> AppState {
     let storage_path = env::var("STORAGE_PATH").unwrap_or_else(|_| "./files".to_string());
     let upload_dir = PathBuf::from(&storage_path);
     fs::create_dir_all(&upload_dir).await.unwrap();
-    info!("Storage path: {}", upload_dir.display());
+    info!("⚙️ Storage path: {}", upload_dir.display());
 
     let file_index = Arc::new(RwLock::new(HashMap::new()));
     build_file_index(&upload_dir, &file_index).await;
@@ -150,9 +150,9 @@ async fn load_app_state() -> AppState {
         .collect();
 
     if !upstream_servers.is_empty() {
-        info!("Upstream servers: {:?}", upstream_servers);
+        info!("⚙️ Upstream servers: {:?}", upstream_servers);
         info!(
-            "Upstream download size limit: {} MB",
+            "⚙️ Upstream download size limit: {} MB",
             max_upstream_download_size_mb
         );
     }
@@ -284,10 +284,10 @@ async fn main() {
     // Wait for either the server to complete or a shutdown signal
     tokio::select! {
         _ = server => {
-            info!("Server completed");
+            info!("🎧 Server completed");
         }
         _ = shutdown => {
-            info!("Shutting down gracefully...");
+            info!("🎧 Shutting down gracefully...");
         }
     }
 }

@@ -97,7 +97,7 @@ async fn cleanup_empty_dirs(root_dir: &Path) {
     let mut parent_dirs = vec![];
     for dir in empty_dirs.into_iter().rev() {
         if fs::remove_dir(&dir).await.is_ok() {
-            info!("Removed empty directory: {}", dir.display());
+            info!("🗑 Removed empty directory: {}", dir.display());
             // Add parent directory to check if it becomes empty
             if let Some(parent) = dir.parent() {
                 if parent != root_dir {
@@ -115,7 +115,7 @@ async fn cleanup_empty_dirs(root_dir: &Path) {
                 has_entries = true;
             }
             if !has_entries && fs::remove_dir(&parent_dir).await.is_ok() {
-                info!("Removed empty parent directory: {}", parent_dir.display());
+                info!("🗑 Removed empty parent directory: {}", parent_dir.display());
             }
         }
     }
@@ -139,9 +139,9 @@ pub async fn enforce_storage_limits(state: &AppState) {
     for (sha256, metadata) in files {
         // Check file age if max_age_days is set
         if state.max_file_age_days > 0 && now - metadata.created_at > max_age_secs {
-            info!("Deleting expired file: {}", sha256);
+            info!("🗑 Deleting expired file: {}", sha256);
             if let Err(e) = fs::remove_file(&metadata.path).await {
-                error!("Failed to delete expired file {}: {}", sha256, e);
+                error!("❌ Failed to delete expired file {}: {}", sha256, e);
             }
             index.remove(&sha256);
             continue;
@@ -150,9 +150,9 @@ pub async fn enforce_storage_limits(state: &AppState) {
         // Check storage limits
         if total_size + metadata.size > state.max_total_size || index.len() >= state.max_total_files
         {
-            info!("Deleting file to enforce limits: {}", sha256);
+            info!("🗑 Deleting file to enforce limits: {}", sha256);
             if let Err(e) = fs::remove_file(&metadata.path).await {
-                error!("Failed to delete file {}: {}", sha256, e);
+                error!("❌ Failed to delete file {}: {}", sha256, e);
             }
             index.remove(&sha256);
         } else {
@@ -224,7 +224,7 @@ pub async fn cleanup_abandoned_chunks(state: &AppState) {
                     warn!("Failed to clean up chunk file {}: {}", chunk.chunk_path.display(), e);
                 }
             }
-            info!("Cleaned up {} chunk files for abandoned upload: {}", chunk_count, sha256);
+            info!("🗑 Cleaned up {} chunk files for abandoned upload: {}", chunk_count, sha256);
         }
     }
     
@@ -246,7 +246,7 @@ async fn cleanup_orphaned_chunk_files(state: &AppState) {
     let mut entries = match fs::read_dir(&chunks_dir).await {
         Ok(entries) => entries,
         Err(e) => {
-            error!("Failed to read chunks directory: {}", e);
+            error!("❌ Failed to read chunks directory: {}", e);
             return;
         }
     };
@@ -260,7 +260,7 @@ async fn cleanup_orphaned_chunk_files(state: &AppState) {
                 if let Ok(modified) = metadata.modified() {
                     if modified < cutoff_time {
                         if let Err(e) = fs::remove_file(&path).await {
-                            warn!("Failed to clean up orphaned chunk file {}: {}", path.display(), e);
+                            warn!("❌ Failed to clean up orphaned chunk file {}: {}", path.display(), e);
                         } else {
                             cleaned_count += 1;
                         }

@@ -77,7 +77,7 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 - `STORAGE_PATH`: Path where files are stored (default: "./files")
 - `MAX_TOTAL_SIZE`: Maximum total storage size in MB (default: 99999999)
 - `MAX_TOTAL_FILES`: Maximum number of files (default: 99999999)
-- `CLEANUP_INTERVAL_SECS`: Interval for cleanup checks in seconds (default: 30)
+- `CLEANUP_INTERVAL_SECS`: Interval for cleanup checks in seconds (default: 60)
 - `MAX_FILE_AGE_DAYS`: Maximum age of files in days, 0 for no limit (default: 0)
 - `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback (optional)
 - `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: 100)

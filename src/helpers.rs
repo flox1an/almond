@@ -106,6 +106,36 @@ pub fn copy_headers_to_reqwest(
     request
 }
 
+/// Copy relevant headers from one HeaderMap to a reqwest request builder, excluding the Range header
+pub fn copy_headers_without_range(
+    headers: &HeaderMap,
+    mut request: reqwest::RequestBuilder,
+) -> reqwest::RequestBuilder {
+    if let Some(user_agent) = headers.get(header::USER_AGENT) {
+        request = request.header(header::USER_AGENT, user_agent);
+    }
+    if let Some(accept) = headers.get(header::ACCEPT) {
+        request = request.header(header::ACCEPT, accept);
+    }
+    // Explicitly skip RANGE header
+    if let Some(if_range) = headers.get(header::IF_RANGE) {
+        request = request.header(header::IF_RANGE, if_range);
+    }
+    if let Some(if_match) = headers.get(header::IF_MATCH) {
+        request = request.header(header::IF_MATCH, if_match);
+    }
+    if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH) {
+        request = request.header(header::IF_NONE_MATCH, if_none_match);
+    }
+    if let Some(if_modified_since) = headers.get(header::IF_MODIFIED_SINCE) {
+        request = request.header(header::IF_MODIFIED_SINCE, if_modified_since);
+    }
+    if let Some(if_unmodified_since) = headers.get(header::IF_UNMODIFIED_SINCE) {
+        request = request.header(header::IF_UNMODIFIED_SINCE, if_unmodified_since);
+    }
+    request
+}
+
 /// Copy relevant headers from reqwest response to axum response builder
 pub fn copy_headers_from_reqwest(
     response: &reqwest::Response,
