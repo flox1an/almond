@@ -173,54 +173,56 @@ pub async fn list_blobs(
     let file_index = state.file_index.read().await;
     let total_files = file_index.len();
     info!("📋 Total files in index: {}", total_files);
-    let mut files: Vec<_> = file_index
+    
+    // Build list of blobs with correct format
+    let mut blobs: Vec<serde_json::Value> = file_index
         .iter()
-        .map(|(key, metadata)| {
+        .map(|(sha256, metadata)| {
+            // Build URL: {public_url}/{sha256}.{extension} or {public_url}/{sha256}
+            let url = match &metadata.extension {
+                Some(ext) => format!("{}/{}.{}", state.public_url, sha256, ext),
+                None => format!("{}/{}", state.public_url, sha256),
+            };
+            
             json!({
-                "sha256": key,
+                "created": metadata.created_at,
+                "type": metadata.mime_type.as_ref().unwrap_or(&"application/octet-stream".to_string()),
+                "sha256": sha256,
                 "size": metadata.size,
-                "mime_type": metadata.mime_type,
-                "extension": metadata.extension,
-                "created_at": metadata.created_at
+                "url": url
             })
         })
         .collect();
 
-    info!("📋 Collected {} files from index", files.len());
+    info!("📋 Collected {} files from index", blobs.len());
 
-    // Sort by created_at descending (newest first)
-    files.sort_by(|a, b| {
-        let a_time = a["created_at"].as_u64().unwrap_or(0);
-        let b_time = b["created_at"].as_u64().unwrap_or(0);
+    // Sort by created descending (newest first)
+    blobs.sort_by(|a, b| {
+        let a_time = a["created"].as_u64().unwrap_or(0);
+        let b_time = b["created"].as_u64().unwrap_or(0);
         b_time.cmp(&a_time)
     });
 
-    info!("📋 Files sorted by created_at (newest first)");
+    info!("📋 Files sorted by created (newest first)");
 
     // Apply pagination (using since/until as offset/limit for now)
     let capped_limit = limit.min(1000);
-    let end = (start + capped_limit).min(files.len());
+    let end = (start + capped_limit).min(blobs.len());
 
-    let paginated_files = if start < files.len() {
-        let result = files[start..end].to_vec();
-        info!("📋 Pagination: returning {} files (offset: {}, limit: {}, total: {})", 
-              result.len(), start, capped_limit, files.len());
+    let paginated_blobs = if start < blobs.len() {
+        let result = blobs[start..end].to_vec();
+        info!("📋 Pagination: returning {} blobs (offset: {}, limit: {}, total: {})", 
+              result.len(), start, capped_limit, blobs.len());
         result
     } else {
-        warn!("⚠️  Requested offset {} exceeds total files {}, returning empty result", start, files.len());
+        warn!("⚠️  Requested offset {} exceeds total files {}, returning empty result", start, blobs.len());
         Vec::new()
     };
 
-    let response = json!({
-        "files": paginated_files,
-        "total": files.len(),
-        "offset": start,
-        "limit": capped_limit
-    });
+    info!("✅ LIST request completed successfully: {} blobs returned", paginated_blobs.len());
 
-    info!("✅ LIST request completed successfully: {} files returned", paginated_files.len());
-
-    Ok(Json(response))
+    // Return just the array of blobs
+    Ok(Json(serde_json::Value::Array(paginated_blobs)))
 }
 
 // Note: ERR_BLOCKED_BY_CLIENT errors in the browser are typically caused by:
