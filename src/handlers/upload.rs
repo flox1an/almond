@@ -5,17 +5,22 @@ use axum::{
     response::Response,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use futures_util::StreamExt;
 use mime_guess;
 use nostr_relay_pool::prelude::*;
-use reqwest::Client;
+use reqwest::{Client, redirect};
 use serde_json::{self, Value};
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    net::IpAddr,
+    time::{SystemTime, UNIX_EPOCH, Duration},
+};
 use tokio::{
     fs::{self, File},
     io::AsyncWriteExt,
+    net::lookup_host,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid;
 
 use crate::constants::*;
@@ -178,6 +183,115 @@ pub async fn upload_file(
         .unwrap())
 }
 
+/// Check if an IP address is in a private/local range
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => {
+            let octets = ipv4.octets();
+            // Private ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+            // Link-local: 169.254.0.0/16
+            // Loopback: 127.0.0.0/8
+            octets[0] == 10
+                || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
+                || (octets[0] == 192 && octets[1] == 168)
+                || (octets[0] == 169 && octets[1] == 254)
+                || (octets[0] == 127)
+        }
+        IpAddr::V6(ipv6) => {
+            let segments = ipv6.segments();
+            // IPv6 private ranges: ::1 (loopback), fe80::/10 (link-local), fc00::/7 (unique local)
+            ipv6.is_loopback()
+                || (segments[0] & 0xffc0 == 0xfe80) // fe80::/10 (link-local)
+                || (segments[0] & 0xfe00 == 0xfc00) // fc00::/7 (unique local)
+        }
+    }
+}
+
+/// HTTP client timeout constants
+const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
+const HTTP_CONNECT_TIMEOUT_SECS: u64 = 10;
+const DNS_LOOKUP_TIMEOUT_SECS: u64 = 5;
+
+/// Validate URL is safe to fetch (HTTPS only, no private IPs)
+async fn validate_url_for_ssrf(url: &str) -> Result<(), StatusCode> {
+    // Parse URL and validate it's HTTPS
+    let parsed = reqwest::Url::parse(url).map_err(|e| {
+        error!("❌ Invalid URL format: {} - error: {}", url, e);
+        StatusCode::BAD_REQUEST
+    })?;
+
+    if parsed.scheme() != "https" {
+        error!("❌ Only HTTPS URLs are allowed, got: {} for URL: {}", parsed.scheme(), url);
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Extract hostname
+    let host = parsed.host_str().ok_or_else(|| {
+        error!("❌ URL has no hostname: {}", url);
+        StatusCode::BAD_REQUEST
+    })?;
+
+    info!("🔍 Resolving DNS for hostname: {} (timeout: {}s)", host, DNS_LOOKUP_TIMEOUT_SECS);
+    
+    // Resolve DNS with timeout
+    let dns_future = lookup_host((host, 443));
+    let dns_timeout = tokio::time::sleep(Duration::from_secs(DNS_LOOKUP_TIMEOUT_SECS));
+    
+    let addrs = tokio::select! {
+        result = dns_future => {
+            result.map_err(|e| {
+                error!("❌ DNS resolution failed for {}: {}", host, e);
+                StatusCode::BAD_REQUEST
+            })?
+        }
+        _ = dns_timeout => {
+            error!("❌ DNS resolution timeout after {}s for hostname: {}", DNS_LOOKUP_TIMEOUT_SECS, host);
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
+
+    let mut has_valid_ip = false;
+    let mut resolved_ips = Vec::new();
+    for addr in addrs {
+        let ip = addr.ip();
+        resolved_ips.push(ip);
+        if is_private_ip(ip) {
+            error!("❌ URL resolves to private/local IP: {} (from hostname: {})", ip, host);
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        has_valid_ip = true;
+        info!("✅ Resolved {} -> {} (allowed)", host, ip);
+    }
+
+    if !has_valid_ip {
+        error!("❌ No valid IP addresses resolved for hostname: {}", host);
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    info!("✅ DNS validation passed for {} ({} IP(s) resolved)", host, resolved_ips.len());
+    Ok(())
+}
+
+/// Extract expected SHA-256 hash from auth event x tags
+fn extract_expected_sha256_from_event(event: &Event) -> Option<String> {
+    let x_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind() == TagKind::Custom("x".into()))
+        .collect();
+
+    for x_tag in x_tags {
+        if let Some(content) = x_tag.content() {
+            // Check if content looks like a SHA-256 hash (64 hex characters)
+            if content.len() == 64 && content.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Some(content.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 /// Handle blob mirroring
 pub async fn mirror_blob(
     State(state): State<AppState>,
@@ -190,7 +304,7 @@ pub async fn mirror_blob(
         StatusCode::UNAUTHORIZED
     })?;
 
-    let _event: Event = validate_nostr_auth(
+    let auth_event: Event = validate_nostr_auth(
         auth.to_str().map_err(|_| {
             error!("Invalid Authorization header format");
             StatusCode::UNAUTHORIZED
@@ -198,6 +312,14 @@ pub async fn mirror_blob(
         &state,
     )
     .await?;
+
+    // Extract expected SHA-256 from auth event x tags
+    let expected_sha256 = extract_expected_sha256_from_event(&auth_event).ok_or_else(|| {
+        error!("No valid SHA-256 hash found in auth event x tags");
+        StatusCode::UNAUTHORIZED
+    })?;
+
+    info!("Expected SHA-256 from auth event: {}", expected_sha256);
 
     let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
         .await
@@ -209,53 +331,189 @@ pub async fn mirror_blob(
         .and_then(Value::as_str)
         .ok_or(StatusCode::BAD_REQUEST)?;
 
-    // Extract expected SHA256 from the URL (assuming it's part of the URL)
-    let expected_sha256 = url
-        .split('/')
-        .next_back()
-        .unwrap_or("")
-        .split('.')
-        .next()
-        .unwrap_or("");
-
     info!("Starting to mirror blob from URL: {}", url);
 
-    let client = Client::new();
+    // Validate URL for SSRF protection
+    validate_url_for_ssrf(url).await?;
 
+    info!("🌐 Creating hardened HTTP client (redirects: disabled, request timeout: {}s, connect timeout: {}s)",
+          HTTP_REQUEST_TIMEOUT_SECS, HTTP_CONNECT_TIMEOUT_SECS);
+
+    // Create a hardened HTTP client with no redirects and timeouts
+    let client = Client::builder()
+        .redirect(redirect::Policy::none()) // Disable redirects to prevent SSRF
+        .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| {
+            error!("❌ Failed to create HTTP client: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    info!("📡 Sending HTTP GET request to: {} (timeout: {}s)", url, HTTP_REQUEST_TIMEOUT_SECS);
+    
     let response = client
         .get(url)
         .send()
         .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+        .map_err(|e| {
+            // Distinguish between timeout and other errors
+            let error_msg = e.to_string();
+            if error_msg.contains("timeout") || error_msg.contains("timed out") {
+                error!("⏱️  Request timeout after {}s while fetching URL: {}", HTTP_REQUEST_TIMEOUT_SECS, url);
+                StatusCode::REQUEST_TIMEOUT
+            } else if error_msg.contains("connection") || error_msg.contains("connect") {
+                error!("🔌 Connection error while fetching URL: {} - error: {}", url, error_msg);
+                StatusCode::BAD_GATEWAY
+            } else {
+                error!("❌ Failed to fetch URL: {} - error: {}", url, error_msg);
+                StatusCode::BAD_REQUEST
+            }
+        })?;
 
-    if !response.status().is_success() {
-        tracing::warn!("Failed to download blob, status: {}", response.status());
+    let status = response.status();
+    info!("📥 Received HTTP response: {} {} for URL: {}", status.as_u16(), status, url);
+
+    if !status.is_success() {
+        warn!("⚠️  HTTP request failed with status {} for URL: {}", status, url);
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    info!("Successfully downloaded blob from URL: {}", url);
-
     let content_type = extract_content_type_from_response(response.headers());
-    let blob_bytes = response
-        .bytes()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let content_length = response.content_length();
 
-    let mut hasher = Sha256::new();
-    hasher.update(&blob_bytes);
-    let sha256 = format!("{:x}", hasher.finalize());
-
-    // Validate the SHA256 hash
-    if sha256 != expected_sha256 {
-        error!(
-            "SHA256 mismatch: expected {}, got {}",
-            expected_sha256, sha256
+    // Check size limit before starting download
+    let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
+    if let Some(content_length) = content_length {
+        info!("📊 Content-Length header present: {} bytes ({} MB)", 
+              content_length, content_length / (1024 * 1024));
+        
+        if content_length > max_size_bytes {
+            error!(
+                "❌ Blob too large: {} bytes ({} MB) exceeds maximum allowed: {} bytes ({} MB)",
+                content_length, 
+                content_length / (1024 * 1024),
+                max_size_bytes, 
+                state.max_upstream_download_size_mb
+            );
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        info!(
+            "✅ Blob size check passed: {} bytes ({} MB) within limit of {} MB",
+            content_length, 
+            content_length / (1024 * 1024),
+            state.max_upstream_download_size_mb
         );
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    } else {
+        warn!(
+            "⚠️  Blob has no Content-Length header, proceeding with streaming download (limit: {} MB)",
+            state.max_upstream_download_size_mb
+        );
     }
 
-    info!("Calculated SHA256: {}", sha256);
+    // Create temp file for streaming download
+    let temp_dir = state.upload_dir.join("temp");
+    fs::create_dir_all(&temp_dir).await.map_err(|e| {
+        error!("Failed to create temp directory: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
+    let temp_path = temp_dir.join(format!("mirror_{}", uuid::Uuid::new_v4()));
+    let _temp_guard = TempFileGuard::new(temp_path.clone());
+
+    info!("💾 Streaming blob to temp file: {}", temp_path.display());
+
+    // Stream download with hashing and size checking
+    let mut temp_file = File::create(&temp_path).await.map_err(|e| {
+        error!("❌ Failed to create temp file {}: {}", temp_path.display(), e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    info!("🔄 Starting streaming download with size validation and hashing");
+    let mut hasher = Sha256::new();
+    let mut body_size: u64 = 0;
+    let mut chunks = response.bytes_stream();
+    let mut chunk_count: u64 = 0;
+
+    while let Some(chunk_result) = chunks.next().await {
+        let chunk = chunk_result.map_err(|e| {
+            let error_msg = e.to_string();
+            if error_msg.contains("timeout") || error_msg.contains("timed out") {
+                error!("⏱️  Download timeout after {}s while reading chunk {} ({} bytes received so far)", 
+                      HTTP_REQUEST_TIMEOUT_SECS, chunk_count, body_size);
+                StatusCode::REQUEST_TIMEOUT
+            } else {
+                error!("❌ Failed to read chunk {} ({} bytes received so far): {}", 
+                      chunk_count, body_size, error_msg);
+                StatusCode::BAD_REQUEST
+            }
+        })?;
+        
+        chunk_count += 1;
+
+        // Check size limit during download (in case Content-Length was missing or wrong)
+        let new_size = body_size + chunk.len() as u64;
+        if new_size > max_size_bytes {
+            error!(
+                "❌ Download exceeded size limit at chunk {}: {} bytes > {} bytes ({} MB limit)",
+                chunk_count, new_size, max_size_bytes, max_size_bytes / (1024 * 1024)
+            );
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+
+        temp_file.write_all(&chunk).await.map_err(|e| {
+            error!("❌ Failed to write chunk {} to temp file {} ({} bytes written so far): {}", 
+                  chunk_count, temp_path.display(), body_size, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        hasher.update(&chunk);
+        body_size += chunk.len() as u64;
+
+        // Log progress every 1MB
+        if body_size % (1024 * 1024) == 0 {
+            let progress_mb = body_size / (1024 * 1024);
+            let percent = if let Some(expected) = content_length {
+                (body_size as f64 / expected as f64 * 100.0) as u8
+            } else {
+                0
+            };
+            if content_length.is_some() {
+                info!("📊 Download progress: {} MB / {} MB ({}%) - {} chunks", 
+                      progress_mb, state.max_upstream_download_size_mb, percent, chunk_count);
+            } else {
+                info!("📊 Download progress: {} MB / {} MB limit - {} chunks", 
+                      progress_mb, state.max_upstream_download_size_mb, chunk_count);
+            }
+        }
+    }
+    
+    info!("✅ Streaming completed: {} chunks, {} bytes total", chunk_count, body_size);
+
+    // Ensure all data is written to disk
+    info!("💾 Syncing temp file to disk: {}", temp_path.display());
+    temp_file.sync_all().await.map_err(|e| {
+        error!("❌ Failed to sync temp file {}: {}", temp_path.display(), e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    drop(temp_file);
+    info!("✅ Temp file synced successfully");
+
+    let sha256 = format!("{:x}", hasher.finalize());
+    info!("🔐 Calculated SHA256: {} (expected from auth event: {})", sha256, expected_sha256);
+
+    // Validate the SHA256 hash matches the one from auth event
+    if sha256 != expected_sha256 {
+        error!(
+            "❌ SHA256 hash mismatch! Expected: {}, Calculated: {}",
+            expected_sha256, sha256
+        );
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    info!("✅ SHA256 validation passed: {}", sha256);
+
+    // Move temp file to final location
     let extension = content_type.split('/').next_back().unwrap_or("bin");
     let filepath = get_nested_path(&state.upload_dir, &sha256, Some(extension));
 
@@ -267,23 +525,26 @@ pub async fn mirror_blob(
         })?;
     }
 
-    info!("Saving blob to: {}", filepath.display());
+    info!("📦 Moving blob from temp {} to final location: {}", 
+          temp_path.display(), filepath.display());
 
-    let mut file = File::create(&filepath)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    file.write_all(&blob_bytes)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    fs::rename(&temp_path, &filepath).await.map_err(|e| {
+        error!("❌ Failed to move temp file {} to final location {}: {}", 
+               temp_path.display(), filepath.display(), e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    info!("Blob saved successfully to: {}", filepath.display());
+    // Drop temp guard early since we've successfully moved the file
+    drop(_temp_guard);
+
+    info!("✅ Blob saved successfully to: {} ({} bytes)", filepath.display(), body_size);
 
     let content_type_clone = content_type.clone();
     let extension = content_type_clone.split('/').next_back().map(|s| s.to_string());
     let descriptor_content_type = content_type_clone.clone();
     let descriptor = state.create_blob_descriptor(
         &sha256,
-        blob_bytes.len() as u64,
+        body_size,
         Some(descriptor_content_type),
     );
 
@@ -293,21 +554,24 @@ pub async fn mirror_blob(
             path: filepath.clone(),
             extension,
             mime_type: Some(content_type_clone),
-            size: blob_bytes.len() as u64,
+            size: body_size,
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
         },
     );
-    info!("Blob descriptor created for SHA256: {}", sha256);
+    info!("✅ Blob descriptor created and added to index for SHA256: {}", sha256);
 
     // Track mirror upload statistics
-    track_upload_stats(&state, blob_bytes.len() as u64).await;
+    track_upload_stats(&state, body_size).await;
 
     // After successful mirroring
     let mut changes_pending = state.changes_pending.write().await;
     *changes_pending = true;
+
+    info!("🎉 Mirror operation completed successfully: {} -> {} ({} bytes, type: {})", 
+          url, sha256, body_size, descriptor.r#type.as_ref().unwrap_or(&"unknown".to_string()));
 
     Ok(Response::builder()
         .status(StatusCode::CREATED)
