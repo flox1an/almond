@@ -211,6 +211,7 @@ fn is_private_ip(ip: IpAddr) -> bool {
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 const HTTP_CONNECT_TIMEOUT_SECS: u64 = 10;
 const DNS_LOOKUP_TIMEOUT_SECS: u64 = 5;
+const HTTP_REQUEST_MAX_REDIRECTS: u8 = 5;
 
 /// Validate URL is safe to fetch (HTTPS only, no private IPs)
 async fn validate_url_for_ssrf(url: &str) -> Result<(), StatusCode> {
@@ -336,12 +337,25 @@ pub async fn mirror_blob(
     // Validate URL for SSRF protection
     validate_url_for_ssrf(url).await?;
 
-    info!("🌐 Creating hardened HTTP client (redirects: disabled, request timeout: {}s, connect timeout: {}s)",
-          HTTP_REQUEST_TIMEOUT_SECS, HTTP_CONNECT_TIMEOUT_SECS);
+    // Configure redirect policy based on constant
+    let redirect_policy = if HTTP_REQUEST_MAX_REDIRECTS == 0 {
+        redirect::Policy::none()
+    } else {
+        redirect::Policy::limited(HTTP_REQUEST_MAX_REDIRECTS as usize)
+    };
 
-    // Create a hardened HTTP client with no redirects and timeouts
+    let redirect_info = if HTTP_REQUEST_MAX_REDIRECTS == 0 {
+        "disabled".to_string()
+    } else {
+        format!("limited to {}", HTTP_REQUEST_MAX_REDIRECTS)
+    };
+
+    info!("🌐 Creating hardened HTTP client (redirects: {}, request timeout: {}s, connect timeout: {}s)",
+          redirect_info, HTTP_REQUEST_TIMEOUT_SECS, HTTP_CONNECT_TIMEOUT_SECS);
+
+    // Create a hardened HTTP client with configurable redirects and timeouts
     let client = Client::builder()
-        .redirect(redirect::Policy::none()) // Disable redirects to prevent SSRF
+        .redirect(redirect_policy)
         .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
         .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
         .build()
