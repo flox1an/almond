@@ -157,6 +157,25 @@ async fn load_app_state() -> AppState {
         );
     }
 
+    // Parse feature flags (default to true if not set)
+    let feature_upload_enabled = env::var("FEATURE_UPLOAD_ENABLED")
+        .unwrap_or_else(|_| "true".to_string())
+        .parse::<bool>()
+        .unwrap_or(true);
+    
+    let feature_mirror_enabled = env::var("FEATURE_MIRROR_ENABLED")
+        .unwrap_or_else(|_| "true".to_string())
+        .parse::<bool>()
+        .unwrap_or(true);
+    
+    let feature_list_enabled = env::var("FEATURE_LIST_ENABLED")
+        .unwrap_or_else(|_| "true".to_string())
+        .parse::<bool>()
+        .unwrap_or(true);
+
+    info!("⚙️ Feature flags - Upload: {}, Mirror: {}, List: {}", 
+          feature_upload_enabled, feature_mirror_enabled, feature_list_enabled);
+
     // Parse allowed pubkeys from environment variable
     let allowed_pubkeys: Vec<PublicKey> = env::var("ALLOWED_NPUBS")
         .unwrap_or_default()
@@ -196,6 +215,9 @@ async fn load_app_state() -> AppState {
         max_upstream_download_size_mb,
         max_chunk_size_mb,
         chunk_cleanup_timeout_minutes,
+        feature_upload_enabled,
+        feature_mirror_enabled,
+        feature_list_enabled,
         ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
         chunk_uploads: Arc::new(RwLock::new(HashMap::new())),
         failed_upstream_lookups: Arc::new(RwLock::new(HashMap::new())),

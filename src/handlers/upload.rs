@@ -34,6 +34,12 @@ pub async fn upload_file(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, StatusCode> {
+    // Check if upload feature is enabled
+    if !state.feature_upload_enabled {
+        error!("Upload feature is disabled");
+        return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
+
     // Validate Nostr authorization
     let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
         error!("Missing Authorization header");
@@ -299,6 +305,12 @@ pub async fn mirror_blob(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, StatusCode> {
+    // Check if mirror feature is enabled
+    if !state.feature_mirror_enabled {
+        error!("Mirror feature is disabled");
+        return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
+
     // Validate Nostr authorization
     let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
         error!("Missing Authorization header");
@@ -600,6 +612,12 @@ pub async fn patch_upload(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, StatusCode> {
+    // Check if upload feature is enabled
+    if !state.feature_upload_enabled {
+        error!("Upload feature is disabled");
+        return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
+
     // Extract required headers
     let sha256 = headers.get(X_SHA_256_HEADER)
         .and_then(|h| h.to_str().ok())

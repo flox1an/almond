@@ -39,6 +39,9 @@ pub struct AppState {
     pub max_upstream_download_size_mb: u64,
     pub max_chunk_size_mb: u64,
     pub chunk_cleanup_timeout_minutes: u64,
+    pub feature_upload_enabled: bool,
+    pub feature_mirror_enabled: bool,
+    pub feature_list_enabled: bool,
     pub ongoing_downloads:
         Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>,
     pub chunk_uploads: Arc<RwLock<HashMap<String, ChunkUpload>>>,

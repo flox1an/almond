@@ -16,6 +16,12 @@ pub async fn list_blobs(
     headers: HeaderMap,
     req: Request,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Check if list feature is enabled
+    if !state.feature_list_enabled {
+        warn!("List feature is disabled");
+        return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
+
     // Log request details for debugging
     let method = req.method();
     let uri = req.uri();
@@ -224,14 +230,3 @@ pub async fn list_blobs(
     // Return just the array of blobs
     Ok(Json(serde_json::Value::Array(paginated_blobs)))
 }
-
-// Note: ERR_BLOCKED_BY_CLIENT errors in the browser are typically caused by:
-// 1. Browser extensions (ad blockers, privacy extensions)
-// 2. Browser security policies
-// 3. CORS issues (though our CORS middleware should handle this)
-// 
-// To debug:
-// - Check browser console for detailed error messages
-// - Try disabling browser extensions
-// - Check if the request is actually reaching the server (check server logs)
-// - Verify CORS headers are being sent correctly
