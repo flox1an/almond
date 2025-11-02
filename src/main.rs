@@ -1,8 +1,10 @@
 pub mod constants;
+pub mod error;
 pub mod handlers;
 pub mod helpers;
 pub mod middleware;
 pub mod models;
+pub mod services;
 pub mod trust_network;
 pub mod utils;
 

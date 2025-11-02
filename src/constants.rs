@@ -18,3 +18,9 @@ pub const DEFAULT_MIME_TYPE: &str = "application/octet-stream";
 
 // Cache control
 pub const CACHE_CONTROL_IMMUTABLE: &str = "public, max-age=31536000, immutable";
+
+// HTTP client timeout constants
+pub const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
+pub const HTTP_CONNECT_TIMEOUT_SECS: u64 = 10;
+pub const DNS_LOOKUP_TIMEOUT_SECS: u64 = 5;
+pub const HTTP_REQUEST_MAX_REDIRECTS: u8 = 5;
