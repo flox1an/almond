@@ -55,9 +55,7 @@ async fn serve_index(State(state): State<AppState>) -> Result<axum::response::Re
         .unwrap())
 }
 
-async fn method_not_allowed() -> &'static str {
-    "Method not allowed"
-}
+
 
 pub async fn create_app(state: AppState) -> Router {
     // Calculate max chunk size in bytes
@@ -73,7 +71,7 @@ pub async fn create_app(state: AppState) -> Router {
         .route("/_upstream", get(get_upstream))
         .route("/", get(serve_index))
         .route("/index.html", get(serve_index))
-        .route("/:filename", delete(method_not_allowed))
+        .route("/:filename", delete(delete_blob))
         .route(
             "/:filename",
             get(handle_file_request).head(handle_file_request),
