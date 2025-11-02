@@ -93,9 +93,8 @@ pub async fn list_blobs(
                     debug!("🔐 Authorization header length: {} chars", auth_str.len());
                     
                     // Check if it starts with "Nostr "
-                    if auth_str.starts_with("Nostr ") {
+                    if let Some(base64_part) = auth_str.strip_prefix("Nostr ") {
                         info!("✅ Authorization header has 'Nostr ' prefix");
-                        let base64_part = &auth_str[6..];
                         debug!("🔐 Base64 part length: {} chars", base64_part.len());
                         
                         // Try to decode base64 to see if it's valid
@@ -167,63 +166,53 @@ pub async fn list_blobs(
         }
     }
 
-    // Validate query parameters
-    let start = params.since.unwrap_or(0) as usize;
-    let limit = params.until.unwrap_or(100) as usize;
-    info!("📋 Query parameters: since={} (offset), until={} (limit)", start, limit);
-
-    if limit > 1000 {
-        warn!("⚠️  Requested limit {} exceeds recommended maximum of 1000, capping to 1000", limit);
-    }
+    // Validate query parameters according to BUD-02
+    // since and until are unix timestamps to filter by uploaded date
+    let since = params.since.unwrap_or(0);
+    let until = params.until.unwrap_or(u64::MAX);
+    info!("📋 Query parameters: since={} (unix timestamp), until={} (unix timestamp)", since, until);
 
     let file_index = state.file_index.read().await;
     let total_files = file_index.len();
     info!("📋 Total files in index: {}", total_files);
     
-    // Build list of blobs with correct format
+    // Build list of blobs with correct format and filter by since/until
     let mut blobs: Vec<serde_json::Value> = file_index
         .iter()
-        .map(|(sha256, metadata)| {
-            // Build URL: {public_url}/{sha256}.{extension} or {public_url}/{sha256}
-            let url = match &metadata.extension {
-                Some(ext) => format!("{}/{}.{}", state.public_url, sha256, ext),
-                None => format!("{}/{}", state.public_url, sha256),
-            };
-            
-            json!({
-                "created": metadata.created_at,
-                "type": metadata.mime_type.as_ref().unwrap_or(&"application/octet-stream".to_string()),
-                "sha256": sha256,
-                "size": metadata.size,
-                "url": url
-            })
+        .filter_map(|(sha256, metadata)| {
+            // Filter by uploaded timestamp (created_at)
+            if metadata.created_at >= since && metadata.created_at <= until {
+                // Build URL: {public_url}/{sha256}.{extension} or {public_url}/{sha256}
+                let url = match &metadata.extension {
+                    Some(ext) => format!("{}/{}.{}", state.public_url, sha256, ext),
+                    None => format!("{}/{}", state.public_url, sha256),
+                };
+                
+                Some(json!({
+                    "url": url,
+                    "sha256": sha256,
+                    "size": metadata.size,
+                    "type": metadata.mime_type.as_ref().unwrap_or(&"application/octet-stream".to_string()),
+                    "uploaded": metadata.created_at
+                }))
+            } else {
+                None
+            }
         })
         .collect();
 
-    info!("📋 Collected {} files from index", blobs.len());
+    info!("📋 Collected {} files from index (filtered by since/until)", blobs.len());
 
-    // Sort by created descending (newest first)
+    // Sort by uploaded descending (newest first)
     blobs.sort_by(|a, b| {
-        let a_time = a["created"].as_u64().unwrap_or(0);
-        let b_time = b["created"].as_u64().unwrap_or(0);
+        let a_time = a["uploaded"].as_u64().unwrap_or(0);
+        let b_time = b["uploaded"].as_u64().unwrap_or(0);
         b_time.cmp(&a_time)
     });
 
-    info!("📋 Files sorted by created (newest first)");
+    info!("📋 Files sorted by uploaded (newest first)");
 
-    // Apply pagination (using since/until as offset/limit for now)
-    let capped_limit = limit.min(1000);
-    let end = (start + capped_limit).min(blobs.len());
-
-    let paginated_blobs = if start < blobs.len() {
-        let result = blobs[start..end].to_vec();
-        info!("📋 Pagination: returning {} blobs (offset: {}, limit: {}, total: {})", 
-              result.len(), start, capped_limit, blobs.len());
-        result
-    } else {
-        warn!("⚠️  Requested offset {} exceeds total files {}, returning empty result", start, blobs.len());
-        Vec::new()
-    };
+    let paginated_blobs = blobs;
 
     info!("✅ LIST request completed successfully: {} blobs returned", paginated_blobs.len());
 

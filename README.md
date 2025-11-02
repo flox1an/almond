@@ -31,7 +31,7 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 - `PATCH /upload` - Chunked upload (BUD-2) 
 - `GET /:filename` - Download a file by SHA256 hash (supports `?origin=` parameter when `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=true`)
 - `HEAD /:filename` - Get file metadata
-- `GET /list` - List all stored files
+- `GET /list` - List all stored files (supports `?since=` and `?until=` unix timestamp parameters for filtering by upload date, BUD-2)
 - `PUT /mirror` - Mirror a file from another server (BUD-4)
 
 ### System Information

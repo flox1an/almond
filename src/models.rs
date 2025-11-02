@@ -9,6 +9,8 @@ use std::{
 };
 use tokio::sync::{Notify, RwLock};
 
+type OngoingDownloadsMap = Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>;
+
 #[derive(Clone)]
 pub struct FileMetadata {
     pub path: PathBuf,
@@ -44,8 +46,7 @@ pub struct AppState {
     pub feature_list_enabled: bool,
     pub feature_custom_upstream_origin_enabled: bool,
     pub feature_homepage_enabled: bool,
-    pub ongoing_downloads:
-        Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>,
+    pub ongoing_downloads: OngoingDownloadsMap,
     pub chunk_uploads: Arc<RwLock<HashMap<String, ChunkUpload>>>,
     pub failed_upstream_lookups: Arc<RwLock<HashMap<String, Instant>>>,
 }

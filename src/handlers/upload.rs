@@ -497,7 +497,7 @@ pub async fn mirror_blob(
         body_size += chunk.len() as u64;
 
         // Log progress every 1MB
-        if body_size % (1024 * 1024) == 0 {
+        if body_size.is_multiple_of(1024 * 1024) {
             let progress_mb = body_size / (1024 * 1024);
             let percent = if let Some(expected) = content_length {
                 (body_size as f64 / expected as f64 * 100.0) as u8

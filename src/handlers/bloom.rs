@@ -28,7 +28,7 @@ pub async fn get_bloom(
 	let index = state.file_index.read().await;
 	let num_items = index.len().max(1);
 	let fp = q.fp.unwrap_or(0.01).clamp(1e-6, 0.2);
-	let mut bloom = Bloom::new_for_fp_rate(num_items as usize, fp);
+	let mut bloom = Bloom::new_for_fp_rate(num_items, fp);
 	for key in index.keys() {
 		// Keys in index are filename prefixes (first 64 chars of sha256). Insert as bytes.
 		bloom.set(key.as_bytes());
