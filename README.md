@@ -29,7 +29,7 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 ### File Operations
 - `PUT /upload` - Upload a file (BUD-1)
 - `PATCH /upload` - Chunked upload (BUD-2) 
-- `GET /:filename` - Download a file by SHA256 hash
+- `GET /:filename` - Download a file by SHA256 hash (supports `?origin=` parameter when `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=true`)
 - `HEAD /:filename` - Get file metadata
 - `GET /list` - List all stored files
 - `PUT /mirror` - Mirror a file from another server (BUD-4)
@@ -75,9 +75,9 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 - `BIND_ADDR`: Address to bind the server to (default: "127.0.0.1:3000")
 - `PUBLIC_URL`: Public URL for the service (default: "http://127.0.0.1:3000")
 - `STORAGE_PATH`: Path where files are stored (default: "./files")
-- `MAX_TOTAL_SIZE`: Maximum total storage size in MB (default: 99999999)
+- `MAX_TOTAL_SIZE`: Maximum total storage size in MB (default: 99999)
 - `MAX_TOTAL_FILES`: Maximum number of files (default: 99999999)
-- `CLEANUP_INTERVAL_SECS`: Interval for cleanup checks in seconds (default: 60)
+- `CLEANUP_INTERVAL_SECS`: Interval for cleanup checks in seconds (default: 30)
 - `MAX_FILE_AGE_DAYS`: Maximum age of files in days, 0 for no limit (default: 0)
 - `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback (optional)
 - `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: 100)
@@ -85,6 +85,11 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 - `CHUNK_CLEANUP_TIMEOUT_MINUTES`: Timeout for cleaning up abandoned chunked uploads in minutes (default: 30)
 - `ALLOW_WOT`: Enable web of trust (optional)
 - `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys (optional)
+- `FEATURE_UPLOAD_ENABLED`: Enable upload endpoint (default: true)
+- `FEATURE_MIRROR_ENABLED`: Enable mirror endpoint (default: true)
+- `FEATURE_LIST_ENABLED`: Enable list endpoint (default: true)
+- `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED`: Enable custom upstream origin via `?origin=` URL parameter (default: false)
+- `FEATURE_HOMEPAGE_ENABLED`: Enable homepage/landing page (default: true)
 
 ## Internals
 - Blobs are stored in `STORAGE_PATH` within a folder structure with a two layer hierarchy of folders with the first and second letter of the SHA256 storage hash, e.g. 
@@ -144,8 +149,15 @@ All environment variables can be overridden when running the container:
 - `MAX_FILE_AGE_DAYS`: Maximum file age in days
 - `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback
 - `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB
+- `MAX_CHUNK_SIZE_MB`: Maximum size for individual chunks in chunked uploads in MB
+- `CHUNK_CLEANUP_TIMEOUT_MINUTES`: Timeout for cleaning up abandoned chunked uploads in minutes
 - `ALLOW_WOT`: Enable web of trust
 - `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys
+- `FEATURE_UPLOAD_ENABLED`: Enable upload endpoint (default: true)
+- `FEATURE_MIRROR_ENABLED`: Enable mirror endpoint (default: true)
+- `FEATURE_LIST_ENABLED`: Enable list endpoint (default: true)
+- `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED`: Enable custom upstream origin via `?origin=` URL parameter (default: false)
+- `FEATURE_HOMEPAGE_ENABLED`: Enable homepage/landing page (default: true)
 
 ### Volume Mounting
 

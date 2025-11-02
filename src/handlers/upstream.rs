@@ -46,6 +46,7 @@ pub async fn try_upstream_servers(
     state: &AppState,
     filename: &str,
     headers: &HeaderMap,
+    custom_origin: Option<&str>,
 ) -> Result<Response, StatusCode> {
     // Forward range requests to upstream servers
     if headers.get(header::RANGE).is_some() {
@@ -60,10 +61,94 @@ pub async fn try_upstream_servers(
         );
 
         // Proxy the request to upstream while download is in progress
-        return proxy_request_to_upstream(state, filename, headers).await;
+        return proxy_request_to_upstream(state, filename, headers, custom_origin).await;
     }
 
     let client = Client::new();
+
+    // Try custom origin first if provided
+    if let Some(origin_url) = custom_origin {
+        info!("Trying custom origin server first: {}", origin_url);
+        let file_url = format!("{}/{}", origin_url.trim_end_matches('/'), filename);
+        info!("Trying upstream server: {}", file_url);
+
+        // Create request with all relevant headers for upstream servers
+        let request = client.get(&file_url);
+        let request = copy_headers_to_reqwest(headers, request);
+
+        match request.send().await {
+            Ok(response) if response.status().is_success() => {
+                info!("Found file on custom origin server: {}", file_url);
+                // Get content type from upstream response
+                let content_type = extract_content_type_from_response(response.headers());
+                // Check if this is a range request
+                let has_range_header = headers.get(header::RANGE).is_some();
+                
+                if has_range_header {
+                    info!("Range request detected for non-existent file {}, starting download from byte 0", filename);
+                    // For range requests, we need to start a full download in the background
+                    // while proxying the range request for immediate response
+                    let full_request = client.get(&file_url);
+                    let full_request = copy_headers_without_range(headers, full_request);
+                    
+                    match full_request.send().await {
+                        Ok(full_response) if full_response.status().is_success() => {
+                            info!("Starting full download from byte 0 for range request: {}", filename);
+                            // Prepare download state
+                            let (temp_path, _written_len, _notify) = prepare_download_state(state, filename, &content_type).await?;
+                            // Start the download in the background
+                            let state_clone = state.clone();
+                            let file_url_clone = file_url.clone();
+                            let filename_clone = filename.to_string();
+                            let content_type_clone = content_type.clone();
+                            let temp_path_clone = temp_path.clone();
+                            tokio::spawn(async move {
+                                download_file_from_upstream_background(
+                                    &state_clone,
+                                    &file_url_clone,
+                                    full_response,
+                                    &filename_clone,
+                                    &content_type_clone,
+                                    &temp_path_clone,
+                                )
+                                .await;
+                            });
+                            // Proxy the range request to upstream for immediate response
+                            info!("Proxying range request to upstream while download starts in background: {}", filename);
+                            return proxy_upstream_response(response, &content_type, filename).await;
+                        }
+                        Ok(_) | Err(_) => {
+                            warn!("Failed to start full download for range request, proxying range request only: {}", filename);
+                            return proxy_upstream_response(response, &content_type, filename).await;
+                        }
+                    }
+                } else {
+                    // For non-range requests, stream and save from upstream
+                    info!("Non-range request, starting download and streaming to client: {}", filename);
+                    // Prepare download state
+                    let (temp_path, written_len, notify) = prepare_download_state(state, filename, &content_type).await?;
+                    return stream_and_save_from_upstream(
+                        state,
+                        &file_url,
+                        response,
+                        filename,
+                        written_len,
+                        notify,
+                        temp_path,
+                    )
+                    .await;
+                }
+            }
+            Ok(response) => {
+                info!("Custom origin server {} returned status: {}", file_url, response.status());
+            }
+            Err(e) => {
+                warn!("Failed to fetch from custom origin {}: {}", file_url, e);
+            }
+        }
+        // If custom origin failed, continue to regular upstream servers
+        info!("Custom origin failed, trying configured upstream servers");
+    }
 
     // Try each upstream server
     for upstream_url in &state.upstream_servers {
@@ -167,10 +252,42 @@ async fn proxy_request_to_upstream(
     state: &AppState,
     filename: &str,
     headers: &HeaderMap,
+    custom_origin: Option<&str>,
 ) -> Result<Response<Body>, StatusCode> {
     info!("Proxying request to upstream for ongoing download: {}", filename);
     
     let client = Client::new();
+    
+    // Try custom origin first if provided
+    if let Some(origin_url) = custom_origin {
+        let file_url = format!("{}/{}", origin_url.trim_end_matches('/'), filename);
+        info!("Proxying to custom origin server: {}", file_url);
+
+        // Create request with all relevant headers
+        let request = client.get(&file_url);
+        let request = copy_headers_to_reqwest(headers, request);
+
+        match request.send().await {
+            Ok(response) if response.status().is_success() => {
+                info!("Successfully proxied request to custom origin: {}", file_url);
+                
+                // Get content type from upstream response
+                let content_type = extract_content_type_from_response(response.headers());
+
+                return proxy_upstream_response(response, &content_type, filename).await;
+            }
+            Ok(response) => {
+                info!(
+                    "Custom origin server {} returned status: {}",
+                    file_url,
+                    response.status()
+                );
+            }
+            Err(e) => {
+                warn!("Failed to proxy to custom origin {}: {}", file_url, e);
+            }
+        }
+    }
     
     // Try each upstream server
     for upstream_url in &state.upstream_servers {

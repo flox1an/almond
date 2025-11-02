@@ -42,6 +42,8 @@ pub struct AppState {
     pub feature_upload_enabled: bool,
     pub feature_mirror_enabled: bool,
     pub feature_list_enabled: bool,
+    pub feature_custom_upstream_origin_enabled: bool,
+    pub feature_homepage_enabled: bool,
     pub ongoing_downloads:
         Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>,
     pub chunk_uploads: Arc<RwLock<HashMap<String, ChunkUpload>>>,
@@ -178,6 +180,11 @@ pub struct Stats {
 pub struct ListQuery {
     pub since: Option<u64>,
     pub until: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FileRequestQuery {
+    pub origin: Option<String>,
 }
 
 #[derive(Clone)]

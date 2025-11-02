@@ -18,11 +18,12 @@ use dotenv::dotenv;
 use nostr_relay_pool::prelude::*;
 use tokio::fs;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber;
 
 use axum::{
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, State},
+    http::StatusCode,
     middleware::from_fn,
     routing::{delete, get, put},
 };
@@ -38,17 +39,22 @@ async fn options_upload() -> &'static str {
     "Method not allowed"
 }
 
-async fn serve_index() -> axum::response::Response<axum::body::Body> {
+async fn serve_index(State(state): State<AppState>) -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
     use axum::{
-        http::{header, StatusCode},
+        http::header,
         response::Response,
     };
     
-    Response::builder()
+    // Check if homepage feature is enabled
+    if !state.feature_homepage_enabled {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    
+    Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .body(axum::body::Body::from(include_str!("index.html")))
-        .unwrap()
+        .unwrap())
 }
 
 async fn method_not_allowed() -> &'static str {
@@ -79,6 +85,38 @@ pub async fn create_app(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Clear temp directory recursively, removing all files and subdirectories
+async fn clear_temp_directory(temp_dir: &PathBuf) -> Result<(), std::io::Error> {
+    if !temp_dir.exists() {
+        return Ok(());
+    }
+
+    let mut entries = fs::read_dir(temp_dir).await?;
+    let mut removed_count = 0;
+    
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        
+        if path.is_dir() {
+            // Recursively remove directory
+            fs::remove_dir_all(&path).await?;
+            removed_count += 1;
+            info!("🗑️  Removed temp directory: {}", path.display());
+        } else if path.is_file() {
+            // Remove file
+            fs::remove_file(&path).await?;
+            removed_count += 1;
+            info!("🗑️  Removed temp file: {}", path.display());
+        }
+    }
+    
+    if removed_count > 0 {
+        info!("✅ Cleared {} items from temp directory", removed_count);
+    }
+    
+    Ok(())
+}
+
 async fn load_app_state() -> AppState {
     dotenv().ok();
 
@@ -103,6 +141,20 @@ async fn load_app_state() -> AppState {
     let upload_dir = PathBuf::from(&storage_path);
     fs::create_dir_all(&upload_dir).await.unwrap();
     info!("⚙️ Storage path: {}", upload_dir.display());
+
+    // Clear temp directory on startup
+    let temp_dir = upload_dir.join("temp");
+    if temp_dir.exists() {
+        info!("🧹 Clearing temp directory on startup: {}", temp_dir.display());
+        if let Err(e) = clear_temp_directory(&temp_dir).await {
+            error!("⚠️  Failed to clear temp directory {}: {}", temp_dir.display(), e);
+            warn!("⚠️  Continuing startup with existing temp files (they may be orphaned)");
+        } else {
+            info!("✅ Temp directory cleared successfully");
+        }
+    } else {
+        info!("📁 Temp directory does not exist, no cleanup needed");
+    }
 
     let file_index = Arc::new(RwLock::new(HashMap::new()));
     build_file_index(&upload_dir, &file_index).await;
@@ -172,9 +224,19 @@ async fn load_app_state() -> AppState {
         .unwrap_or_else(|_| "true".to_string())
         .parse::<bool>()
         .unwrap_or(true);
+    
+    let feature_custom_upstream_origin_enabled = env::var("FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED")
+        .unwrap_or_else(|_| "false".to_string())
+        .parse::<bool>()
+        .unwrap_or(false);
+    
+    let feature_homepage_enabled = env::var("FEATURE_HOMEPAGE_ENABLED")
+        .unwrap_or_else(|_| "true".to_string())
+        .parse::<bool>()
+        .unwrap_or(true);
 
-    info!("⚙️ Feature flags - Upload: {}, Mirror: {}, List: {}", 
-          feature_upload_enabled, feature_mirror_enabled, feature_list_enabled);
+    info!("⚙️ Feature flags - Upload: {}, Mirror: {}, List: {}, CustomUpstreamOrigin: {}, Homepage: {}", 
+          feature_upload_enabled, feature_mirror_enabled, feature_list_enabled, feature_custom_upstream_origin_enabled, feature_homepage_enabled);
 
     // Parse allowed pubkeys from environment variable
     let allowed_pubkeys: Vec<PublicKey> = env::var("ALLOWED_NPUBS")
@@ -218,6 +280,8 @@ async fn load_app_state() -> AppState {
         feature_upload_enabled,
         feature_mirror_enabled,
         feature_list_enabled,
+        feature_custom_upstream_origin_enabled,
+        feature_homepage_enabled,
         ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
         chunk_uploads: Arc::new(RwLock::new(HashMap::new())),
         failed_upstream_lookups: Arc::new(RwLock::new(HashMap::new())),
