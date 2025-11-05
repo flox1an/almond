@@ -167,13 +167,20 @@ pub async fn enforce_storage_limits(state: &AppState) {
         .as_secs();
     let max_age_secs = state.max_file_age_days * 24 * 60 * 60;
 
+    let mut deleted_by_expiration = 0;
+    let mut deleted_by_age = 0;
+    let mut deleted_by_limits = 0;
+
     for (sha256, metadata) in files {
         // Check file expiration if expiration is set
         if let Some(expiration) = metadata.expiration {
             if now >= expiration {
-                info!("🗑 Deleting expired file (X-Expiration): {}", sha256);
+                info!("🗑 Deleting expired file (X-Expiration): {} (expired at {}, now {})",
+                      sha256, expiration, now);
                 if let Err(e) = fs::remove_file(&metadata.path).await {
                     error!("❌ Failed to delete expired file {}: {}", sha256, e);
+                } else {
+                    deleted_by_expiration += 1;
                 }
                 index.remove(&sha256);
                 continue;
@@ -185,6 +192,8 @@ pub async fn enforce_storage_limits(state: &AppState) {
             info!("🗑 Deleting expired file (MAX_FILE_AGE_DAYS): {}", sha256);
             if let Err(e) = fs::remove_file(&metadata.path).await {
                 error!("❌ Failed to delete expired file {}: {}", sha256, e);
+            } else {
+                deleted_by_age += 1;
             }
             index.remove(&sha256);
             continue;
@@ -196,11 +205,19 @@ pub async fn enforce_storage_limits(state: &AppState) {
             info!("🗑 Deleting file to enforce limits: {}", sha256);
             if let Err(e) = fs::remove_file(&metadata.path).await {
                 error!("❌ Failed to delete file {}: {}", sha256, e);
+            } else {
+                deleted_by_limits += 1;
             }
             index.remove(&sha256);
         } else {
             total_size += metadata.size;
         }
+    }
+
+    // Log cleanup summary
+    if deleted_by_expiration > 0 || deleted_by_age > 0 || deleted_by_limits > 0 {
+        info!("🧹 Cleanup summary: {} expired (X-Expiration), {} aged out (MAX_FILE_AGE_DAYS), {} by storage limits",
+              deleted_by_expiration, deleted_by_age, deleted_by_limits);
     }
 
     // Release the lock
