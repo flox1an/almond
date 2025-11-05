@@ -70,6 +70,7 @@ pub async fn add_to_index(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            pubkey: None,
             expiration,
         },
     );

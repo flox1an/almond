@@ -4,10 +4,28 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use nostr_relay_pool::prelude::*;
 use serde_json::json;
 use tracing::{debug, info, warn};
 
 use crate::models::{AppState, ListQuery};
+
+/// Parse author parameter (supports both npub and hex formats)
+fn parse_author(author: &str) -> Result<PublicKey, String> {
+    let author = author.trim();
+
+    // Try parsing as npub first
+    if let Ok(pubkey) = PublicKey::from_bech32(author) {
+        return Ok(pubkey);
+    }
+
+    // Try parsing as hex
+    if let Ok(pubkey) = PublicKey::from_hex(author) {
+        return Ok(pubkey);
+    }
+
+    Err(format!("Invalid author format: {}", author))
+}
 
 /// Handle list requests (supports both /list and /list/:id routes)
 pub async fn list_blobs(
@@ -170,18 +188,47 @@ pub async fn list_blobs(
     // since and until are unix timestamps to filter by uploaded date
     let since = params.since.unwrap_or(0);
     let until = params.until.unwrap_or(u64::MAX);
-    info!("📋 Query parameters: since={} (unix timestamp), until={} (unix timestamp)", since, until);
+
+    // Parse author parameter if provided (supports both npub and hex formats)
+    let filter_author = if let Some(ref author_str) = params.author {
+        match parse_author(author_str) {
+            Ok(pubkey) => {
+                info!("📋 Filtering by author: {} (parsed from: {})", pubkey.to_hex(), author_str);
+                Some(pubkey)
+            }
+            Err(e) => {
+                warn!("⚠️  Invalid author parameter: {}", e);
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        }
+    } else {
+        None
+    };
+
+    info!("📋 Query parameters: since={} (unix timestamp), until={} (unix timestamp), author={:?}",
+          since, until, filter_author.as_ref().map(|pk| pk.to_hex()));
 
     let file_index = state.file_index.read().await;
     let total_files = file_index.len();
     info!("📋 Total files in index: {}", total_files);
-    
-    // Build list of blobs with correct format and filter by since/until
+
+    // Build list of blobs with correct format and filter by since/until/author
     let mut blobs: Vec<serde_json::Value> = file_index
         .iter()
         .filter_map(|(sha256, metadata)| {
             // Filter by uploaded timestamp (created_at)
             if metadata.created_at >= since && metadata.created_at <= until {
+                // Filter by author if specified
+                if let Some(ref filter_pk) = filter_author {
+                    if let Some(ref metadata_pk) = metadata.pubkey {
+                        if metadata_pk != filter_pk {
+                            return None;
+                        }
+                    } else {
+                        // No pubkey in metadata, skip if filtering by author
+                        return None;
+                    }
+                }
                 // Build URL: {public_url}/{sha256}.{extension} or {public_url}/{sha256}
                 let url = match &metadata.extension {
                     Some(ext) => format!("{}/{}.{}", state.public_url, sha256, ext),

@@ -63,6 +63,7 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
                                     mime_type,
                                     size: metadata.len(),
                                     created_at,
+                                    pubkey: None,
                                     expiration,
                                 },
                             );

@@ -46,7 +46,7 @@ pub async fn try_upstream_servers(
     state: &AppState,
     filename: &str,
     headers: &HeaderMap,
-    custom_origin: Option<&str>,
+    custom_servers: Option<&[String]>,
 ) -> Result<Response, StatusCode> {
     // Forward range requests to upstream servers
     if headers.get(header::RANGE).is_some() {
@@ -61,16 +61,18 @@ pub async fn try_upstream_servers(
         );
 
         // Proxy the request to upstream while download is in progress
-        return proxy_request_to_upstream(state, filename, headers, custom_origin).await;
+        return proxy_request_to_upstream(state, filename, headers, custom_servers).await;
     }
 
     let client = Client::new();
 
-    // Try custom origin first if provided
-    if let Some(origin_url) = custom_origin {
-        info!("Trying custom origin server first: {}", origin_url);
-        let file_url = format!("{}/{}", origin_url.trim_end_matches('/'), filename);
-        info!("Trying upstream server: {}", file_url);
+    // Try custom servers first if provided
+    if let Some(servers) = custom_servers {
+        info!("Trying {} custom server(s) first", servers.len());
+        for origin_url in servers {
+            info!("Trying custom server: {}", origin_url);
+            let file_url = format!("{}/{}", origin_url.trim_end_matches('/'), filename);
+            info!("Trying upstream server: {}", file_url);
 
         // Create request with all relevant headers for upstream servers
         let request = client.get(&file_url);
@@ -140,14 +142,15 @@ pub async fn try_upstream_servers(
                 }
             }
             Ok(response) => {
-                info!("Custom origin server {} returned status: {}", file_url, response.status());
+                info!("Custom server {} returned status: {}", file_url, response.status());
             }
             Err(e) => {
-                warn!("Failed to fetch from custom origin {}: {}", file_url, e);
+                warn!("Failed to fetch from custom server {}: {}", file_url, e);
             }
         }
-        // If custom origin failed, continue to regular upstream servers
-        info!("Custom origin failed, trying configured upstream servers");
+        }
+        // If all custom servers failed, continue to regular upstream servers
+        info!("All custom servers failed, trying configured upstream servers");
     }
 
     // Try each upstream server
@@ -252,16 +255,18 @@ async fn proxy_request_to_upstream(
     state: &AppState,
     filename: &str,
     headers: &HeaderMap,
-    custom_origin: Option<&str>,
+    custom_servers: Option<&[String]>,
 ) -> Result<Response<Body>, StatusCode> {
     info!("Proxying request to upstream for ongoing download: {}", filename);
-    
+
     let client = Client::new();
-    
-    // Try custom origin first if provided
-    if let Some(origin_url) = custom_origin {
-        let file_url = format!("{}/{}", origin_url.trim_end_matches('/'), filename);
-        info!("Proxying to custom origin server: {}", file_url);
+
+    // Try custom servers first if provided
+    if let Some(servers) = custom_servers {
+        info!("Trying {} custom server(s) for proxying", servers.len());
+        for origin_url in servers {
+            let file_url = format!("{}/{}", origin_url.trim_end_matches('/'), filename);
+            info!("Proxying to custom server: {}", file_url);
 
         // Create request with all relevant headers
         let request = client.get(&file_url);
@@ -278,14 +283,15 @@ async fn proxy_request_to_upstream(
             }
             Ok(response) => {
                 info!(
-                    "Custom origin server {} returned status: {}",
+                    "Custom server {} returned status: {}",
                     file_url,
                     response.status()
                 );
             }
             Err(e) => {
-                warn!("Failed to proxy to custom origin {}: {}", file_url, e);
+                warn!("Failed to proxy to custom server {}: {}", file_url, e);
             }
+        }
         }
     }
     
@@ -639,6 +645,7 @@ async fn stream_and_save_from_upstream(
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs(),
+                        pubkey: None,
                         expiration: None,
                     },
                 );
@@ -832,6 +839,7 @@ async fn download_file_from_upstream_background(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            pubkey: None,
             expiration: None,
         },
     );

@@ -18,6 +18,7 @@ pub struct FileMetadata {
     pub mime_type: Option<String>,
     pub size: u64,
     pub created_at: u64,
+    pub pubkey: Option<PublicKey>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expiration: Option<u64>,
 }
@@ -187,11 +188,14 @@ pub struct Stats {
 pub struct ListQuery {
     pub since: Option<u64>,
     pub until: Option<u64>,
+    #[serde(rename = "as")]
+    pub author: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct FileRequestQuery {
-    pub origin: Option<String>,
+    #[serde(rename = "server")]
+    pub servers: Vec<String>,
 }
 
 #[derive(Clone)]
