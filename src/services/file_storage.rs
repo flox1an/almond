@@ -53,9 +53,10 @@ pub async fn add_to_index(
     extension: Option<String>,
     mime_type: Option<String>,
     size: u64,
+    expiration: Option<u64>,
 ) -> AppResult<()> {
     let key = sha256[..64.min(sha256.len())].to_string();
-    
+
     state.file_index.write().await.insert(
         key.clone(),
         FileMetadata {
@@ -67,10 +68,22 @@ pub async fn add_to_index(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            expiration,
         },
     );
-    
-    info!("Added file to index: {}", key);
+
+    if let Some(exp) = expiration {
+        info!("Added file to index: {} (expires: {})", key, exp);
+    } else {
+        info!("Added file to index: {}", key);
+    }
+
+    // Save metadata to disk if expiration is set
+    if expiration.is_some() {
+        use crate::utils::save_persisted_metadata;
+        save_persisted_metadata(&state.upload_dir, &state.file_index).await;
+    }
+
     Ok(())
 }
 

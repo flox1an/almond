@@ -639,6 +639,7 @@ async fn stream_and_save_from_upstream(
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs(),
+                        expiration: None,
                     },
                 );
                 info!("Successfully added file to index");
@@ -831,6 +832,7 @@ async fn download_file_from_upstream_background(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            expiration: None,
         },
     );
 

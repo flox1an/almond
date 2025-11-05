@@ -1,5 +1,6 @@
 use mime_guess::from_path;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -9,6 +10,11 @@ use tokio::{fs, sync::RwLock};
 use tracing::{error, info, warn};
 
 use crate::models::{AppState, FileMetadata};
+
+#[derive(Serialize, Deserialize)]
+struct PersistedMetadata {
+    expiration: Option<u64>,
+}
 
 pub fn get_nested_path(upload_dir: &Path, hash: &str, extension: Option<&str>) -> PathBuf {
     let first_level = &hash[..1];
@@ -24,9 +30,68 @@ pub fn get_nested_path(upload_dir: &Path, hash: &str, extension: Option<&str>) -
     path
 }
 
+fn get_metadata_path(upload_dir: &Path) -> PathBuf {
+    upload_dir.join("metadata.json")
+}
+
+async fn load_persisted_metadata(upload_dir: &Path) -> HashMap<String, PersistedMetadata> {
+    let metadata_path = get_metadata_path(upload_dir);
+
+    match fs::read_to_string(&metadata_path).await {
+        Ok(contents) => {
+            match serde_json::from_str(&contents) {
+                Ok(metadata) => metadata,
+                Err(e) => {
+                    warn!("Failed to parse metadata.json: {}", e);
+                    HashMap::new()
+                }
+            }
+        }
+        Err(_) => {
+            // File doesn't exist yet, that's okay
+            HashMap::new()
+        }
+    }
+}
+
+pub async fn save_persisted_metadata(
+    upload_dir: &Path,
+    index: &RwLock<HashMap<String, FileMetadata>>,
+) {
+    let metadata_path = get_metadata_path(upload_dir);
+    let index = index.read().await;
+
+    let mut persisted: HashMap<String, PersistedMetadata> = HashMap::new();
+
+    for (sha256, file_meta) in index.iter() {
+        if file_meta.expiration.is_some() {
+            persisted.insert(
+                sha256.clone(),
+                PersistedMetadata {
+                    expiration: file_meta.expiration,
+                },
+            );
+        }
+    }
+
+    match serde_json::to_string_pretty(&persisted) {
+        Ok(json) => {
+            if let Err(e) = fs::write(&metadata_path, json).await {
+                error!("Failed to write metadata.json: {}", e);
+            }
+        }
+        Err(e) => {
+            error!("Failed to serialize metadata: {}", e);
+        }
+    }
+}
+
 pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, FileMetadata>>) {
     let mut map = HashMap::new();
     let mut dirs_to_process = vec![upload_dir.to_path_buf()];
+
+    // Load persisted metadata (expiration data)
+    let persisted_metadata = load_persisted_metadata(upload_dir).await;
 
     while let Some(current_dir) = dirs_to_process.pop() {
         if let Ok(mut entries) = fs::read_dir(&current_dir).await {
@@ -34,6 +99,11 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
                 let path = entry.path();
                 if path.is_file() {
                     if let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) {
+                        // Skip metadata.json file itself
+                        if name == "metadata.json" {
+                            continue;
+                        }
+
                         let key = name[..64.min(name.len())].to_string();
                         if let Ok(metadata) = entry.metadata().await {
                             let extension = path
@@ -50,6 +120,11 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
                                 .unwrap_or_default()
                                 .as_secs();
 
+                            // Get expiration from persisted metadata if it exists
+                            let expiration = persisted_metadata
+                                .get(&key)
+                                .and_then(|pm| pm.expiration);
+
                             map.insert(
                                 key,
                                 FileMetadata {
@@ -58,6 +133,7 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
                                     mime_type,
                                     size: metadata.len(),
                                     created_at,
+                                    expiration,
                                 },
                             );
                         }
@@ -135,15 +211,30 @@ pub async fn enforce_storage_limits(state: &AppState) {
         .unwrap_or_default()
         .as_secs();
     let max_age_secs = state.max_file_age_days * 24 * 60 * 60;
+    let mut files_deleted = false;
 
     for (sha256, metadata) in files {
+        // Check file expiration if expiration is set
+        if let Some(expiration) = metadata.expiration {
+            if now >= expiration {
+                info!("🗑 Deleting expired file (X-Expiration): {}", sha256);
+                if let Err(e) = fs::remove_file(&metadata.path).await {
+                    error!("❌ Failed to delete expired file {}: {}", sha256, e);
+                }
+                index.remove(&sha256);
+                files_deleted = true;
+                continue;
+            }
+        }
+
         // Check file age if max_age_days is set
         if state.max_file_age_days > 0 && now - metadata.created_at > max_age_secs {
-            info!("🗑 Deleting expired file: {}", sha256);
+            info!("🗑 Deleting expired file (MAX_FILE_AGE_DAYS): {}", sha256);
             if let Err(e) = fs::remove_file(&metadata.path).await {
                 error!("❌ Failed to delete expired file {}: {}", sha256, e);
             }
             index.remove(&sha256);
+            files_deleted = true;
             continue;
         }
 
@@ -155,9 +246,18 @@ pub async fn enforce_storage_limits(state: &AppState) {
                 error!("❌ Failed to delete file {}: {}", sha256, e);
             }
             index.remove(&sha256);
+            files_deleted = true;
         } else {
             total_size += metadata.size;
         }
+    }
+
+    // Release the lock before calling save_persisted_metadata
+    drop(index);
+
+    // Save updated metadata if files were deleted
+    if files_deleted {
+        save_persisted_metadata(&state.upload_dir, &state.file_index).await;
     }
 
     // Clean up empty directories

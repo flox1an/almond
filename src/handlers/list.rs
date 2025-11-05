@@ -188,13 +188,22 @@ pub async fn list_blobs(
                     None => format!("{}/{}", state.public_url, sha256),
                 };
                 
-                Some(json!({
+                let mut blob = json!({
                     "url": url,
                     "sha256": sha256,
                     "size": metadata.size,
                     "type": metadata.mime_type.as_ref().unwrap_or(&"application/octet-stream".to_string()),
                     "uploaded": metadata.created_at
-                }))
+                });
+
+                // Add expiration if present
+                if let Some(expiration) = metadata.expiration {
+                    if let Some(obj) = blob.as_object_mut() {
+                        obj.insert("expiration".to_string(), json!(expiration));
+                    }
+                }
+
+                Some(blob)
             } else {
                 None
             }
