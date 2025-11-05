@@ -242,6 +242,7 @@ pub async fn finalize_upload(
         &state.upload_dir,
         sha256,
         extension.as_deref(),
+        expiration,
     );
 
     file_storage::move_file(temp_path, &final_path).await?;

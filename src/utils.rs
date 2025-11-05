@@ -1,6 +1,5 @@
 use mime_guess::from_path;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -11,87 +10,25 @@ use tracing::{error, info, warn};
 
 use crate::models::{AppState, FileMetadata};
 
-#[derive(Serialize, Deserialize)]
-struct PersistedMetadata {
-    expiration: Option<u64>,
-}
-
-pub fn get_nested_path(upload_dir: &Path, hash: &str, extension: Option<&str>) -> PathBuf {
+pub fn get_nested_path(upload_dir: &Path, hash: &str, extension: Option<&str>, expiration: Option<u64>) -> PathBuf {
     let first_level = &hash[..1];
     let second_level = &hash[1..2];
     let mut path = upload_dir.join(first_level).join(second_level);
 
-    if let Some(ext) = extension {
-        path = path.join(format!("{}.{}", hash, ext));
-    } else {
-        path = path.join(hash);
-    }
+    // Build filename: <hash>_<expiration>.<ext> or <hash>_<expiration> or <hash>.<ext> or <hash>
+    let filename = match (expiration, extension) {
+        (Some(exp), Some(ext)) => format!("{}_{}.{}", hash, exp, ext),
+        (Some(exp), None) => format!("{}_{}", hash, exp),
+        (None, Some(ext)) => format!("{}.{}", hash, ext),
+        (None, None) => hash.to_string(),
+    };
 
-    path
-}
-
-fn get_metadata_path(upload_dir: &Path) -> PathBuf {
-    upload_dir.join("metadata.json")
-}
-
-async fn load_persisted_metadata(upload_dir: &Path) -> HashMap<String, PersistedMetadata> {
-    let metadata_path = get_metadata_path(upload_dir);
-
-    match fs::read_to_string(&metadata_path).await {
-        Ok(contents) => {
-            match serde_json::from_str(&contents) {
-                Ok(metadata) => metadata,
-                Err(e) => {
-                    warn!("Failed to parse metadata.json: {}", e);
-                    HashMap::new()
-                }
-            }
-        }
-        Err(_) => {
-            // File doesn't exist yet, that's okay
-            HashMap::new()
-        }
-    }
-}
-
-pub async fn save_persisted_metadata(
-    upload_dir: &Path,
-    index: &RwLock<HashMap<String, FileMetadata>>,
-) {
-    let metadata_path = get_metadata_path(upload_dir);
-    let index = index.read().await;
-
-    let mut persisted: HashMap<String, PersistedMetadata> = HashMap::new();
-
-    for (sha256, file_meta) in index.iter() {
-        if file_meta.expiration.is_some() {
-            persisted.insert(
-                sha256.clone(),
-                PersistedMetadata {
-                    expiration: file_meta.expiration,
-                },
-            );
-        }
-    }
-
-    match serde_json::to_string_pretty(&persisted) {
-        Ok(json) => {
-            if let Err(e) = fs::write(&metadata_path, json).await {
-                error!("Failed to write metadata.json: {}", e);
-            }
-        }
-        Err(e) => {
-            error!("Failed to serialize metadata: {}", e);
-        }
-    }
+    path.join(filename)
 }
 
 pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, FileMetadata>>) {
     let mut map = HashMap::new();
     let mut dirs_to_process = vec![upload_dir.to_path_buf()];
-
-    // Load persisted metadata (expiration data)
-    let persisted_metadata = load_persisted_metadata(upload_dir).await;
 
     while let Some(current_dir) = dirs_to_process.pop() {
         if let Ok(mut entries) = fs::read_dir(&current_dir).await {
@@ -99,12 +36,10 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
                 let path = entry.path();
                 if path.is_file() {
                     if let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) {
-                        // Skip metadata.json file itself
-                        if name == "metadata.json" {
-                            continue;
-                        }
+                        // Parse filename to extract hash, expiration, and extension
+                        // Format: <hash>_<expiration>.<ext> or <hash>_<expiration> or <hash>.<ext> or <hash>
+                        let (key, expiration) = parse_filename_for_hash_and_expiration(&name);
 
-                        let key = name[..64.min(name.len())].to_string();
                         if let Ok(metadata) = entry.metadata().await {
                             let extension = path
                                 .extension()
@@ -119,11 +54,6 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs();
-
-                            // Get expiration from persisted metadata if it exists
-                            let expiration = persisted_metadata
-                                .get(&key)
-                                .and_then(|pm| pm.expiration);
 
                             map.insert(
                                 key,
@@ -146,6 +76,31 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
     }
 
     *index.write().await = map;
+}
+
+/// Parse filename to extract SHA256 hash and optional expiration
+/// Formats: <hash>_<expiration>.<ext>, <hash>_<expiration>, <hash>.<ext>, <hash>
+fn parse_filename_for_hash_and_expiration(filename: &str) -> (String, Option<u64>) {
+    // Remove extension if present
+    let name_without_ext = filename.split('.').next().unwrap_or(filename);
+
+    // Check if it contains underscore (expiration separator)
+    if let Some(underscore_pos) = name_without_ext.find('_') {
+        let hash = &name_without_ext[..underscore_pos];
+        let expiration_str = &name_without_ext[underscore_pos + 1..];
+
+        // Validate hash is 64 hex chars
+        if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            // Try to parse expiration
+            if let Ok(expiration) = expiration_str.parse::<u64>() {
+                return (hash.to_string(), Some(expiration));
+            }
+        }
+    }
+
+    // No expiration, just extract the hash (first 64 chars)
+    let hash = &name_without_ext[..64.min(name_without_ext.len())];
+    (hash.to_string(), None)
 }
 
 async fn cleanup_empty_dirs(root_dir: &Path) {
@@ -211,7 +166,6 @@ pub async fn enforce_storage_limits(state: &AppState) {
         .unwrap_or_default()
         .as_secs();
     let max_age_secs = state.max_file_age_days * 24 * 60 * 60;
-    let mut files_deleted = false;
 
     for (sha256, metadata) in files {
         // Check file expiration if expiration is set
@@ -222,7 +176,6 @@ pub async fn enforce_storage_limits(state: &AppState) {
                     error!("❌ Failed to delete expired file {}: {}", sha256, e);
                 }
                 index.remove(&sha256);
-                files_deleted = true;
                 continue;
             }
         }
@@ -234,7 +187,6 @@ pub async fn enforce_storage_limits(state: &AppState) {
                 error!("❌ Failed to delete expired file {}: {}", sha256, e);
             }
             index.remove(&sha256);
-            files_deleted = true;
             continue;
         }
 
@@ -246,19 +198,13 @@ pub async fn enforce_storage_limits(state: &AppState) {
                 error!("❌ Failed to delete file {}: {}", sha256, e);
             }
             index.remove(&sha256);
-            files_deleted = true;
         } else {
             total_size += metadata.size;
         }
     }
 
-    // Release the lock before calling save_persisted_metadata
+    // Release the lock
     drop(index);
-
-    // Save updated metadata if files were deleted
-    if files_deleted {
-        save_persisted_metadata(&state.upload_dir, &state.file_index).await;
-    }
 
     // Clean up empty directories
     cleanup_empty_dirs(&state.upload_dir).await;
