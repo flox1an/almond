@@ -162,3 +162,16 @@ pub fn copy_headers_from_reqwest(
     }
     response_builder
 }
+
+/// Normalize server URL by adding https:// if no protocol is specified
+pub fn normalize_server_url(url: &str) -> String {
+    let url = url.trim();
+
+    // Check if URL already has a protocol
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        // Add https:// if no protocol is present
+        format!("https://{}", url)
+    }
+}
