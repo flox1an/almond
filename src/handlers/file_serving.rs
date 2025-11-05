@@ -29,26 +29,44 @@ pub async fn handle_file_request(
         .map(|s| s.to_string())
         .unwrap_or_else(|| "none".to_string());
 
-    // Extract server parameters if provided and feature is enabled
-    let custom_servers = if state.feature_custom_upstream_origin_enabled {
-        let normalized: Vec<String> = query.servers
-            .iter()
-            .map(|s| crate::helpers::normalize_server_url(s))
-            .collect();
-        if normalized.is_empty() {
-            None
-        } else {
-            Some(normalized)
-        }
+    // Extract custom origin (single server) if provided and feature is enabled
+    let custom_origin = if state.feature_custom_upstream_origin_enabled {
+        query.origin.as_deref()
     } else {
-        if !query.servers.is_empty() {
-            warn!("Server parameter provided but FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED is disabled, ignoring");
+        if query.origin.is_some() {
+            warn!("Origin parameter provided but FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED is disabled, ignoring");
         }
         None
     };
 
-    if let Some(servers) = &custom_servers {
-        info!("GET request for url: {} (range: {}) with custom servers: {:?}", filename, range_header, servers);
+    // Extract xs (servers) parameters - multiple xs query parameters can be provided per BUD-01
+    // xs takes priority, then fall back to legacy servers parameter
+    let xs_servers = if state.feature_custom_upstream_origin_enabled {
+        query.xs.as_ref().or_else(|| {
+            if !query.servers.is_empty() {
+                Some(&query.servers)
+            } else {
+                None
+            }
+        })
+    } else {
+        if query.xs.is_some() || !query.servers.is_empty() {
+            warn!("Server parameters provided but FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED is disabled, ignoring");
+        }
+        None
+    };
+
+    // Log the request with appropriate context
+    if let Some(origin) = custom_origin {
+        info!("GET request for url: {} (range: {}) with custom origin: {}", filename, range_header, origin);
+        if let Some(author) = &query.author_pubkey {
+            debug!("Request includes author pubkey (as): {}", author);
+        }
+    } else if let Some(servers) = xs_servers {
+        info!("GET request for url: {} (range: {}) with xs servers: {:?}", filename, range_header, servers);
+        if let Some(author) = &query.author_pubkey {
+            debug!("Request includes author pubkey (as): {}", author);
+        }
     } else {
         info!("GET request for url: {} (range: {})", filename, range_header);
     }
@@ -78,8 +96,8 @@ pub async fn handle_file_request(
             }
             None => {
                 // File not found locally, check if we've already tried upstream servers recently
-                // Skip cache check if custom servers are provided, as different servers may yield different results
-                let should_check_cache = custom_servers.is_none();
+                // Skip cache check if custom origin or xs servers are provided, as different servers may yield different results
+                let should_check_cache = custom_origin.is_none() && xs_servers.is_none();
                 if should_check_cache {
                     let failed_lookups = state.failed_upstream_lookups.read().await;
                     if let Some(failed_time) = failed_lookups.get(&filename) {
@@ -93,7 +111,7 @@ pub async fn handle_file_request(
                         }
                     }
                 } else {
-                    debug!("Skipping failed lookups cache check because custom servers are provided");
+                    debug!("Skipping failed lookups cache check because custom origin or xs servers are provided");
                 }
 
                 // File not found locally, try upstream servers
@@ -101,17 +119,23 @@ pub async fn handle_file_request(
                     "File not found locally, checking upstream servers for: {}",
                     filename
                 );
-                match crate::handlers::upstream::try_upstream_servers(&state, &filename, req.headers(), custom_servers.as_deref()).await {
+                match crate::handlers::upstream::try_upstream_servers(
+                    &state,
+                    &filename,
+                    req.headers(),
+                    custom_origin,
+                    xs_servers.map(|v| v.as_slice()),
+                ).await {
                     Ok(response) => Ok(response),
                     Err(_) => {
-                        // Add to failed lookups cache only if no custom servers were used
+                        // Add to failed lookups cache only if no custom origin or xs servers were used
                         // (since custom servers may have different success/failure patterns)
-                        if custom_servers.is_none() {
+                        if custom_origin.is_none() && xs_servers.is_none() {
                             let mut failed_lookups = state.failed_upstream_lookups.write().await;
                             failed_lookups.insert(filename.clone(), std::time::Instant::now());
                             debug!("Added {} to failed upstream lookups cache", filename);
                         } else {
-                            debug!("Skipping failed lookups cache because custom servers were used");
+                            debug!("Skipping failed lookups cache because custom origin or xs servers were used");
                         }
                         Err(StatusCode::NOT_FOUND)
                     }
