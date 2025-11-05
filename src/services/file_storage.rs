@@ -6,19 +6,21 @@ use tracing::{error, info};
 use crate::error::{AppError, AppResult};
 use crate::models::{AppState, FileMetadata};
 
-/// Calculate nested directory path for a hash (e.g., a/b/abc123.jpg)
-pub fn get_nested_path(upload_dir: &Path, hash: &str, extension: Option<&str>) -> PathBuf {
+/// Calculate nested directory path for a hash (e.g., a/b/abc123.jpg or a/b/abc123_1234567890.jpg)
+pub fn get_nested_path(upload_dir: &Path, hash: &str, extension: Option<&str>, expiration: Option<u64>) -> PathBuf {
     let first_level = &hash[..1];
     let second_level = &hash[1..2];
     let mut path = upload_dir.join(first_level).join(second_level);
 
-    if let Some(ext) = extension {
-        path = path.join(format!("{}.{}", hash, ext));
-    } else {
-        path = path.join(hash);
-    }
+    // Build filename: <hash>_<expiration>.<ext> or <hash>_<expiration> or <hash>.<ext> or <hash>
+    let filename = match (expiration, extension) {
+        (Some(exp), Some(ext)) => format!("{}_{}.{}", hash, exp, ext),
+        (Some(exp), None) => format!("{}_{}", hash, exp),
+        (None, Some(ext)) => format!("{}.{}", hash, ext),
+        (None, None) => hash.to_string(),
+    };
 
-    path
+    path.join(filename)
 }
 
 /// Create parent directories for a file path
@@ -53,9 +55,10 @@ pub async fn add_to_index(
     extension: Option<String>,
     mime_type: Option<String>,
     size: u64,
+    expiration: Option<u64>,
 ) -> AppResult<()> {
     let key = sha256[..64.min(sha256.len())].to_string();
-    
+
     state.file_index.write().await.insert(
         key.clone(),
         FileMetadata {
@@ -68,10 +71,16 @@ pub async fn add_to_index(
                 .unwrap_or_default()
                 .as_secs(),
             pubkey: None,
+            expiration,
         },
     );
-    
-    info!("Added file to index: {}", key);
+
+    if let Some(exp) = expiration {
+        info!("Added file to index: {} (expires: {})", key, exp);
+    } else {
+        info!("Added file to index: {}", key);
+    }
+
     Ok(())
 }
 

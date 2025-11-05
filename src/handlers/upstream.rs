@@ -613,7 +613,7 @@ async fn stream_and_save_from_upstream(
 
                 // calculate final path
                 let final_path =
-                    crate::utils::get_nested_path(&state_clone.upload_dir, &sha256, extension_clone.as_deref());
+                    crate::utils::get_nested_path(&state_clone.upload_dir, &sha256, extension_clone.as_deref(), None);
                 info!(
                     "Moving temp file {} to final location: {}",
                     temp_path.display(),
@@ -646,6 +646,7 @@ async fn stream_and_save_from_upstream(
                             .unwrap_or_default()
                             .as_secs(),
                         pubkey: None,
+                        expiration: None,
                     },
                 );
                 info!("Successfully added file to index");
@@ -812,7 +813,7 @@ async fn download_file_from_upstream_background(
     info!("Background download completed: {} bytes, SHA256: {}", body_size, sha256);
 
     // Move to final location
-    let final_path = crate::utils::get_nested_path(&state.upload_dir, &sha256, extension.as_deref());
+    let final_path = crate::utils::get_nested_path(&state.upload_dir, &sha256, extension.as_deref(), None);
     if let Some(parent) = final_path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
@@ -839,6 +840,7 @@ async fn download_file_from_upstream_background(
                 .unwrap_or_default()
                 .as_secs(),
             pubkey: None,
+            expiration: None,
         },
     );
 

@@ -10,18 +10,20 @@ use tracing::{error, info, warn};
 
 use crate::models::{AppState, FileMetadata};
 
-pub fn get_nested_path(upload_dir: &Path, hash: &str, extension: Option<&str>) -> PathBuf {
+pub fn get_nested_path(upload_dir: &Path, hash: &str, extension: Option<&str>, expiration: Option<u64>) -> PathBuf {
     let first_level = &hash[..1];
     let second_level = &hash[1..2];
     let mut path = upload_dir.join(first_level).join(second_level);
 
-    if let Some(ext) = extension {
-        path = path.join(format!("{}.{}", hash, ext));
-    } else {
-        path = path.join(hash);
-    }
+    // Build filename: <hash>_<expiration>.<ext> or <hash>_<expiration> or <hash>.<ext> or <hash>
+    let filename = match (expiration, extension) {
+        (Some(exp), Some(ext)) => format!("{}_{}.{}", hash, exp, ext),
+        (Some(exp), None) => format!("{}_{}", hash, exp),
+        (None, Some(ext)) => format!("{}.{}", hash, ext),
+        (None, None) => hash.to_string(),
+    };
 
-    path
+    path.join(filename)
 }
 
 pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, FileMetadata>>) {
@@ -34,7 +36,10 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
                 let path = entry.path();
                 if path.is_file() {
                     if let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) {
-                        let key = name[..64.min(name.len())].to_string();
+                        // Parse filename to extract hash, expiration, and extension
+                        // Format: <hash>_<expiration>.<ext> or <hash>_<expiration> or <hash>.<ext> or <hash>
+                        let (key, expiration) = parse_filename_for_hash_and_expiration(&name);
+
                         if let Ok(metadata) = entry.metadata().await {
                             let extension = path
                                 .extension()
@@ -59,6 +64,7 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
                                     size: metadata.len(),
                                     created_at,
                                     pubkey: None,
+                                    expiration,
                                 },
                             );
                         }
@@ -71,6 +77,31 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
     }
 
     *index.write().await = map;
+}
+
+/// Parse filename to extract SHA256 hash and optional expiration
+/// Formats: <hash>_<expiration>.<ext>, <hash>_<expiration>, <hash>.<ext>, <hash>
+fn parse_filename_for_hash_and_expiration(filename: &str) -> (String, Option<u64>) {
+    // Remove extension if present
+    let name_without_ext = filename.split('.').next().unwrap_or(filename);
+
+    // Check if it contains underscore (expiration separator)
+    if let Some(underscore_pos) = name_without_ext.find('_') {
+        let hash = &name_without_ext[..underscore_pos];
+        let expiration_str = &name_without_ext[underscore_pos + 1..];
+
+        // Validate hash is 64 hex chars
+        if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            // Try to parse expiration
+            if let Ok(expiration) = expiration_str.parse::<u64>() {
+                return (hash.to_string(), Some(expiration));
+            }
+        }
+    }
+
+    // No expiration, just extract the hash (first 64 chars)
+    let hash = &name_without_ext[..64.min(name_without_ext.len())];
+    (hash.to_string(), None)
 }
 
 async fn cleanup_empty_dirs(root_dir: &Path) {
@@ -137,12 +168,33 @@ pub async fn enforce_storage_limits(state: &AppState) {
         .as_secs();
     let max_age_secs = state.max_file_age_days * 24 * 60 * 60;
 
+    let mut deleted_by_expiration = 0;
+    let mut deleted_by_age = 0;
+    let mut deleted_by_limits = 0;
+
     for (sha256, metadata) in files {
+        // Check file expiration if expiration is set
+        if let Some(expiration) = metadata.expiration {
+            if now >= expiration {
+                info!("🗑 Deleting expired file (X-Expiration): {} (expired at {}, now {})",
+                      sha256, expiration, now);
+                if let Err(e) = fs::remove_file(&metadata.path).await {
+                    error!("❌ Failed to delete expired file {}: {}", sha256, e);
+                } else {
+                    deleted_by_expiration += 1;
+                }
+                index.remove(&sha256);
+                continue;
+            }
+        }
+
         // Check file age if max_age_days is set
         if state.max_file_age_days > 0 && now - metadata.created_at > max_age_secs {
-            info!("🗑 Deleting expired file: {}", sha256);
+            info!("🗑 Deleting expired file (MAX_FILE_AGE_DAYS): {}", sha256);
             if let Err(e) = fs::remove_file(&metadata.path).await {
                 error!("❌ Failed to delete expired file {}: {}", sha256, e);
+            } else {
+                deleted_by_age += 1;
             }
             index.remove(&sha256);
             continue;
@@ -154,12 +206,23 @@ pub async fn enforce_storage_limits(state: &AppState) {
             info!("🗑 Deleting file to enforce limits: {}", sha256);
             if let Err(e) = fs::remove_file(&metadata.path).await {
                 error!("❌ Failed to delete file {}: {}", sha256, e);
+            } else {
+                deleted_by_limits += 1;
             }
             index.remove(&sha256);
         } else {
             total_size += metadata.size;
         }
     }
+
+    // Log cleanup summary
+    if deleted_by_expiration > 0 || deleted_by_age > 0 || deleted_by_limits > 0 {
+        info!("🧹 Cleanup summary: {} expired (X-Expiration), {} aged out (MAX_FILE_AGE_DAYS), {} by storage limits",
+              deleted_by_expiration, deleted_by_age, deleted_by_limits);
+    }
+
+    // Release the lock
+    drop(index);
 
     // Clean up empty directories
     cleanup_empty_dirs(&state.upload_dir).await;

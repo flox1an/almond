@@ -293,12 +293,14 @@ fn start_cleanup_job(state: AppState) {
         ));
         loop {
             interval.tick().await;
+
+            // Always run cleanup to check for expired files
+            enforce_storage_limits(&state).await;
+
+            // Mark changes as processed
             let mut changes = state.changes_pending.write().await;
-            if *changes {
-                enforce_storage_limits(&state).await;
-                *changes = false;
-            }
-            
+            *changes = false;
+
             // Clean up expired failed upstream lookups
             cleanup_expired_failed_lookups(&state).await;
         }

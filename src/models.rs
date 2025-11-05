@@ -11,7 +11,7 @@ use tokio::sync::{Notify, RwLock};
 
 type OngoingDownloadsMap = Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FileMetadata {
     pub path: PathBuf,
     pub extension: Option<String>,
@@ -19,6 +19,8 @@ pub struct FileMetadata {
     pub size: u64,
     pub created_at: u64,
     pub pubkey: Option<PublicKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiration: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -58,6 +60,7 @@ impl AppState {
         sha256: &str,
         size: u64,
         content_type: Option<String>,
+        expiration: Option<u64>,
     ) -> BlobDescriptor {
         let extension = content_type
             .as_ref()
@@ -78,6 +81,7 @@ impl AppState {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            expiration,
         }
     }
 
@@ -162,6 +166,8 @@ pub struct BlobDescriptor {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
     pub uploaded: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiration: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -200,6 +206,7 @@ pub struct ChunkUpload {
     pub temp_path: PathBuf,
     pub chunks: Vec<ChunkInfo>,
     pub created_at: Instant,
+    pub expiration: Option<u64>,
 }
 
 #[derive(Clone)]
