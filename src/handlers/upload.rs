@@ -34,10 +34,11 @@ pub async fn upload_file(
 
     let auth_event = auth::validate_nostr_auth(auth_header, &state, auth::AuthMode::Standard).await?;
 
-    // Extract content type and extension
+    // Extract content type, extension, and expiration
     let content_type = extract_content_type(&headers);
     let extension = mime_guess::get_mime_extensions_str(&content_type)
         .and_then(|mime| mime.first().map(|ext| ext.to_string()));
+    let expiration = extract_expiration(&headers);
 
     // Prepare temp file
     file_storage::ensure_temp_dir(&state).await?;
@@ -59,6 +60,7 @@ pub async fn upload_file(
         total_bytes,
         extension.clone(),
         Some(content_type.clone()),
+        expiration,
     )
     .await?;
 
@@ -66,7 +68,7 @@ pub async fn upload_file(
     track_upload_stats(&state, total_bytes).await;
 
     // Create response
-    let descriptor = state.create_blob_descriptor(&sha256, total_bytes, Some(content_type));
+    let descriptor = state.create_blob_descriptor(&sha256, total_bytes, Some(content_type), expiration);
 
     Ok(Response::builder()
         .status(StatusCode::CREATED)
@@ -94,9 +96,10 @@ pub async fn mirror_blob(
 
     let auth_event = auth::validate_nostr_auth(auth_header, &state, auth::AuthMode::Standard).await?;
 
-    // Extract expected SHA-256 from auth event
+    // Extract expected SHA-256 from auth event and expiration from headers
     let expected_sha256 = auth::extract_sha256_from_event(&auth_event)
         .ok_or_else(|| AppError::Unauthorized("No valid SHA-256 hash found in auth event".to_string()))?;
+    let expiration = extract_expiration(&headers);
 
     info!("Expected SHA-256 from auth event: {}", expected_sha256);
 
@@ -158,6 +161,7 @@ pub async fn mirror_blob(
         body_size,
         extension_str,
         Some(content_type.clone()),
+        expiration,
     )
     .await?;
 
@@ -165,7 +169,7 @@ pub async fn mirror_blob(
     track_upload_stats(&state, body_size).await;
 
     // Create response
-    let descriptor = state.create_blob_descriptor(&expected_sha256, body_size, Some(content_type));
+    let descriptor = state.create_blob_descriptor(&expected_sha256, body_size, Some(content_type), expiration);
 
     info!("🎉 Mirror operation completed successfully: {} -> {} ({} bytes)", 
           url, expected_sha256, body_size);
@@ -225,6 +229,7 @@ pub async fn patch_upload(
         .ok_or_else(|| AppError::BadRequest("Missing or invalid Upload-Offset header".to_string()))?;
 
     let content_type = extract_content_type(&headers);
+    let expiration = extract_expiration(&headers);
 
     // Validate Content-Type is application/octet-stream
     if content_type != DEFAULT_CONTENT_TYPE {
@@ -325,6 +330,7 @@ pub async fn patch_upload(
             temp_path,
             chunks: Vec::new(),
             created_at: std::time::Instant::now(),
+            expiration,
         }
     });
 
@@ -520,6 +526,7 @@ async fn reconstruct_blob(
         chunk_upload.upload_length,
         extension.clone(),
         Some(chunk_upload.upload_type.clone()),
+        chunk_upload.expiration,
     )
     .await?;
 
@@ -536,6 +543,7 @@ async fn reconstruct_blob(
         expected_sha256,
         chunk_upload.upload_length,
         Some(chunk_upload.upload_type.clone()),
+        chunk_upload.expiration,
     ))
 }
 
