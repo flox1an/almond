@@ -47,6 +47,7 @@ pub async fn try_upstream_servers(
     filename: &str,
     headers: &HeaderMap,
     custom_origin: Option<&str>,
+    xs_servers: Option<&[String]>,
 ) -> Result<Response, StatusCode> {
     // Forward range requests to upstream servers
     if headers.get(header::RANGE).is_some() {
@@ -150,8 +151,21 @@ pub async fn try_upstream_servers(
         info!("Custom origin failed, trying configured upstream servers");
     }
 
+    // Determine which servers to try: xs_servers takes priority, then fall back to configured upstream_servers
+    let servers_to_try: Vec<String> = if let Some(xs) = xs_servers {
+        info!("Using xs servers from query parameter: {:?}", xs);
+        xs.to_vec()
+    } else {
+        state.upstream_servers.clone()
+    };
+
+    if servers_to_try.is_empty() {
+        info!("No upstream servers available (neither xs parameter nor UPSTREAM_SERVERS configured)");
+        return Err(StatusCode::NOT_FOUND);
+    }
+
     // Try each upstream server
-    for upstream_url in &state.upstream_servers {
+    for upstream_url in &servers_to_try {
         let file_url = format!("{}/{}", upstream_url.trim_end_matches('/'), filename);
         info!("Trying upstream server: {}", file_url);
 

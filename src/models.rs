@@ -186,6 +186,11 @@ pub struct ListQuery {
 #[derive(Debug, Deserialize)]
 pub struct FileRequestQuery {
     pub origin: Option<String>,
+    /// Servers where the file is stored (multiple xs parameters allowed, Blossom BUD-01)
+    pub xs: Option<Vec<String>>,
+    /// Author pubkey (Blossom BUD-01)
+    #[serde(rename = "as")]
+    pub author_pubkey: Option<String>,
 }
 
 #[derive(Clone)]

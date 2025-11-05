@@ -39,8 +39,16 @@ pub async fn handle_file_request(
         None
     };
 
+    // Extract xs (servers) parameters - multiple xs query parameters can be provided per BUD-01
+    let xs_servers = query.xs.as_ref();
+
     if let Some(origin) = custom_origin {
         info!("GET request for url: {} (range: {}) with custom origin: {}", filename, range_header, origin);
+    } else if let Some(servers) = xs_servers {
+        info!("GET request for url: {} (range: {}) with xs servers: {:?}", filename, range_header, servers);
+        if let Some(author) = &query.author_pubkey {
+            debug!("Request includes author pubkey (as): {}", author);
+        }
     } else {
         info!("GET request for url: {} (range: {})", filename, range_header);
     }
@@ -93,7 +101,13 @@ pub async fn handle_file_request(
                     "File not found locally, checking upstream servers for: {}",
                     filename
                 );
-                match crate::handlers::upstream::try_upstream_servers(&state, &filename, req.headers(), custom_origin).await {
+                match crate::handlers::upstream::try_upstream_servers(
+                    &state,
+                    &filename,
+                    req.headers(),
+                    custom_origin,
+                    xs_servers.map(|v| v.as_slice()),
+                ).await {
                     Ok(response) => Ok(response),
                     Err(_) => {
                         // Add to failed lookups cache only if no custom origin was used
