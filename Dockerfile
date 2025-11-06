@@ -40,9 +40,11 @@ COPY src ./src
 
 # Build the application (only recompiles our code, not dependencies)
 # Use BuildKit cache mounts for faster builds
+# Note: We use cache for registry but need target in filesystem for COPY
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/src/app/target \
-    cargo build --release
+    cargo build --release && \
+    cp /usr/src/app/target/release/almond /tmp/almond
 
 # Runtime stage
 FROM debian:bullseye-slim
@@ -54,8 +56,8 @@ RUN apt-get update && \
     apt-get install -y ca-certificates libssl1.1 && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy the binary from builder
-COPY --from=builder /usr/src/app/target/release/almond /app/almond
+# Copy the binary from builder (copied to /tmp during build to escape cache mount)
+COPY --from=builder /tmp/almond /app/almond
 
 # Ensure binary is executable
 RUN chmod +x /app/almond
