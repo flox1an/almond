@@ -154,7 +154,17 @@ pub async fn try_upstream_servers(
     // Determine which servers to try: xs_servers takes priority, then fall back to configured upstream_servers
     let servers_to_try: Vec<String> = if let Some(xs) = xs_servers {
         info!("Using xs servers from query parameter: {:?}", xs);
-        xs.to_vec()
+        // Normalize xs servers: prepend https:// if no protocol is specified
+        xs.iter()
+            .map(|server| {
+                let server = server.trim();
+                if server.starts_with("http://") || server.starts_with("https://") {
+                    server.to_string()
+                } else {
+                    format!("https://{}", server)
+                }
+            })
+            .collect()
     } else {
         state.upstream_servers.clone()
     };
