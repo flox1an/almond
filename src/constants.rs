@@ -8,6 +8,7 @@ pub const THROUGHPUT_CLEANUP_THRESHOLD: usize = 100;
 
 // HTTP header names
 pub const X_SHA_256_HEADER: &str = "X-SHA-256";
+pub const X_EXPIRATION_HEADER: &str = "X-Expiration";
 pub const UPLOAD_TYPE_HEADER: &str = "Upload-Type";
 pub const UPLOAD_LENGTH_HEADER: &str = "Upload-Length";
 pub const UPLOAD_OFFSET_HEADER: &str = "Upload-Offset";

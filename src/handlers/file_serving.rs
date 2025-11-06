@@ -29,7 +29,7 @@ pub async fn handle_file_request(
         .map(|s| s.to_string())
         .unwrap_or_else(|| "none".to_string());
 
-    // Extract origin parameter if provided and feature is enabled
+    // Extract custom origin (single server) if provided and feature is enabled
     let custom_origin = if state.feature_custom_upstream_origin_enabled {
         query.origin.as_deref()
     } else {
@@ -40,10 +40,33 @@ pub async fn handle_file_request(
     };
 
     // Extract xs (servers) parameters - multiple xs query parameters can be provided per BUD-01
-    let xs_servers = query.xs.as_ref();
+    // xs takes priority, then fall back to legacy servers parameter
+    let xs_servers = if state.feature_custom_upstream_origin_enabled {
+        query.xs.as_ref().or_else(|| {
+            if !query.servers.is_empty() {
+                Some(&query.servers)
+            } else {
+                None
+            }
+        })
+    } else {
+        if query.xs.is_some() || !query.servers.is_empty() {
+            warn!("Server parameters provided but FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED is disabled, ignoring");
+        }
+        None
+    };
 
+    // Log the request with appropriate context
     if let Some(origin) = custom_origin {
         info!("GET request for url: {} (range: {}) with custom origin: {}", filename, range_header, origin);
+    } else if let Some(servers) = xs_servers {
+        info!("GET request for url: {} (range: {}) with xs servers: {:?}", filename, range_header, servers);
+        if let Some(author) = &query.author_pubkey {
+            debug!("Request includes author pubkey (as): {}", author);
+        }
+        if let Some(author) = &query.author_pubkey {
+            debug!("Request includes author pubkey (as): {}", author);
+        }
     } else if let Some(servers) = xs_servers {
         info!("GET request for url: {} (range: {}) with xs servers: {:?}", filename, range_header, servers);
         if let Some(author) = &query.author_pubkey {
@@ -78,8 +101,8 @@ pub async fn handle_file_request(
             }
             None => {
                 // File not found locally, check if we've already tried upstream servers recently
-                // Skip cache check if a custom origin is provided, as different origins may yield different results
-                let should_check_cache = custom_origin.is_none();
+                // Skip cache check if custom origin or xs servers are provided, as different servers may yield different results
+                let should_check_cache = custom_origin.is_none() && xs_servers.is_none();
                 if should_check_cache {
                     let failed_lookups = state.failed_upstream_lookups.read().await;
                     if let Some(failed_time) = failed_lookups.get(&filename) {
@@ -93,7 +116,7 @@ pub async fn handle_file_request(
                         }
                     }
                 } else {
-                    debug!("Skipping failed lookups cache check because custom origin is provided");
+                    debug!("Skipping failed lookups cache check because custom origin or xs servers are provided");
                 }
 
                 // File not found locally, try upstream servers
@@ -110,14 +133,14 @@ pub async fn handle_file_request(
                 ).await {
                     Ok(response) => Ok(response),
                     Err(_) => {
-                        // Add to failed lookups cache only if no custom origin was used
-                        // (since custom origins may have different success/failure patterns)
-                        if custom_origin.is_none() {
+                        // Add to failed lookups cache only if no custom origin or xs servers were used
+                        // (since custom servers may have different success/failure patterns)
+                        if custom_origin.is_none() && xs_servers.is_none() {
                             let mut failed_lookups = state.failed_upstream_lookups.write().await;
                             failed_lookups.insert(filename.clone(), std::time::Instant::now());
                             debug!("Added {} to failed upstream lookups cache", filename);
                         } else {
-                            debug!("Skipping failed lookups cache because custom origin was used");
+                            debug!("Skipping failed lookups cache because custom origin or xs servers were used");
                         }
                         Err(StatusCode::NOT_FOUND)
                     }

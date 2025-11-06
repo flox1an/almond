@@ -27,6 +27,14 @@ pub fn extract_content_type_from_response(headers: &reqwest::header::HeaderMap) 
         .to_string()
 }
 
+/// Extract expiration timestamp from X-Expiration header
+pub fn extract_expiration(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(X_EXPIRATION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
 /// Track download statistics
 pub async fn track_download_stats(state: &AppState, size: u64) {
     let mut files_downloaded = state.files_downloaded.write().await;
@@ -161,4 +169,17 @@ pub fn copy_headers_from_reqwest(
         response_builder = response_builder.header(header::LAST_MODIFIED, last_modified);
     }
     response_builder
+}
+
+/// Normalize server URL by adding https:// if no protocol is specified
+pub fn normalize_server_url(url: &str) -> String {
+    let url = url.trim();
+
+    // Check if URL already has a protocol
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        // Add https:// if no protocol is present
+        format!("https://{}", url)
+    }
 }

@@ -62,12 +62,12 @@ pub async fn try_upstream_servers(
         );
 
         // Proxy the request to upstream while download is in progress
-        return proxy_request_to_upstream(state, filename, headers, custom_origin).await;
+        return proxy_request_to_upstream(state, filename, headers, custom_origin, xs_servers).await;
     }
 
     let client = Client::new();
 
-    // Try custom origin first if provided
+    // Try custom origin first if provided (single server)
     if let Some(origin_url) = custom_origin {
         info!("Trying custom origin server first: {}", origin_url);
         let file_url = format!("{}/{}", origin_url.trim_end_matches('/'), filename);
@@ -84,14 +84,14 @@ pub async fn try_upstream_servers(
                 let content_type = extract_content_type_from_response(response.headers());
                 // Check if this is a range request
                 let has_range_header = headers.get(header::RANGE).is_some();
-                
+
                 if has_range_header {
                     info!("Range request detected for non-existent file {}, starting download from byte 0", filename);
                     // For range requests, we need to start a full download in the background
                     // while proxying the range request for immediate response
                     let full_request = client.get(&file_url);
                     let full_request = copy_headers_without_range(headers, full_request);
-                    
+
                     match full_request.send().await {
                         Ok(full_response) if full_response.status().is_success() => {
                             info!("Starting full download from byte 0 for range request: {}", filename);
@@ -147,8 +147,21 @@ pub async fn try_upstream_servers(
                 warn!("Failed to fetch from custom origin {}: {}", file_url, e);
             }
         }
-        // If custom origin failed, continue to regular upstream servers
-        info!("Custom origin failed, trying configured upstream servers");
+        // If custom origin failed, continue to xs_servers or configured upstream servers
+        info!("Custom origin failed, trying xs servers or configured upstream servers");
+    }
+
+    // Determine which servers to try: xs_servers takes priority, then fall back to configured upstream_servers
+    let servers_to_try: Vec<String> = if let Some(xs) = xs_servers {
+        info!("Using xs servers from query parameter: {:?}", xs);
+        xs.to_vec()
+    } else {
+        state.upstream_servers.clone()
+    };
+
+    if servers_to_try.is_empty() {
+        info!("No upstream servers available (neither xs parameter nor UPSTREAM_SERVERS configured)");
+        return Err(StatusCode::NOT_FOUND);
     }
 
     // Determine which servers to try: xs_servers takes priority, then fall back to configured upstream_servers
@@ -267,11 +280,12 @@ async fn proxy_request_to_upstream(
     filename: &str,
     headers: &HeaderMap,
     custom_origin: Option<&str>,
+    xs_servers: Option<&[String]>,
 ) -> Result<Response<Body>, StatusCode> {
     info!("Proxying request to upstream for ongoing download: {}", filename);
-    
+
     let client = Client::new();
-    
+
     // Try custom origin first if provided
     if let Some(origin_url) = custom_origin {
         let file_url = format!("{}/{}", origin_url.trim_end_matches('/'), filename);
@@ -284,7 +298,7 @@ async fn proxy_request_to_upstream(
         match request.send().await {
             Ok(response) if response.status().is_success() => {
                 info!("Successfully proxied request to custom origin: {}", file_url);
-                
+
                 // Get content type from upstream response
                 let content_type = extract_content_type_from_response(response.headers());
 
@@ -302,9 +316,17 @@ async fn proxy_request_to_upstream(
             }
         }
     }
-    
+
+    // Determine which servers to try: xs_servers takes priority, then fall back to configured upstream_servers
+    let servers_to_try: Vec<String> = if let Some(xs) = xs_servers {
+        info!("Using xs servers from query parameter for proxying: {:?}", xs);
+        xs.to_vec()
+    } else {
+        state.upstream_servers.clone()
+    };
+
     // Try each upstream server
-    for upstream_url in &state.upstream_servers {
+    for upstream_url in &servers_to_try {
         let file_url = format!("{}/{}", upstream_url.trim_end_matches('/'), filename);
         info!("Proxying to upstream server: {}", file_url);
 
@@ -621,7 +643,7 @@ async fn stream_and_save_from_upstream(
 
                 // calculate final path
                 let final_path =
-                    crate::utils::get_nested_path(&state_clone.upload_dir, &sha256, extension_clone.as_deref());
+                    crate::utils::get_nested_path(&state_clone.upload_dir, &sha256, extension_clone.as_deref(), None);
                 info!(
                     "Moving temp file {} to final location: {}",
                     temp_path.display(),
@@ -653,6 +675,8 @@ async fn stream_and_save_from_upstream(
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs(),
+                        pubkey: None,
+                        expiration: None,
                     },
                 );
                 info!("Successfully added file to index");
@@ -819,7 +843,7 @@ async fn download_file_from_upstream_background(
     info!("Background download completed: {} bytes, SHA256: {}", body_size, sha256);
 
     // Move to final location
-    let final_path = crate::utils::get_nested_path(&state.upload_dir, &sha256, extension.as_deref());
+    let final_path = crate::utils::get_nested_path(&state.upload_dir, &sha256, extension.as_deref(), None);
     if let Some(parent) = final_path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
@@ -845,6 +869,8 @@ async fn download_file_from_upstream_background(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            pubkey: None,
+            expiration: None,
         },
     );
 
