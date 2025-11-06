@@ -59,8 +59,14 @@ RUN apt-get update && \
 # Copy the binary from builder (copied to /tmp during build to escape cache mount)
 COPY --from=builder /tmp/almond /app/almond
 
-# Ensure binary is executable
-RUN chmod +x /app/almond
+# Copy entrypoint script
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+
+# Ensure binary and entrypoint are executable and verify binary exists
+RUN chmod +x /app/almond /app/docker-entrypoint.sh && \
+    ls -lah /app/almond && \
+    file /app/almond && \
+    ldd /app/almond
 
 # Create directory for files
 RUN mkdir -p /app/files
@@ -77,5 +83,5 @@ ENV MAX_FILE_AGE_DAYS=0
 # Expose the port
 EXPOSE 3000
 
-# Run the binary
-CMD ["/app/almond"] 
+# Use entrypoint script for better logging and debugging
+ENTRYPOINT ["/app/docker-entrypoint.sh"] 
