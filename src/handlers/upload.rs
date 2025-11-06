@@ -126,7 +126,12 @@ pub async fn mirror_blob(
 
     // Prepare temp file
     file_storage::ensure_temp_dir(&state).await?;
-    let extension = content_type.split('/').next_back().map(|s| format!(".{}", s));
+    // Strip codecs and other parameters from content type before extracting extension
+    let clean_content_type = match content_type.split(';').next() {
+        Some(ct) => ct.trim(),
+        None => content_type.trim(),
+    };
+    let extension = clean_content_type.split('/').next_back().map(|s| format!(".{}", s));
     let temp_path = file_storage::create_temp_path(&state, "mirror", extension.as_deref());
     let _temp_guard = TempFileGuard::new(temp_path.clone());
 
@@ -153,7 +158,12 @@ pub async fn mirror_blob(
     info!("✅ SHA256 verification passed");
 
     // Finalize upload
-    let extension_str = content_type.split('/').next_back().map(String::from);
+    // Strip codecs and other parameters from content type before extracting extension
+    let clean_content_type = match content_type.split(';').next() {
+        Some(ct) => ct.trim(),
+        None => content_type.trim(),
+    };
+    let extension_str = clean_content_type.split('/').next_back().map(String::from);
     upload::finalize_upload(
         &state,
         &temp_path,

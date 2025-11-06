@@ -64,6 +64,11 @@ impl AppState {
     ) -> BlobDescriptor {
         let extension = content_type
             .as_ref()
+            .map(|ct| {
+                // Strip codecs and other parameters from content type before extracting extension
+                let clean_ct = ct.split(';').next().unwrap_or(ct).trim();
+                clean_ct
+            })
             .and_then(|ct| mime_guess::get_mime_extensions_str(ct))
             .and_then(|mime| mime.first().map(|ext| ext.to_string()));
 

@@ -163,8 +163,10 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
     let expires_str = expires_dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
     let expires_header = hyper::http::HeaderValue::from_str(&expires_str).unwrap();
 
+    // Extract filename and strip any codec info (everything after ;)
     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let content_disposition = format!("inline; filename=\"{}\"", filename);
+    let clean_filename = filename.split(';').next().unwrap_or(filename).trim();
+    let content_disposition = format!("inline; filename=\"{}\"", clean_filename);
 
     let mut file = File::open(&path)
         .await
