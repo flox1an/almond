@@ -408,9 +408,6 @@ async fn proxy_upstream_response(
         .and_then(|n| n.to_str())
         .unwrap_or("file");
     
-    // Set Content-Disposition header with clean filename to prevent browser from appending codecs
-    let content_disposition = format!("inline; filename=\"{}\"", clean_filename);
-
     // Extract MIME type essence (without parameters like codecs=avc1) to prevent browser from appending to filename
     let mime_type = content_type.split(';').next().unwrap_or(content_type).trim();
 
@@ -419,10 +416,9 @@ async fn proxy_upstream_response(
     let mut response_builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, mime_type)
-        .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CONTENT_DISPOSITION, content_disposition);
+        .header(header::ACCEPT_RANGES, "bytes");
 
-    // Copy all relevant headers from upstream
+    // Copy all relevant headers from upstream (but NOT Content-Disposition - we set our own)
     if let Some(content_range) = content_range {
         response_builder = response_builder.header(header::CONTENT_RANGE, content_range);
     }
@@ -442,7 +438,18 @@ async fn proxy_upstream_response(
         response_builder = response_builder.header(header::LAST_MODIFIED, last_modified);
     }
 
-    Ok(response_builder.body(body).unwrap())
+    // Build response first, then insert Content-Disposition to ensure it overwrites any existing header
+    let mut response = response_builder.body(body).unwrap();
+    
+    // Set Content-Disposition header with clean filename to prevent browser from appending codecs
+    // Use insert() to ensure we overwrite any existing Content-Disposition from upstream
+    let content_disposition = format!("inline; filename=\"{}\"", clean_filename);
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        content_disposition.parse().unwrap(),
+    );
+
+    Ok(response)
 }
 
 /// Prepare download state and return metadata for either streaming or background download
