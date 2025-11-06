@@ -64,9 +64,7 @@ COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
 # Ensure binary and entrypoint are executable and verify binary exists
 RUN chmod +x /app/almond /app/docker-entrypoint.sh && \
-    ls -lah /app/almond && \
-    file /app/almond && \
-    ldd /app/almond
+    ls -lah /app/almond
 
 # Create directory for files
 RUN mkdir -p /app/files
