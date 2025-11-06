@@ -11,11 +11,38 @@ RUN apt-get update && \
 # Copy the Cargo files first to cache dependencies
 COPY Cargo.toml Cargo.lock ./
 
-# Copy the actual source code
-COPY . .
+# Create a dummy source structure to build dependencies
+# This allows us to cache the dependency compilation layer separately
+# Only recompiles dependencies when Cargo.toml/Cargo.lock changes
+RUN mkdir -p src/handlers src/services && \
+    echo "pub mod constants; pub mod error; pub mod handlers; pub mod helpers; pub mod middleware; pub mod models; pub mod services; pub mod trust_network; pub mod utils; fn main() {}" > src/main.rs && \
+    echo "" > src/constants.rs && \
+    echo "" > src/error.rs && \
+    echo "" > src/helpers.rs && \
+    echo "" > src/middleware.rs && \
+    echo "" > src/models.rs && \
+    echo "" > src/trust_network.rs && \
+    echo "" > src/utils.rs && \
+    echo "pub mod file_serving; pub mod list; pub mod stats; pub mod upload; pub mod upstream; pub mod bloom; pub mod delete;" > src/handlers/mod.rs && \
+    echo "pub mod auth; pub mod file_storage; pub mod upload; pub mod download;" > src/services/mod.rs && \
+    touch src/handlers/file_serving.rs src/handlers/list.rs src/handlers/stats.rs src/handlers/upload.rs src/handlers/upstream.rs src/handlers/bloom.rs src/handlers/delete.rs && \
+    touch src/services/auth.rs src/services/file_storage.rs src/services/upload.rs src/services/download.rs
 
-# Build the application
-RUN cargo build --release
+# Build dependencies only (this layer will be cached unless Cargo.toml/Cargo.lock changes)
+# Use BuildKit cache mounts for faster builds - these persist across builds
+# Cache the cargo registry (downloaded crates) and target directory (compiled artifacts)
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/src/app/target \
+    cargo build --release
+
+# Copy the actual source code
+COPY src ./src
+
+# Build the application (only recompiles our code, not dependencies)
+# Use BuildKit cache mounts for faster builds
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/src/app/target \
+    cargo build --release
 
 # Runtime stage
 FROM debian:bullseye-slim

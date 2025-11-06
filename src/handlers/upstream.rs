@@ -402,12 +402,25 @@ async fn proxy_upstream_response(
     let etag = response.headers().get(reqwest_header::ETAG).cloned();
     let last_modified = response.headers().get(reqwest_header::LAST_MODIFIED).cloned();
 
+    // Extract clean filename from the path (remove any query parameters or codecs)
+    let clean_filename = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    
+    // Set Content-Disposition header with clean filename to prevent browser from appending codecs
+    let content_disposition = format!("inline; filename=\"{}\"", clean_filename);
+
+    // Extract MIME type essence (without parameters like codecs=avc1) to prevent browser from appending to filename
+    let mime_type = content_type.split(';').next().unwrap_or(content_type).trim();
+
     // Stream the response directly to client
     let body = Body::from_stream(response.bytes_stream());
     let mut response_builder = Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::ACCEPT_RANGES, "bytes");
+        .header(header::CONTENT_TYPE, mime_type)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_DISPOSITION, content_disposition);
 
     // Copy all relevant headers from upstream
     if let Some(content_range) = content_range {
@@ -961,7 +974,10 @@ fn apply_streaming_headers(
 ) -> Response<Body> {
     let headers = response.headers_mut();
 
-    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    // Extract MIME type essence (without parameters like codecs=avc1) to prevent browser from appending to filename
+    let mime_type = content_type.split(';').next().unwrap_or(content_type).trim();
+
+    headers.insert(header::CONTENT_TYPE, mime_type.parse().unwrap());
     headers.insert(
         header::CACHE_CONTROL,
         CACHE_CONTROL_IMMUTABLE.parse().unwrap(),
@@ -981,7 +997,7 @@ fn apply_streaming_headers(
 
     info!(
         "Applied streaming headers: Content-Type={}, Content-Disposition=inline; filename=\"{}\"",
-        content_type, filename_display
+        mime_type, filename_display
     );
 
     response
