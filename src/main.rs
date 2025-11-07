@@ -361,39 +361,48 @@ async fn main() {
 
     info!("🎧 blossom server listening on {}", addr);
 
-    // Create a shutdown signal handler that listens for both SIGTERM and SIGINT
-    let shutdown = async {
-        let ctrl_c = async {
-            signal::ctrl_c()
-                .await
-                .expect("failed to install Ctrl+C handler");
-        };
+    // Create a handle for graceful shutdown
+    let handle = axum_server::Handle::new();
 
-        #[cfg(unix)]
-        let terminate = async {
-            signal::unix::signal(signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler")
-                .recv()
-                .await;
-        };
+    // Spawn a task to listen for shutdown signals
+    tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            let ctrl_c = async {
+                signal::ctrl_c()
+                    .await
+                    .expect("failed to install Ctrl+C handler");
+            };
 
-        #[cfg(not(unix))]
-        let terminate = std::future::pending::<()>();
+            #[cfg(unix)]
+            let terminate = async {
+                signal::unix::signal(signal::unix::SignalKind::terminate())
+                    .expect("failed to install SIGTERM handler")
+                    .recv()
+                    .await;
+            };
 
-        tokio::select! {
-            _ = ctrl_c => {
-                info!("🛑 Received SIGINT (Ctrl+C)");
-            },
-            _ = terminate => {
-                info!("🛑 Received SIGTERM");
-            },
+            #[cfg(not(unix))]
+            let terminate = std::future::pending::<()>();
+
+            tokio::select! {
+                _ = ctrl_c => {
+                    info!("🛑 Received SIGINT (Ctrl+C)");
+                },
+                _ = terminate => {
+                    info!("🛑 Received SIGTERM");
+                },
+            }
+
+            // Trigger graceful shutdown
+            handle.shutdown();
         }
-    };
+    });
 
-    // Start the server with graceful shutdown
+    // Start the server with the handle
     let server = axum_server::bind(addr)
-        .serve(app.into_make_service())
-        .with_graceful_shutdown(shutdown);
+        .handle(handle)
+        .serve(app.into_make_service());
 
     // Wait for the server to complete (after graceful shutdown)
     match server.await {
