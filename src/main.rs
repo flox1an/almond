@@ -66,16 +66,16 @@ pub async fn create_app(state: AppState) -> Router {
     Router::new()
         .route("/upload", put(upload_file).head(head_upload).options(options_upload).patch(patch_upload))
         .route("/list", get(list_blobs))
-        .route("/list/:id", get(list_blobs))
+        .route("/list/{id}", get(list_blobs))
         .route("/mirror", put(mirror_blob))
         .route("/_stats", get(get_stats))
         .route("/_bloom", get(get_bloom))
         .route("/_upstream", get(get_upstream))
         .route("/", get(serve_index))
         .route("/index.html", get(serve_index))
-        .route("/:filename", delete(delete_blob))
+        .route("/{filename}", delete(delete_blob))
         .route(
-            "/:filename",
+            "/{filename}",
             get(handle_file_request).head(handle_file_request),
         )
         .layer(DefaultBodyLimit::max(max_chunk_size_bytes))
@@ -361,56 +361,49 @@ async fn main() {
 
     info!("🎧 blossom server listening on {}", addr);
 
-    // Create a handle for graceful shutdown
-    let handle = axum_server::Handle::new();
+    // Create a TcpListener
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("Failed to bind to address");
 
-    // Spawn a task to listen for shutdown signals
-    tokio::spawn({
-        let handle = handle.clone();
-        async move {
-            let ctrl_c = async {
-                signal::ctrl_c()
-                    .await
-                    .expect("failed to install Ctrl+C handler");
-            };
-
-            #[cfg(unix)]
-            let terminate = async {
-                signal::unix::signal(signal::unix::SignalKind::terminate())
-                    .expect("failed to install SIGTERM handler")
-                    .recv()
-                    .await;
-            };
-
-            #[cfg(not(unix))]
-            let terminate = std::future::pending::<()>();
-
-            tokio::select! {
-                _ = ctrl_c => {
-                    info!("🛑 Received SIGINT (Ctrl+C)");
-                },
-                _ = terminate => {
-                    info!("🛑 Received SIGTERM");
-                },
-            }
-
-            // Trigger graceful shutdown
-            handle.shutdown();
-        }
-    });
-
-    // Start the server with the handle
-    let server = axum_server::bind(addr)
-        .handle(handle)
-        .serve(app.into_make_service());
-
-    // Wait for the server to complete (after graceful shutdown)
-    match server.await {
+    // Start the server with graceful shutdown
+    match axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+    {
         Ok(_) => {
             info!("✅ Server shut down gracefully");
         }
         Err(e) => {
             error!("❌ Server error: {}", e);
         }
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            info!("🛑 Received SIGINT (Ctrl+C)");
+        },
+        _ = terminate => {
+            info!("🛑 Received SIGTERM");
+        },
     }
 }
