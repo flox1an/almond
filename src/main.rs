@@ -361,19 +361,47 @@ async fn main() {
 
     info!("🎧 blossom server listening on {}", addr);
 
-    // Create a shutdown signal handler
-    let shutdown = signal::ctrl_c();
+    // Create a shutdown signal handler that listens for both SIGTERM and SIGINT
+    let shutdown = async {
+        let ctrl_c = async {
+            signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
+        };
+
+        #[cfg(unix)]
+        let terminate = async {
+            signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => {
+                info!("🛑 Received SIGINT (Ctrl+C)");
+            },
+            _ = terminate => {
+                info!("🛑 Received SIGTERM");
+            },
+        }
+    };
 
     // Start the server with graceful shutdown
-    let server = axum_server::bind(addr).serve(app.into_make_service());
+    let server = axum_server::bind(addr)
+        .serve(app.into_make_service())
+        .with_graceful_shutdown(shutdown);
 
-    // Wait for either the server to complete or a shutdown signal
-    tokio::select! {
-        _ = server => {
-            info!("🎧 Server completed");
+    // Wait for the server to complete (after graceful shutdown)
+    match server.await {
+        Ok(_) => {
+            info!("✅ Server shut down gracefully");
         }
-        _ = shutdown => {
-            info!("🎧 Shutting down gracefully...");
+        Err(e) => {
+            error!("❌ Server error: {}", e);
         }
     }
 }
