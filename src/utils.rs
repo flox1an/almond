@@ -352,3 +352,19 @@ pub async fn cleanup_expired_failed_lookups(state: &AppState) {
         info!("Cleaned up {} expired failed upstream lookups", cleaned_count);
     }
 }
+
+/// Clean up expired blossom server list cache entries
+pub async fn cleanup_expired_blossom_server_lists(state: &AppState) {
+    let cache_ttl_duration = std::time::Duration::from_secs(state.blossom_server_list_cache_ttl_hours * 3600);
+    let cutoff_time = std::time::Instant::now() - cache_ttl_duration;
+    
+    let mut cache = state.blossom_server_lists.write().await;
+    let initial_count = cache.len();
+    
+    cache.retain(|_, (_, cached_at)| *cached_at > cutoff_time);
+    
+    let cleaned_count = initial_count - cache.len();
+    if cleaned_count > 0 {
+        info!("Cleaned up {} expired blossom server list cache entries", cleaned_count);
+    }
+}

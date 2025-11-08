@@ -54,14 +54,20 @@ pub async fn try_upstream_servers(
         info!("Range request detected, forwarding to upstream server");
     }
 
-    // Check if this file is already being downloaded
-    if state.ongoing_downloads.read().await.contains_key(filename) {
+    // Extract hash from filename for internal tracking (ongoing downloads, file index, etc.)
+    // But use the full filename (with extension) for upstream URL construction
+    let file_hash = crate::utils::get_sha256_hash_from_filename(filename)
+        .unwrap_or_else(|| filename.to_string());
+
+    // Check if this file is already being downloaded (use hash for tracking)
+    if state.ongoing_downloads.read().await.contains_key(&file_hash) {
         info!(
             "File {} is already being downloaded, proxying request to upstream",
-            filename
+            file_hash
         );
 
         // Proxy the request to upstream while download is in progress
+        // Pass the full filename (with extension) for URL construction
         return proxy_request_to_upstream(state, filename, headers, custom_origin, xs_servers).await;
     }
 
@@ -86,7 +92,7 @@ pub async fn try_upstream_servers(
                 let has_range_header = headers.get(header::RANGE).is_some();
 
                 if has_range_header {
-                    info!("Range request detected for non-existent file {}, starting download from byte 0", filename);
+                    info!("Range request detected for non-existent file {}, starting download from byte 0", file_hash);
                     // For range requests, we need to start a full download in the background
                     // while proxying the range request for immediate response
                     let full_request = client.get(&file_url);
@@ -94,13 +100,13 @@ pub async fn try_upstream_servers(
 
                     match full_request.send().await {
                         Ok(full_response) if full_response.status().is_success() => {
-                            info!("Starting full download from byte 0 for range request: {}", filename);
-                            // Prepare download state
-                            let (temp_path, _written_len, _notify) = prepare_download_state(state, filename, &content_type).await?;
+                            info!("Starting full download from byte 0 for range request: {}", file_hash);
+                            // Prepare download state (use hash for tracking)
+                            let (temp_path, _written_len, _notify) = prepare_download_state(state, &file_hash, &content_type).await?;
                             // Start the download in the background
                             let state_clone = state.clone();
                             let file_url_clone = file_url.clone();
-                            let filename_clone = filename.to_string();
+                            let file_hash_clone = file_hash.clone();
                             let content_type_clone = content_type.clone();
                             let temp_path_clone = temp_path.clone();
                             tokio::spawn(async move {
@@ -108,31 +114,31 @@ pub async fn try_upstream_servers(
                                     &state_clone,
                                     &file_url_clone,
                                     full_response,
-                                    &filename_clone,
+                                    &file_hash_clone,
                                     &content_type_clone,
                                     &temp_path_clone,
                                 )
                                 .await;
                             });
                             // Proxy the range request to upstream for immediate response
-                            info!("Proxying range request to upstream while download starts in background: {}", filename);
+                            info!("Proxying range request to upstream while download starts in background: {}", file_hash);
                             return proxy_upstream_response(response, &content_type, filename).await;
                         }
                         Ok(_) | Err(_) => {
-                            warn!("Failed to start full download for range request, proxying range request only: {}", filename);
+                            warn!("Failed to start full download for range request, proxying range request only: {}", file_hash);
                             return proxy_upstream_response(response, &content_type, filename).await;
                         }
                     }
                 } else {
                     // For non-range requests, stream and save from upstream
-                    info!("Non-range request, starting download and streaming to client: {}", filename);
-                    // Prepare download state
-                    let (temp_path, written_len, notify) = prepare_download_state(state, filename, &content_type).await?;
+                    info!("Non-range request, starting download and streaming to client: {}", file_hash);
+                    // Prepare download state (use hash for tracking)
+                    let (temp_path, written_len, notify) = prepare_download_state(state, &file_hash, &content_type).await?;
                     return stream_and_save_from_upstream(
                         state,
                         &file_url,
                         response,
-                        filename,
+                        &file_hash,
                         written_len,
                         notify,
                         temp_path,
@@ -151,39 +157,23 @@ pub async fn try_upstream_servers(
         info!("Custom origin failed, trying xs servers or configured upstream servers");
     }
 
-    // Determine which servers to try: xs_servers takes priority, then fall back to configured upstream_servers
-    let servers_to_try: Vec<String> = if let Some(xs) = xs_servers {
-        info!("Using xs servers from query parameter: {:?}", xs);
-        xs.to_vec()
+    // Determine which servers to try
+    // Servers are already normalized and combined from file_serving.rs
+    // xs_servers parameter now contains the combined list (xs + as + UPSTREAM_SERVERS)
+    let servers_to_try: Vec<String> = if let Some(servers) = xs_servers {
+        info!("Using combined upstream servers (already normalized): {} servers", servers.len());
+        servers.to_vec()
     } else {
-        state.upstream_servers.clone()
-    };
-
-    if servers_to_try.is_empty() {
-        info!("No upstream servers available (neither xs parameter nor UPSTREAM_SERVERS configured)");
-        return Err(StatusCode::NOT_FOUND);
-    }
-
-    // Determine which servers to try: xs_servers takes priority, then fall back to configured upstream_servers
-    let servers_to_try: Vec<String> = if let Some(xs) = xs_servers {
-        info!("Using xs servers from query parameter: {:?}", xs);
-        // Normalize xs servers: prepend https:// if no protocol is specified
-        xs.iter()
-            .map(|server| {
-                let server = server.trim();
-                if server.starts_with("http://") || server.starts_with("https://") {
-                    server.to_string()
-                } else {
-                    format!("https://{}", server)
-                }
-            })
+        // Fall back to configured upstream_servers if no combined servers provided
+        // Normalize them here in case they weren't normalized in config
+        state.upstream_servers
+            .iter()
+            .map(|s| crate::helpers::normalize_server_url(s))
             .collect()
-    } else {
-        state.upstream_servers.clone()
     };
 
     if servers_to_try.is_empty() {
-        info!("No upstream servers available (neither xs parameter nor UPSTREAM_SERVERS configured)");
+        info!("No upstream servers available");
         return Err(StatusCode::NOT_FOUND);
     }
 
@@ -207,7 +197,7 @@ pub async fn try_upstream_servers(
                 let has_range_header = headers.get(header::RANGE).is_some();
                 
                 if has_range_header {
-                    info!("Range request detected for non-existent file {}, starting download from byte 0", filename);
+                    info!("Range request detected for non-existent file {}, starting download from byte 0", file_hash);
                     
                     // For range requests, we need to start a full download in the background
                     // while proxying the range request for immediate response
@@ -216,15 +206,15 @@ pub async fn try_upstream_servers(
                     
                     match full_request.send().await {
                         Ok(full_response) if full_response.status().is_success() => {
-                            info!("Starting full download from byte 0 for range request: {}", filename);
+                            info!("Starting full download from byte 0 for range request: {}", file_hash);
                             
-                            // Prepare download state
-                            let (temp_path, _written_len, _notify) = prepare_download_state(state, filename, &content_type).await?;
+                            // Prepare download state (use hash for tracking)
+                            let (temp_path, _written_len, _notify) = prepare_download_state(state, &file_hash, &content_type).await?;
 
                             // Start the download in the background
                             let state_clone = state.clone();
                             let file_url_clone = file_url.clone();
-                            let filename_clone = filename.to_string();
+                            let file_hash_clone = file_hash.clone();
                             let content_type_clone = content_type.clone();
                             let temp_path_clone = temp_path.clone();
                             tokio::spawn(async move {
@@ -232,7 +222,7 @@ pub async fn try_upstream_servers(
                                     &state_clone,
                                     &file_url_clone,
                                     full_response,
-                                    &filename_clone,
+                                    &file_hash_clone,
                                     &content_type_clone,
                                     &temp_path_clone,
                                 )
@@ -240,27 +230,27 @@ pub async fn try_upstream_servers(
                             });
 
                             // Proxy the range request to upstream for immediate response
-                            info!("Proxying range request to upstream while download starts in background: {}", filename);
+                            info!("Proxying range request to upstream while download starts in background: {}", file_hash);
                             return proxy_upstream_response(response, &content_type, filename).await;
                         }
                         Ok(_) | Err(_) => {
                             // If we can't get the full file, fall back to proxying the range request
-                            warn!("Failed to start full download for range request, proxying range request only: {}", filename);
+                            warn!("Failed to start full download for range request, proxying range request only: {}", file_hash);
                             return proxy_upstream_response(response, &content_type, filename).await;
                         }
                     }
                 } else {
                     // For non-range requests, stream and save from upstream
-                    info!("Non-range request, starting download and streaming to client: {}", filename);
+                    info!("Non-range request, starting download and streaming to client: {}", file_hash);
                     
-                    // Prepare download state
-                    let (temp_path, written_len, notify) = prepare_download_state(state, filename, &content_type).await?;
+                    // Prepare download state (use hash for tracking)
+                    let (temp_path, written_len, notify) = prepare_download_state(state, &file_hash, &content_type).await?;
 
                     return stream_and_save_from_upstream(
                         state,
                         &file_url,
                         response,
-                        filename,
+                        &file_hash,
                         written_len,
                         notify,
                         temp_path,
@@ -327,12 +317,18 @@ async fn proxy_request_to_upstream(
         }
     }
 
-    // Determine which servers to try: xs_servers takes priority, then fall back to configured upstream_servers
-    let servers_to_try: Vec<String> = if let Some(xs) = xs_servers {
-        info!("Using xs servers from query parameter for proxying: {:?}", xs);
-        xs.to_vec()
+    // Determine which servers to try for proxying
+    // Servers are already normalized and combined from file_serving.rs
+    let servers_to_try: Vec<String> = if let Some(servers) = xs_servers {
+        info!("Using combined upstream servers for proxying (already normalized): {} servers", servers.len());
+        servers.to_vec()
     } else {
-        state.upstream_servers.clone()
+        // Fall back to configured upstream_servers if no combined servers provided
+        // Normalize them here in case they weren't normalized in config
+        state.upstream_servers
+            .iter()
+            .map(|s| crate::helpers::normalize_server_url(s))
+            .collect()
     };
 
     // Try each upstream server

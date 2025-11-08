@@ -183,3 +183,52 @@ pub fn normalize_server_url(url: &str) -> String {
         format!("https://{}", url)
     }
 }
+
+/// Combine and normalize server lists from multiple sources
+/// Priority order: xs_servers (highest) -> as_servers -> default_servers (lowest)
+/// Returns a deduplicated, normalized list of servers
+/// URLs are normalized (https:// prefix added if missing) and deduplicated
+/// Deduplication is case-insensitive and ignores trailing slashes
+pub fn combine_server_lists(
+    xs_servers: Option<&[String]>,
+    as_servers: Option<&[String]>,
+    default_servers: &[String],
+) -> Vec<String> {
+    use std::collections::HashSet;
+
+    let mut combined = Vec::new();
+    let mut seen = HashSet::new();
+
+    // Helper to normalize URL for comparison (case-insensitive, no trailing slash)
+    let normalize_for_comparison = |url: &str| -> String {
+        url.trim_end_matches('/').to_lowercase()
+    };
+
+    // Helper to add servers to combined list while deduplicating
+    let mut add_servers = |servers: &[String]| {
+        for server in servers {
+            let normalized = normalize_server_url(server);
+            // Normalize for comparison (remove trailing slashes, lowercase comparison)
+            let key = normalize_for_comparison(&normalized);
+            if seen.insert(key) {
+                // Store the normalized URL (preserving original case, but with protocol)
+                combined.push(normalized);
+            }
+        }
+    };
+
+    // Add servers in priority order: xs first, then as, then default
+    if let Some(xs) = xs_servers {
+        add_servers(xs);
+    }
+
+    if let Some(as_servers) = as_servers {
+        add_servers(as_servers);
+    }
+
+    if !default_servers.is_empty() {
+        add_servers(default_servers);
+    }
+
+    combined
+}

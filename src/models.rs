@@ -52,6 +52,8 @@ pub struct AppState {
     pub ongoing_downloads: OngoingDownloadsMap,
     pub chunk_uploads: Arc<RwLock<HashMap<String, ChunkUpload>>>,
     pub failed_upstream_lookups: Arc<RwLock<HashMap<String, Instant>>>,
+    pub blossom_server_lists: Arc<RwLock<HashMap<PublicKey, (Vec<String>, Instant)>>>,
+    pub blossom_server_list_cache_ttl_hours: u64,
 }
 
 impl AppState {

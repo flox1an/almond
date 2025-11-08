@@ -13,7 +13,7 @@ use tokio::signal;
 
 use crate::models::AppState;
 use crate::trust_network::refresh_trust_network;
-use crate::utils::{build_file_index, enforce_storage_limits, cleanup_abandoned_chunks, cleanup_expired_failed_lookups};
+use crate::utils::{build_file_index, enforce_storage_limits, cleanup_abandoned_chunks, cleanup_expired_failed_lookups, cleanup_expired_blossom_server_lists};
 use axum::Router;
 use dotenvy::dotenv;
 use nostr_relay_pool::prelude::*;
@@ -236,6 +236,14 @@ async fn load_app_state() -> AppState {
     info!("⚙️ Feature flags - Upload: {}, Mirror: {}, List: {}, CustomUpstreamOrigin: {}, Homepage: {}", 
           feature_upload_enabled, feature_mirror_enabled, feature_list_enabled, feature_custom_upstream_origin_enabled, feature_homepage_enabled);
 
+    // Parse blossom server list cache TTL in hours (default: 24 hours)
+    let blossom_server_list_cache_ttl_hours = env::var("BLOSSOM_SERVER_LIST_CACHE_TTL_HOURS")
+        .unwrap_or_else(|_| "24".to_string())
+        .parse()
+        .expect("Invalid value for BLOSSOM_SERVER_LIST_CACHE_TTL_HOURS");
+    
+    info!("⚙️ Blossom server list cache TTL: {} hours", blossom_server_list_cache_ttl_hours);
+
     // Parse allowed pubkeys from environment variable
     let allowed_pubkeys: Vec<PublicKey> = env::var("ALLOWED_NPUBS")
         .unwrap_or_default()
@@ -283,6 +291,8 @@ async fn load_app_state() -> AppState {
         ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
         chunk_uploads: Arc::new(RwLock::new(HashMap::new())),
         failed_upstream_lookups: Arc::new(RwLock::new(HashMap::new())),
+        blossom_server_lists: Arc::new(RwLock::new(HashMap::new())),
+        blossom_server_list_cache_ttl_hours,
     }
 }
 
@@ -303,6 +313,9 @@ fn start_cleanup_job(state: AppState) {
 
             // Clean up expired failed upstream lookups
             cleanup_expired_failed_lookups(&state).await;
+
+            // Clean up expired blossom server list cache entries
+            cleanup_expired_blossom_server_lists(&state).await;
         }
     });
 }
@@ -366,44 +379,39 @@ async fn main() {
         .await
         .expect("Failed to bind to address");
 
-    // Start the server with graceful shutdown
-    match axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-    {
-        Ok(_) => {
-            info!("✅ Server shut down gracefully");
+    // Spawn a task to handle shutdown signals - exit immediately when received
+    tokio::spawn(async move {
+        let ctrl_c = async {
+            signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
+        };
+
+        #[cfg(unix)]
+        let terminate = async {
+            signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => {
+                info!("🛑 Received SIGINT (Ctrl+C) - exiting immediately");
+                std::process::exit(0);
+            },
+            _ = terminate => {
+                info!("🛑 Received SIGTERM - exiting immediately");
+                std::process::exit(0);
+            },
         }
-        Err(e) => {
-            error!("❌ Server error: {}", e);
-        }
-    }
-}
+    });
 
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {
-            info!("🛑 Received SIGINT (Ctrl+C)");
-        },
-        _ = terminate => {
-            info!("🛑 Received SIGTERM");
-        },
+    // Start the server (no graceful shutdown - exit immediately on signal)
+    if let Err(e) = axum::serve(listener, app).await {
+        error!("❌ Server error: {}", e);
     }
 }
