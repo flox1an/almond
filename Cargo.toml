@@ -29,3 +29,6 @@ tokio-stream = "0.1"
 bytes = "1"
 async-stream = "0.3"
 bloomfilter = "1.0"
+serde_urlencoded = "0.7.1"
+axum-extra = { version = "0.12.1", features = ["query"] }
+serde_html_form = "0.2.8"

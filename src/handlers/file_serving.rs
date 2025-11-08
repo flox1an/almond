@@ -1,9 +1,10 @@
 use axum::{
     body::Body,
-    extract::{Path as AxumPath, Query, Request, State},
+    extract::{Path as AxumPath, Request, State},
     http::{header, Method, StatusCode},
     response::Response,
 };
+use axum_extra::extract::Query;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt, SeekFrom},
