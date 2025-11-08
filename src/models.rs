@@ -207,70 +207,11 @@ pub struct FileRequestQuery {
     /// Single custom origin server
     pub origin: Option<String>,
     /// Servers where the file is stored (multiple xs parameters allowed, Blossom BUD-01)
-    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
-    pub xs: Option<Vec<String>>,
+    #[serde(default)]
+    pub xs: Vec<String>,
     /// Author pubkey (Blossom BUD-01)
     #[serde(rename = "as")]
     pub author_pubkey: Option<String>,
-}
-
-/// Custom deserializer that accepts either a single string or a vec of strings
-fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de;
-
-    struct StringOrVec;
-
-    impl<'de> serde::de::Visitor<'de> for StringOrVec {
-        type Value = Option<Vec<String>>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            formatter.write_str("a string or list of strings")
-        }
-
-        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(Some(vec![value.to_string()]))
-        }
-
-        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(Some(vec![value]))
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: de::SeqAccess<'de>,
-        {
-            let mut vec = Vec::new();
-            while let Some(value) = seq.next_element()? {
-                vec.push(value);
-            }
-            Ok(if vec.is_empty() { None } else { Some(vec) })
-        }
-
-        fn visit_none<E>(self) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(None)
-        }
-
-        fn visit_unit<E>(self) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(None)
-        }
-    }
-
-    deserializer.deserialize_any(StringOrVec)
 }
 
 #[derive(Clone)]
