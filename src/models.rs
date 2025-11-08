@@ -207,71 +207,11 @@ pub struct FileRequestQuery {
     /// Single custom origin server
     pub origin: Option<String>,
     /// Servers where the file is stored (multiple xs parameters allowed, Blossom BUD-01)
-    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    #[serde(default)]
     pub xs: Vec<String>,
     /// Author pubkey (Blossom BUD-01)
     #[serde(rename = "as")]
     pub author_pubkey: Option<String>,
-}
-
-/// Custom deserializer that accepts either a single string or a vec of strings
-/// This handles both single xs parameter (?xs=server.com) and multiple (?xs=a&xs=b)
-fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de;
-
-    struct StringOrVec;
-
-    impl<'de> serde::de::Visitor<'de> for StringOrVec {
-        type Value = Vec<String>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            formatter.write_str("a string or list of strings")
-        }
-
-        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(vec![value.to_string()])
-        }
-
-        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(vec![value])
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: de::SeqAccess<'de>,
-        {
-            let mut vec = Vec::new();
-            while let Some(value) = seq.next_element()? {
-                vec.push(value);
-            }
-            Ok(vec)
-        }
-
-        fn visit_none<E>(self) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(Vec::new())
-        }
-
-        fn visit_unit<E>(self) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(Vec::new())
-        }
-    }
-
-    deserializer.deserialize_any(StringOrVec)
 }
 
 #[derive(Clone)]
@@ -290,4 +230,52 @@ pub struct ChunkInfo {
     pub offset: u64,
     pub length: u64,
     pub chunk_path: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_file_request_query_single_xs() {
+        // Test with serde_html_form which is what axum_extra::Query uses
+        let query_string = "xs=blossom.primal.net";
+        let result: Result<FileRequestQuery, _> = serde_html_form::from_str(query_string);
+        assert!(result.is_ok(), "Single xs parameter should deserialize successfully: {:?}", result.as_ref().err());
+        let query = result.unwrap();
+        assert_eq!(query.xs.len(), 1);
+        assert_eq!(query.xs[0], "blossom.primal.net");
+    }
+
+    #[test]
+    fn test_file_request_query_multiple_xs() {
+        let query_string = "xs=blossom.primal.net&xs=video.nostr.build";
+        let result: Result<FileRequestQuery, _> = serde_html_form::from_str(query_string);
+        assert!(result.is_ok(), "Multiple xs parameters should deserialize successfully: {:?}", result.as_ref().err());
+        let query = result.unwrap();
+        assert_eq!(query.xs.len(), 2);
+        assert_eq!(query.xs[0], "blossom.primal.net");
+        assert_eq!(query.xs[1], "video.nostr.build");
+    }
+
+    #[test]
+    fn test_file_request_query_no_xs() {
+        let query_string = "origin=example.com";
+        let result: Result<FileRequestQuery, _> = serde_html_form::from_str(query_string);
+        assert!(result.is_ok(), "Query without xs should deserialize successfully");
+        let query = result.unwrap();
+        assert_eq!(query.xs.len(), 0);
+    }
+
+    #[test]
+    fn test_file_request_query_combined() {
+        let query_string = "xs=blossom.primal.net&xs=video.nostr.build&as=08039bc2786f9f58c94146c6666fac9a7d7ceb40d0798a8f49140763cc715053";
+        let result: Result<FileRequestQuery, _> = serde_html_form::from_str(query_string);
+        assert!(result.is_ok(), "Query with multiple xs and as parameters should deserialize successfully: {:?}", result.err());
+        let query = result.unwrap();
+        assert_eq!(query.xs.len(), 2);
+        assert_eq!(query.xs[0], "blossom.primal.net");
+        assert_eq!(query.xs[1], "video.nostr.build");
+        assert_eq!(query.author_pubkey, Some("08039bc2786f9f58c94146c6666fac9a7d7ceb40d0798a8f49140763cc715053".to_string()));
+    }
 }
