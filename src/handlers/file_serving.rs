@@ -74,15 +74,15 @@ pub async fn handle_file_request(
                 // Extract xs (servers) parameters - multiple xs query parameters can be provided per BUD-01
                 // xs takes priority, then fall back to legacy servers parameter
                 let xs_servers = if state.feature_custom_upstream_origin_enabled {
-                    query.xs.as_ref().or_else(|| {
-                        if !query.servers.is_empty() {
-                            Some(&query.servers)
-                        } else {
-                            None
-                        }
-                    })
+                    if !query.xs.is_empty() {
+                        Some(&query.xs[..])
+                    } else if !query.servers.is_empty() {
+                        Some(&query.servers[..])
+                    } else {
+                        None
+                    }
                 } else {
-                    if query.xs.is_some() || !query.servers.is_empty() {
+                    if !query.xs.is_empty() || !query.servers.is_empty() {
                         warn!("Server parameters provided but FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED is disabled, ignoring");
                     }
                     None
@@ -120,7 +120,7 @@ pub async fn handle_file_request(
                 // Normalize URLs and deduplicate while preserving order
                 let combined_servers: Option<Vec<String>> = {
                     let combined = crate::helpers::combine_server_lists(
-                        xs_servers.map(|v| v.as_slice()),
+                        xs_servers,
                         as_servers.as_ref().map(|v| v.as_slice()),
                         &state.upstream_servers,
                     );
@@ -139,7 +139,7 @@ pub async fn handle_file_request(
                     info!("GET request for url: {} (range: {}) with custom origin: {}", filename, range_header, origin);
                 } else if let Some(servers) = xs_servers_to_use {
                     let mut sources = Vec::new();
-                    if xs_servers.is_some() {
+                    if !query.xs.is_empty() {
                         sources.push("xs");
                     }
                     if as_servers.is_some() {
