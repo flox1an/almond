@@ -15,7 +15,7 @@ use crate::models::AppState;
 use crate::trust_network::refresh_trust_network;
 use crate::utils::{build_file_index, enforce_storage_limits, cleanup_abandoned_chunks, cleanup_expired_failed_lookups};
 use axum::Router;
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use nostr_relay_pool::prelude::*;
 use tokio::fs;
 use tokio::sync::RwLock;
