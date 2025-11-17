@@ -39,7 +39,6 @@ pub struct AppState {
     pub files_uploaded: Arc<RwLock<u64>>,
     pub files_downloaded: Arc<RwLock<u64>>,
     pub upload_throughput_data: Arc<RwLock<Vec<(Instant, u64)>>>,
-    pub download_throughput_data: Arc<RwLock<Vec<(Instant, u64)>>>,
     pub upstream_servers: Vec<String>,
     pub max_upstream_download_size_mb: u64,
     pub max_chunk_size_mb: u64,
@@ -124,29 +123,6 @@ impl AppState {
             0.0
         };
 
-        let download_throughput_data = self.download_throughput_data.read().await;
-        let one_hour_ago = Instant::now() - std::time::Duration::from_secs(3600);
-        let recent_download_data: Vec<_> = download_throughput_data
-            .iter()
-            .filter(|(timestamp, _)| *timestamp > one_hour_ago)
-            .collect();
-
-        let download_throughput_mbps = if recent_download_data.len() > 1 {
-            let total_bytes: u64 = recent_download_data.iter().map(|(_, bytes)| bytes).sum();
-            let time_span = recent_download_data
-                .last()
-                .unwrap()
-                .0
-                .duration_since(recent_download_data.first().unwrap().0);
-            if time_span.as_secs() > 0 {
-                (total_bytes as f64 / (1024.0 * 1024.0)) / (time_span.as_secs() as f64)
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
-
         let files_uploaded = *self.files_uploaded.read().await;
         let files_downloaded = *self.files_downloaded.read().await;
 
@@ -155,7 +131,7 @@ impl AppState {
             total_size_bytes,
             total_size_mb,
             upload_throughput_mbps,
-            download_throughput_mbps,
+            download_throughput_mbps: 0.0,
             files_uploaded,
             files_downloaded,
             max_total_size_mb,

@@ -723,11 +723,6 @@ async fn stream_and_save_from_upstream(
 
                 let mut n = state_clone.files_downloaded.write().await;
                 *n += 1;
-                let mut t = state_clone.download_throughput_data.write().await;
-                t.push((std::time::Instant::now(), total));
-                if t.len() > MAX_THROUGHPUT_ENTRIES {
-                    t.drain(0..THROUGHPUT_CLEANUP_THRESHOLD);
-                }
 
                 info!(
                     "✅ UPSTREAM DOWNLOAD COMPLETED: {} -> {} ({} bytes)",
@@ -922,11 +917,6 @@ async fn download_file_from_upstream_background(
     // Update stats
     let mut n = state.files_downloaded.write().await;
     *n += 1;
-    let mut t = state.download_throughput_data.write().await;
-    t.push((std::time::Instant::now(), body_size));
-    if t.len() > MAX_THROUGHPUT_ENTRIES {
-        t.drain(0..THROUGHPUT_CLEANUP_THRESHOLD);
-    }
 
     info!(
         "✅ BACKGROUND UPSTREAM DOWNLOAD COMPLETED: {} -> {} ({} bytes)",
