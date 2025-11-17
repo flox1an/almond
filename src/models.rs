@@ -1,5 +1,6 @@
 use mime_guess;
 use nostr_relay_pool::prelude::*;
+use prometheus::{Registry, IntCounter, IntGauge};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -53,6 +54,12 @@ pub struct AppState {
     pub failed_upstream_lookups: Arc<RwLock<HashMap<String, Instant>>>,
     pub blossom_server_lists: Arc<RwLock<HashMap<PublicKey, (Vec<String>, Instant)>>>,
     pub blossom_server_list_cache_ttl_hours: u64,
+    // Prometheus metrics
+    pub metrics_registry: Registry,
+    pub metrics_files_uploaded: IntCounter,
+    pub metrics_files_downloaded: IntCounter,
+    pub metrics_storage_bytes: IntGauge,
+    pub metrics_total_files: IntGauge,
 }
 
 impl AppState {
@@ -125,6 +132,12 @@ impl AppState {
 
         let files_uploaded = *self.files_uploaded.read().await;
         let files_downloaded = *self.files_downloaded.read().await;
+
+        // Update Prometheus metrics
+        self.metrics_files_uploaded.inc_by(files_uploaded.saturating_sub(self.metrics_files_uploaded.get()));
+        self.metrics_files_downloaded.inc_by(files_downloaded.saturating_sub(self.metrics_files_downloaded.get()));
+        self.metrics_storage_bytes.set(total_size_bytes as i64);
+        self.metrics_total_files.set(total_files as i64);
 
         Stats {
             total_files,

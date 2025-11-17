@@ -17,6 +17,7 @@ use crate::utils::{build_file_index, enforce_storage_limits, cleanup_abandoned_c
 use axum::Router;
 use dotenvy::dotenv;
 use nostr_relay_pool::prelude::*;
+use prometheus::{IntCounter, IntGauge, Opts, Registry};
 use tokio::fs;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -71,6 +72,7 @@ pub async fn create_app(state: AppState) -> Router {
         .route("/_stats", get(get_stats))
         .route("/_bloom", get(get_bloom))
         .route("/_upstream", get(get_upstream))
+        .route("/_metrics", get(get_metrics))
         .route("/", get(serve_index))
         .route("/index.html", get(serve_index))
         .route("/{filename}", delete(delete_blob))
@@ -263,6 +265,31 @@ async fn load_app_state() -> AppState {
         })
         .collect();
 
+    // Initialize Prometheus metrics
+    let registry = Registry::new();
+
+    let metrics_files_uploaded = IntCounter::with_opts(
+        Opts::new("almond_files_uploaded_total", "Total number of files uploaded")
+    ).expect("Failed to create metrics_files_uploaded counter");
+    registry.register(Box::new(metrics_files_uploaded.clone())).expect("Failed to register metrics_files_uploaded");
+
+    let metrics_files_downloaded = IntCounter::with_opts(
+        Opts::new("almond_files_downloaded_total", "Total number of files downloaded")
+    ).expect("Failed to create metrics_files_downloaded counter");
+    registry.register(Box::new(metrics_files_downloaded.clone())).expect("Failed to register metrics_files_downloaded");
+
+    let metrics_storage_bytes = IntGauge::with_opts(
+        Opts::new("almond_storage_bytes", "Total storage used in bytes")
+    ).expect("Failed to create metrics_storage_bytes gauge");
+    registry.register(Box::new(metrics_storage_bytes.clone())).expect("Failed to register metrics_storage_bytes");
+
+    let metrics_total_files = IntGauge::with_opts(
+        Opts::new("almond_total_files", "Total number of files stored")
+    ).expect("Failed to create metrics_total_files gauge");
+    registry.register(Box::new(metrics_total_files.clone())).expect("Failed to register metrics_total_files");
+
+    info!("✅ Prometheus metrics initialized");
+
     AppState {
         upload_dir,
         file_index,
@@ -292,6 +319,11 @@ async fn load_app_state() -> AppState {
         failed_upstream_lookups: Arc::new(RwLock::new(HashMap::new())),
         blossom_server_lists: Arc::new(RwLock::new(HashMap::new())),
         blossom_server_list_cache_ttl_hours,
+        metrics_registry: registry,
+        metrics_files_uploaded,
+        metrics_files_downloaded,
+        metrics_storage_bytes,
+        metrics_total_files,
     }
 }
 
