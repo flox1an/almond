@@ -278,7 +278,6 @@ async fn load_app_state() -> AppState {
         files_uploaded: Arc::new(RwLock::new(0)),
         files_downloaded: Arc::new(RwLock::new(0)),
         upload_throughput_data: Arc::new(RwLock::new(Vec::new())),
-        download_throughput_data: Arc::new(RwLock::new(Vec::new())),
         upstream_servers,
         max_upstream_download_size_mb,
         max_chunk_size_mb,

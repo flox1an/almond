@@ -39,14 +39,6 @@ pub fn extract_expiration(headers: &HeaderMap) -> Option<u64> {
 pub async fn track_download_stats(state: &AppState, size: u64) {
     let mut files_downloaded = state.files_downloaded.write().await;
     *files_downloaded += 1;
-
-    let mut download_throughput_data = state.download_throughput_data.write().await;
-    download_throughput_data.push((std::time::Instant::now(), size));
-
-    // Keep only last entries to prevent memory bloat
-    if download_throughput_data.len() > MAX_THROUGHPUT_ENTRIES {
-        download_throughput_data.drain(0..THROUGHPUT_CLEANUP_THRESHOLD);
-    }
 }
 
 /// Track upload statistics

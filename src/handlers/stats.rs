@@ -18,7 +18,6 @@ pub async fn get_stats(
     let file_index = state.file_index.read().await;
     let trusted_pubkeys = state.trusted_pubkeys.read().await;
     let upload_throughput_data = state.upload_throughput_data.read().await;
-    let download_throughput_data = state.download_throughput_data.read().await;
 
     let total_files = file_index.len();
     let total_size: u64 = file_index.values().map(|f| f.size).sum();
@@ -40,7 +39,6 @@ pub async fn get_stats(
     let mut response = json!({
         "stats": stats,
         "upload_throughput": upload_throughput_data.len(),
-        "download_throughput": download_throughput_data.len(),
     });
 
     // Add throughput data if requested
@@ -55,19 +53,6 @@ pub async fn get_stats(
             })
             .collect();
         response["upload_throughput_data"] = json!(upload_data);
-    }
-
-    if !download_throughput_data.is_empty() {
-        let download_data: Vec<_> = download_throughput_data
-            .iter()
-            .map(|(time, size)| {
-                json!({
-                    "timestamp": time.elapsed().as_secs(),
-                    "size": size
-                })
-            })
-            .collect();
-        response["download_throughput_data"] = json!(download_data);
     }
 
     Json(response)
