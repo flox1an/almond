@@ -19,7 +19,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
     sync::Notify,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::constants::*;
 use crate::helpers::*;
@@ -42,12 +42,14 @@ pub async fn get_upstream(
 }
 
 /// Try to fetch file from upstream servers, stream it to client and save locally
+/// Prioritization: custom_origin → xs_servers → UPSTREAM_SERVERS → user servers (lazy fetch)
 pub async fn try_upstream_servers(
     state: &AppState,
     filename: &str,
     headers: &HeaderMap,
     custom_origin: Option<&str>,
     xs_servers: Option<&[String]>,
+    author_pubkey: Option<&nostr_relay_pool::prelude::PublicKey>,
 ) -> Result<Response, StatusCode> {
     // Forward range requests to upstream servers
     if headers.get(header::RANGE).is_some() {
@@ -68,16 +70,21 @@ pub async fn try_upstream_servers(
 
         // Proxy the request to upstream while download is in progress
         // Pass the full filename (with extension) for URL construction
-        return proxy_request_to_upstream(state, filename, headers, custom_origin, xs_servers).await;
+        return proxy_request_to_upstream(state, filename, headers, custom_origin, xs_servers, author_pubkey).await;
     }
+
+    // Track which servers we've already tried to avoid duplicate HEAD requests
+    let mut tried_servers = std::collections::HashSet::<String>::new();
 
     let client = Client::new();
 
     // Try custom origin first if provided (single server)
     if let Some(origin_url) = custom_origin {
-        info!("Trying custom origin server first: {}", origin_url);
-        let file_url = format!("{}/{}", origin_url.trim_end_matches('/'), filename);
+        let normalized_origin = crate::helpers::normalize_server_url(origin_url);
+        info!("Trying custom origin server first: {}", normalized_origin);
+        let file_url = format!("{}/{}", normalized_origin.trim_end_matches('/'), filename);
         info!("Trying upstream server: {}", file_url);
+        tried_servers.insert(normalized_origin.clone());
 
         // Create request with all relevant headers for upstream servers
         let request = client.get(&file_url);
@@ -157,116 +164,127 @@ pub async fn try_upstream_servers(
         info!("Custom origin failed, trying xs servers or configured upstream servers");
     }
 
-    // Determine which servers to try
-    // Servers are already normalized and combined from file_serving.rs
-    // xs_servers parameter now contains the combined list (xs + as + UPSTREAM_SERVERS)
-    let servers_to_try: Vec<String> = if let Some(servers) = xs_servers {
-        info!("Using combined upstream servers (already normalized): {} servers", servers.len());
-        servers.to_vec()
-    } else {
-        // Fall back to configured upstream_servers if no combined servers provided
-        // Normalize them here in case they weren't normalized in config
-        state.upstream_servers
-            .iter()
-            .map(|s| crate::helpers::normalize_server_url(s))
-            .collect()
-    };
+    // Priority 1: Try xs servers if provided
+    if let Some(servers) = xs_servers {
+        info!("Priority 1: Trying xs servers ({} servers)", servers.len());
+        for server in servers {
+            let normalized_server = crate::helpers::normalize_server_url(server);
 
-    if servers_to_try.is_empty() {
-        info!("No upstream servers available");
-        return Err(StatusCode::NOT_FOUND);
-    }
+            // Skip if we've already tried this server
+            if tried_servers.contains(&normalized_server) {
+                debug!("Skipping already-tried server: {}", normalized_server);
+                continue;
+            }
 
-    // Try each upstream server
-    for upstream_url in &servers_to_try {
-        let file_url = format!("{}/{}", upstream_url.trim_end_matches('/'), filename);
-        info!("Trying upstream server: {}", file_url);
+            tried_servers.insert(normalized_server.clone());
+            let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
+            info!("Trying xs server: {}", file_url);
 
-        // Create request with all relevant headers for upstream servers
-        let request = client.get(&file_url);
-        let request = copy_headers_to_reqwest(headers, request);
+            // Create request with all relevant headers for upstream servers
+            let request = client.get(&file_url);
+            let request = copy_headers_to_reqwest(headers, request);
 
-        match request.send().await {
-            Ok(response) if response.status().is_success() => {
-                info!("Found file on upstream server: {}", file_url);
-
-                // Get content type from upstream response
-                let content_type = extract_content_type_from_response(response.headers());
-
-                // Check if this is a range request
-                let has_range_header = headers.get(header::RANGE).is_some();
-                
-                if has_range_header {
-                    info!("Range request detected for non-existent file {}, starting download from byte 0", file_hash);
-                    
-                    // For range requests, we need to start a full download in the background
-                    // while proxying the range request for immediate response
-                    let full_request = client.get(&file_url);
-                    let full_request = copy_headers_without_range(headers, full_request);
-                    
-                    match full_request.send().await {
-                        Ok(full_response) if full_response.status().is_success() => {
-                            info!("Starting full download from byte 0 for range request: {}", file_hash);
-                            
-                            // Prepare download state (use hash for tracking)
-                            let (temp_path, _written_len, _notify) = prepare_download_state(state, &file_hash, &content_type).await?;
-
-                            // Start the download in the background
-                            let state_clone = state.clone();
-                            let file_url_clone = file_url.clone();
-                            let file_hash_clone = file_hash.clone();
-                            let content_type_clone = content_type.clone();
-                            let temp_path_clone = temp_path.clone();
-                            tokio::spawn(async move {
-                                download_file_from_upstream_background(
-                                    &state_clone,
-                                    &file_url_clone,
-                                    full_response,
-                                    &file_hash_clone,
-                                    &content_type_clone,
-                                    &temp_path_clone,
-                                )
-                                .await;
-                            });
-
-                            // Proxy the range request to upstream for immediate response
-                            info!("Proxying range request to upstream while download starts in background: {}", file_hash);
-                            return proxy_upstream_response(response, &content_type, filename).await;
-                        }
-                        Ok(_) | Err(_) => {
-                            // If we can't get the full file, fall back to proxying the range request
-                            warn!("Failed to start full download for range request, proxying range request only: {}", file_hash);
-                            return proxy_upstream_response(response, &content_type, filename).await;
-                        }
-                    }
-                } else {
-                    // For non-range requests, stream and save from upstream
-                    info!("Non-range request, starting download and streaming to client: {}", file_hash);
-                    
-                    // Prepare download state (use hash for tracking)
-                    let (temp_path, written_len, notify) = prepare_download_state(state, &file_hash, &content_type).await?;
-
-                    return stream_and_save_from_upstream(
-                        state,
-                        &file_url,
-                        response,
-                        &file_hash,
-                        written_len,
-                        notify,
-                        temp_path,
-                    )
-                    .await;
+            match request.send().await {
+                Ok(response) if response.status().is_success() => {
+                    info!("Found file on xs server: {}", file_url);
+                    return handle_successful_upstream_response(
+                        state, &client, response, &file_url, &file_hash, filename, headers
+                    ).await;
+                }
+                Ok(response) => {
+                    debug!("xs server {} returned status: {}", file_url, response.status());
+                }
+                Err(e) => {
+                    debug!("Failed to fetch from xs server {}: {}", file_url, e);
                 }
             }
-            Ok(response) => {
-                info!(
-                    "Upstream server {} returned status: {}",
-                    file_url,
-                    response.status()
-                );
+        }
+        info!("All xs servers failed or returned non-success, trying local UPSTREAM_SERVERS");
+    }
+
+    // Priority 2: Try local UPSTREAM_SERVERS
+    if !state.upstream_servers.is_empty() {
+        info!("Priority 2: Trying local UPSTREAM_SERVERS ({} servers)", state.upstream_servers.len());
+        for server in &state.upstream_servers {
+            let normalized_server = crate::helpers::normalize_server_url(server);
+
+            // Skip if we've already tried this server
+            if tried_servers.contains(&normalized_server) {
+                debug!("Skipping already-tried server: {}", normalized_server);
+                continue;
+            }
+
+            tried_servers.insert(normalized_server.clone());
+            let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
+            info!("Trying local UPSTREAM_SERVER: {}", file_url);
+
+            // Create request with all relevant headers for upstream servers
+            let request = client.get(&file_url);
+            let request = copy_headers_to_reqwest(headers, request);
+
+            match request.send().await {
+                Ok(response) if response.status().is_success() => {
+                    info!("Found file on local UPSTREAM_SERVER: {}", file_url);
+                    return handle_successful_upstream_response(
+                        state, &client, response, &file_url, &file_hash, filename, headers
+                    ).await;
+                }
+                Ok(response) => {
+                    debug!("UPSTREAM_SERVER {} returned status: {}", file_url, response.status());
+                }
+                Err(e) => {
+                    debug!("Failed to fetch from UPSTREAM_SERVER {}: {}", file_url, e);
+                }
+            }
+        }
+        info!("All local UPSTREAM_SERVERS failed or returned non-success");
+    }
+
+    // Priority 3: Fetch and try user servers (lazy fetch) if author pubkey is provided
+    if let Some(pubkey) = author_pubkey {
+        info!("Priority 3: Fetching user server list for pubkey: {} (lazy fetch)", pubkey.to_hex());
+        match crate::services::blossom_servers::fetch_user_server_list(state, pubkey).await {
+            Ok(user_servers) if !user_servers.is_empty() => {
+                info!("Fetched {} servers from user's server list (BUD-03)", user_servers.len());
+                for server in &user_servers {
+                    let normalized_server = crate::helpers::normalize_server_url(server);
+
+                    // Skip if we've already tried this server
+                    if tried_servers.contains(&normalized_server) {
+                        debug!("Skipping already-tried server: {}", normalized_server);
+                        continue;
+                    }
+
+                    tried_servers.insert(normalized_server.clone());
+                    let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
+                    info!("Trying user server: {}", file_url);
+
+                    // Create request with all relevant headers for upstream servers
+                    let request = client.get(&file_url);
+                    let request = copy_headers_to_reqwest(headers, request);
+
+                    match request.send().await {
+                        Ok(response) if response.status().is_success() => {
+                            info!("Found file on user server: {}", file_url);
+                            return handle_successful_upstream_response(
+                                state, &client, response, &file_url, &file_hash, filename, headers
+                            ).await;
+                        }
+                        Ok(response) => {
+                            debug!("User server {} returned status: {}", file_url, response.status());
+                        }
+                        Err(e) => {
+                            debug!("Failed to fetch from user server {}: {}", file_url, e);
+                        }
+                    }
+                }
+                info!("All user servers failed or returned non-success");
+            }
+            Ok(_) => {
+                info!("User server list is empty for pubkey: {}", pubkey.to_hex());
             }
             Err(e) => {
-                warn!("Failed to fetch from upstream {}: {}", file_url, e);
+                warn!("Failed to fetch user server list for pubkey {}: {}", pubkey.to_hex(), e);
             }
         }
     }
@@ -274,22 +292,108 @@ pub async fn try_upstream_servers(
     Err(StatusCode::NOT_FOUND)
 }
 
+/// Handle successful upstream response (consolidates range and non-range logic)
+async fn handle_successful_upstream_response(
+    state: &AppState,
+    client: &Client,
+    response: reqwest::Response,
+    file_url: &str,
+    file_hash: &str,
+    filename: &str,
+    headers: &HeaderMap,
+) -> Result<Response, StatusCode> {
+    // Get content type from upstream response
+    let content_type = extract_content_type_from_response(response.headers());
+
+    // Check if this is a range request
+    let has_range_header = headers.get(header::RANGE).is_some();
+
+    if has_range_header {
+        info!("Range request detected for non-existent file {}, starting download from byte 0", file_hash);
+
+        // For range requests, we need to start a full download in the background
+        // while proxying the range request for immediate response
+        let full_request = client.get(file_url);
+        let full_request = copy_headers_without_range(headers, full_request);
+
+        match full_request.send().await {
+            Ok(full_response) if full_response.status().is_success() => {
+                info!("Starting full download from byte 0 for range request: {}", file_hash);
+
+                // Prepare download state (use hash for tracking)
+                let (temp_path, _written_len, _notify) = prepare_download_state(state, file_hash, &content_type).await?;
+
+                // Start the download in the background
+                let state_clone = state.clone();
+                let file_url_clone = file_url.to_string();
+                let file_hash_clone = file_hash.to_string();
+                let content_type_clone = content_type.clone();
+                let temp_path_clone = temp_path.clone();
+                tokio::spawn(async move {
+                    download_file_from_upstream_background(
+                        &state_clone,
+                        &file_url_clone,
+                        full_response,
+                        &file_hash_clone,
+                        &content_type_clone,
+                        &temp_path_clone,
+                    )
+                    .await;
+                });
+
+                // Proxy the range request to upstream for immediate response
+                info!("Proxying range request to upstream while download starts in background: {}", file_hash);
+                return proxy_upstream_response(response, &content_type, filename).await;
+            }
+            Ok(_) | Err(_) => {
+                // If we can't get the full file, fall back to proxying the range request
+                warn!("Failed to start full download for range request, proxying range request only: {}", file_hash);
+                return proxy_upstream_response(response, &content_type, filename).await;
+            }
+        }
+    } else {
+        // For non-range requests, stream and save from upstream
+        info!("Non-range request, starting download and streaming to client: {}", file_hash);
+
+        // Prepare download state (use hash for tracking)
+        let (temp_path, written_len, notify) = prepare_download_state(state, file_hash, &content_type).await?;
+
+        return stream_and_save_from_upstream(
+            state,
+            file_url,
+            response,
+            file_hash,
+            written_len,
+            notify,
+            temp_path,
+        )
+        .await;
+    }
+}
+
 /// Proxy request to upstream server while download is in progress
+/// Uses the same prioritization as try_upstream_servers
 async fn proxy_request_to_upstream(
     state: &AppState,
     filename: &str,
     headers: &HeaderMap,
     custom_origin: Option<&str>,
     xs_servers: Option<&[String]>,
+    author_pubkey: Option<&nostr_relay_pool::prelude::PublicKey>,
 ) -> Result<Response<Body>, StatusCode> {
     info!("Proxying request to upstream for ongoing download: {}", filename);
 
     let client = Client::new();
 
+    // Track which servers we've already tried to avoid duplicate requests
+    let mut tried_servers = std::collections::HashSet::<String>::new();
+
     // Try custom origin first if provided
     if let Some(origin_url) = custom_origin {
-        let file_url = format!("{}/{}", origin_url.trim_end_matches('/'), filename);
+        let normalized_origin = crate::helpers::normalize_server_url(origin_url);
+        let file_url = format!("{}/{}", normalized_origin.trim_end_matches('/'), filename);
         info!("Proxying to custom origin server: {}", file_url);
+        tried_servers.insert(normalized_origin.clone());
 
         // Create request with all relevant headers
         let request = client.get(&file_url);
@@ -298,18 +402,11 @@ async fn proxy_request_to_upstream(
         match request.send().await {
             Ok(response) if response.status().is_success() => {
                 info!("Successfully proxied request to custom origin: {}", file_url);
-
-                // Get content type from upstream response
                 let content_type = extract_content_type_from_response(response.headers());
-
                 return proxy_upstream_response(response, &content_type, filename).await;
             }
             Ok(response) => {
-                info!(
-                    "Custom origin server {} returned status: {}",
-                    file_url,
-                    response.status()
-                );
+                info!("Custom origin server {} returned status: {}", file_url, response.status());
             }
             Err(e) => {
                 warn!("Failed to proxy to custom origin {}: {}", file_url, e);
@@ -317,47 +414,96 @@ async fn proxy_request_to_upstream(
         }
     }
 
-    // Determine which servers to try for proxying
-    // Servers are already normalized and combined from file_serving.rs
-    let servers_to_try: Vec<String> = if let Some(servers) = xs_servers {
-        info!("Using combined upstream servers for proxying (already normalized): {} servers", servers.len());
-        servers.to_vec()
-    } else {
-        // Fall back to configured upstream_servers if no combined servers provided
-        // Normalize them here in case they weren't normalized in config
-        state.upstream_servers
-            .iter()
-            .map(|s| crate::helpers::normalize_server_url(s))
-            .collect()
-    };
+    // Priority 1: Try xs servers if provided
+    if let Some(servers) = xs_servers {
+        for server in servers {
+            let normalized_server = crate::helpers::normalize_server_url(server);
+            if tried_servers.contains(&normalized_server) {
+                continue;
+            }
+            tried_servers.insert(normalized_server.clone());
 
-    // Try each upstream server
-    for upstream_url in &servers_to_try {
-        let file_url = format!("{}/{}", upstream_url.trim_end_matches('/'), filename);
-        info!("Proxying to upstream server: {}", file_url);
+            let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
+            info!("Proxying to xs server: {}", file_url);
 
-        // Create request with all relevant headers
+            let request = client.get(&file_url);
+            let request = copy_headers_to_reqwest(headers, request);
+
+            match request.send().await {
+                Ok(response) if response.status().is_success() => {
+                    info!("Successfully proxied request to xs server: {}", file_url);
+                    let content_type = extract_content_type_from_response(response.headers());
+                    return proxy_upstream_response(response, &content_type, filename).await;
+                }
+                Ok(response) => {
+                    debug!("xs server {} returned status: {}", file_url, response.status());
+                }
+                Err(e) => {
+                    debug!("Failed to proxy to xs server {}: {}", file_url, e);
+                }
+            }
+        }
+    }
+
+    // Priority 2: Try local UPSTREAM_SERVERS
+    for server in &state.upstream_servers {
+        let normalized_server = crate::helpers::normalize_server_url(server);
+        if tried_servers.contains(&normalized_server) {
+            continue;
+        }
+        tried_servers.insert(normalized_server.clone());
+
+        let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
+        info!("Proxying to local UPSTREAM_SERVER: {}", file_url);
+
         let request = client.get(&file_url);
         let request = copy_headers_to_reqwest(headers, request);
 
         match request.send().await {
             Ok(response) if response.status().is_success() => {
-                info!("Successfully proxied request to upstream: {}", file_url);
-                
-                // Get content type from upstream response
+                info!("Successfully proxied request to UPSTREAM_SERVER: {}", file_url);
                 let content_type = extract_content_type_from_response(response.headers());
-
                 return proxy_upstream_response(response, &content_type, filename).await;
             }
             Ok(response) => {
-                info!(
-                    "Upstream server {} returned status: {}",
-                    file_url,
-                    response.status()
-                );
+                debug!("UPSTREAM_SERVER {} returned status: {}", file_url, response.status());
             }
             Err(e) => {
-                warn!("Failed to proxy to upstream {}: {}", file_url, e);
+                debug!("Failed to proxy to UPSTREAM_SERVER {}: {}", file_url, e);
+            }
+        }
+    }
+
+    // Priority 3: Fetch and try user servers (lazy fetch)
+    if let Some(pubkey) = author_pubkey {
+        info!("Fetching user server list for proxying: {}", pubkey.to_hex());
+        if let Ok(user_servers) = crate::services::blossom_servers::fetch_user_server_list(state, pubkey).await {
+            for server in &user_servers {
+                let normalized_server = crate::helpers::normalize_server_url(server);
+                if tried_servers.contains(&normalized_server) {
+                    continue;
+                }
+                tried_servers.insert(normalized_server.clone());
+
+                let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
+                info!("Proxying to user server: {}", file_url);
+
+                let request = client.get(&file_url);
+                let request = copy_headers_to_reqwest(headers, request);
+
+                match request.send().await {
+                    Ok(response) if response.status().is_success() => {
+                        info!("Successfully proxied request to user server: {}", file_url);
+                        let content_type = extract_content_type_from_response(response.headers());
+                        return proxy_upstream_response(response, &content_type, filename).await;
+                    }
+                    Ok(response) => {
+                        debug!("User server {} returned status: {}", file_url, response.status());
+                    }
+                    Err(e) => {
+                        debug!("Failed to proxy to user server {}: {}", file_url, e);
+                    }
+                }
             }
         }
     }
