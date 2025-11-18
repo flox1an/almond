@@ -89,77 +89,45 @@ pub async fn handle_file_request(
                     None
                 };
 
-                // Fetch user's server list from Nostr (BUD-03) if 'as' parameter is provided
-                let mut as_servers: Option<Vec<String>> = None;
-                if query.author_pubkey.is_some() && state.feature_custom_upstream_origin_enabled {
+                // Parse author pubkey if provided (BUD-03) - we'll fetch servers lazily only if needed
+                let author_pubkey = if query.author_pubkey.is_some() && state.feature_custom_upstream_origin_enabled {
                     if let Some(author_str) = &query.author_pubkey {
                         match blossom_servers::parse_pubkey(author_str) {
                             Ok(pubkey) => {
-                                info!("Fetching server list for pubkey: {} (from as parameter)", pubkey.to_hex());
-                                match blossom_servers::fetch_user_server_list(&state, &pubkey).await {
-                                    Ok(servers) => {
-                                        if !servers.is_empty() {
-                                            info!("Fetched {} servers from user's server list (BUD-03)", servers.len());
-                                            as_servers = Some(servers);
-                                        } else {
-                                            info!("User server list is empty for pubkey: {}", pubkey.to_hex());
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!("Failed to fetch user server list for pubkey {}: {}", pubkey.to_hex(), e);
-                                    }
-                                }
+                                debug!("Parsed author pubkey: {} (from as parameter)", pubkey.to_hex());
+                                Some(pubkey)
                             }
                             Err(e) => {
                                 warn!("Invalid pubkey in 'as' parameter: {} ({})", author_str, e);
+                                None
                             }
                         }
-                    }
-                }
-
-                // Combine servers from all sources: xs (highest priority) -> as -> UPSTREAM_SERVERS (lowest priority)
-                // Normalize URLs and deduplicate while preserving order
-                let combined_servers: Option<Vec<String>> = {
-                    let combined = crate::helpers::combine_server_lists(
-                        xs_servers,
-                        as_servers.as_ref().map(|v| v.as_slice()),
-                        &state.upstream_servers,
-                    );
-                    if !combined.is_empty() {
-                        Some(combined)
                     } else {
                         None
                     }
+                } else {
+                    None
                 };
 
-                // Use combined servers if any are available
-                let xs_servers_to_use = combined_servers.as_ref().map(|v| v.as_slice());
+                // We only prepare xs servers here, NOT user servers (lazy fetch in upstream.rs)
+                let xs_servers_to_use = xs_servers;
 
                 // Log the request with appropriate context
                 if let Some(origin) = custom_origin {
                     info!("GET request for url: {} (range: {}) with custom origin: {}", filename, range_header, origin);
                 } else if let Some(servers) = xs_servers_to_use {
-                    let mut sources = Vec::new();
-                    if !query.xs.is_empty() {
-                        sources.push("xs");
-                    }
-                    if as_servers.is_some() {
-                        sources.push("as");
-                    }
-                    if !state.upstream_servers.is_empty() {
-                        sources.push("UPSTREAM_SERVERS");
-                    }
                     info!(
-                        "GET request for url: {} (range: {}) with combined servers from: {} ({} servers): {:?}",
+                        "GET request for url: {} (range: {}) with xs servers ({} servers): {:?}",
                         filename,
                         range_header,
-                        sources.join("+"),
                         servers.len(),
                         servers
                     );
-                    if let Some(author) = &query.author_pubkey {
-                        debug!("Request includes author pubkey (as): {}", author);
+                    if author_pubkey.is_some() {
+                        debug!("Request includes author pubkey (as) for lazy fetch if needed");
                     }
+                } else if author_pubkey.is_some() {
+                    info!("GET request for url: {} (range: {}) with author pubkey for lazy server fetch", filename, range_header);
                 } else {
                     info!("GET request for url: {} (range: {})", filename, range_header);
                 }
@@ -182,14 +150,14 @@ pub async fn handle_file_request(
                     debug!("Skipping failed lookups cache check because custom origin or xs servers are provided");
                 }
 
-                // Try upstream servers
-                let servers_for_upstream = combined_servers.as_ref().map(|v| v.as_slice());
+                // Try upstream servers with prioritization: xs → UPSTREAM_SERVERS → user servers (lazy)
                 match crate::handlers::upstream::try_upstream_servers(
                     &state,
                     &filename,
                     req.headers(),
                     custom_origin,
-                    servers_for_upstream,
+                    xs_servers_to_use,
+                    author_pubkey.as_ref(),
                 ).await {
                     Ok(response) => Ok(response),
                     Err(_) => {
