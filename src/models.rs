@@ -135,6 +135,9 @@ impl AppState {
             files_downloaded,
             total_size_bytes,
             total_files,
+            self.max_total_files,
+            self.max_total_size,
+            self.max_file_age_days,
             &self.upload_dir,
         );
 

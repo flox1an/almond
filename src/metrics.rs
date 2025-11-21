@@ -13,6 +13,9 @@ pub struct Metrics {
     pub served_bytes: IntCounter,
     pub downloaded_from_upstream_bytes: IntCounterVec,
     pub free_disk_space: IntGauge,
+    pub max_total_files: IntGauge,
+    pub max_storage_bytes: IntGauge,
+    pub max_age: IntGauge,
 }
 
 impl Metrics {
@@ -56,6 +59,21 @@ impl Metrics {
         ).expect("Failed to create metrics_free_disk_space gauge");
         registry.register(Box::new(free_disk_space.clone())).expect("Failed to register metrics_free_disk_space");
 
+        let max_total_files = IntGauge::with_opts(
+            Opts::new("almond_max_total_files", "Maximum total number of files allowed")
+        ).expect("Failed to create metrics_max_total_files gauge");
+        registry.register(Box::new(max_total_files.clone())).expect("Failed to register metrics_max_total_files");
+
+        let max_storage_bytes = IntGauge::with_opts(
+            Opts::new("almond_max_storage_bytes", "Maximum total storage in bytes allowed")
+        ).expect("Failed to create metrics_max_storage_bytes gauge");
+        registry.register(Box::new(max_storage_bytes.clone())).expect("Failed to register metrics_max_storage_bytes");
+
+        let max_age = IntGauge::with_opts(
+            Opts::new("almond_max_age", "Maximum file age in days")
+        ).expect("Failed to create metrics_max_age gauge");
+        registry.register(Box::new(max_age.clone())).expect("Failed to register metrics_max_age");
+
         Self {
             registry,
             files_uploaded,
@@ -65,6 +83,9 @@ impl Metrics {
             served_bytes,
             downloaded_from_upstream_bytes,
             free_disk_space,
+            max_total_files,
+            max_storage_bytes,
+            max_age,
         }
     }
 
@@ -75,6 +96,9 @@ impl Metrics {
         files_downloaded: u64,
         total_size_bytes: u64,
         total_files: usize,
+        max_total_files: usize,
+        max_total_size: u64,
+        max_file_age_days: u64,
         upload_dir: &Path,
     ) {
         // Update file and storage metrics
@@ -82,6 +106,11 @@ impl Metrics {
         self.files_downloaded.inc_by(files_downloaded.saturating_sub(self.files_downloaded.get()));
         self.storage_bytes.set(total_size_bytes as i64);
         self.total_files.set(total_files as i64);
+
+        // Update config metrics
+        self.max_total_files.set(max_total_files as i64);
+        self.max_storage_bytes.set(max_total_size as i64);
+        self.max_age.set(max_file_age_days as i64);
 
         // Calculate and update free disk space
         let free_disk_space_bytes = match fs2::free_space(upload_dir) {
