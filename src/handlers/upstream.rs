@@ -870,6 +870,12 @@ async fn stream_and_save_from_upstream(
                 let mut n = state_clone.files_downloaded.write().await;
                 *n += 1;
 
+                // Track bytes served to users (streamed to client)
+                state_clone.metrics.track_served_bytes(total);
+
+                // Track bytes downloaded from upstream server
+                state_clone.metrics.track_upstream_download(&file_url_clone, total);
+
                 info!(
                     "✅ UPSTREAM DOWNLOAD COMPLETED: {} -> {} ({} bytes)",
                     file_url_clone, sha256, total
@@ -1063,6 +1069,11 @@ async fn download_file_from_upstream_background(
     // Update stats
     let mut n = state.files_downloaded.write().await;
     *n += 1;
+
+    // Track bytes downloaded from upstream server
+    // Note: We don't track served_bytes here because this is a background download
+    // The user's range request was already served by proxying directly to upstream
+    state.metrics.track_upstream_download(file_url, body_size);
 
     info!(
         "✅ BACKGROUND UPSTREAM DOWNLOAD COMPLETED: {} -> {} ({} bytes)",

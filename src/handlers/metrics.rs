@@ -13,7 +13,7 @@ pub async fn get_metrics(State(state): State<AppState>) -> Response {
     let _ = state.get_stats().await;
 
     // Gather all metrics from the registry
-    let metric_families = state.metrics_registry.gather();
+    let metric_families = state.metrics.registry.gather();
 
     // Encode metrics in Prometheus text format
     let encoder = TextEncoder::new();
