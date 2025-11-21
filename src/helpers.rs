@@ -39,6 +39,9 @@ pub fn extract_expiration(headers: &HeaderMap) -> Option<u64> {
 pub async fn track_download_stats(state: &AppState, size: u64) {
     let mut files_downloaded = state.files_downloaded.write().await;
     *files_downloaded += 1;
+
+    // Track bytes served to users
+    state.metrics.track_served_bytes(size);
 }
 
 /// Track upload statistics
