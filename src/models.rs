@@ -10,6 +10,49 @@ use std::{
 };
 use tokio::sync::{Notify, RwLock};
 
+/// Feature mode controlling access to features
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeatureMode {
+    /// Feature is disabled
+    Off,
+    /// Feature is enabled only for WOT (Web of Trust) pubkeys
+    Wot,
+    /// Feature is enabled for everyone
+    Public,
+}
+
+impl FeatureMode {
+    /// Parse from string value (off/wot/public, case-insensitive)
+    /// Falls back to a default if the string doesn't match
+    pub fn from_str_with_default(s: &str, default: FeatureMode) -> Self {
+        match s.to_lowercase().as_str() {
+            "off" | "false" => FeatureMode::Off,
+            "wot" => FeatureMode::Wot,
+            "public" | "true" => FeatureMode::Public,
+            _ => default,
+        }
+    }
+
+    /// Check if feature is enabled (wot or public)
+    pub fn is_enabled(&self) -> bool {
+        matches!(self, FeatureMode::Wot | FeatureMode::Public)
+    }
+
+    /// Check if feature requires WOT validation
+    pub fn requires_wot(&self) -> bool {
+        matches!(self, FeatureMode::Wot)
+    }
+
+    /// Convert to string for metrics/logging
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FeatureMode::Off => "off",
+            FeatureMode::Wot => "wot",
+            FeatureMode::Public => "public",
+        }
+    }
+}
+
 type OngoingDownloadsMap = Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -44,10 +87,10 @@ pub struct AppState {
     pub max_upstream_download_size_mb: u64,
     pub max_chunk_size_mb: u64,
     pub chunk_cleanup_timeout_minutes: u64,
-    pub feature_upload_enabled: bool,
-    pub feature_mirror_enabled: bool,
+    pub feature_upload_enabled: FeatureMode,
+    pub feature_mirror_enabled: FeatureMode,
     pub feature_list_enabled: bool,
-    pub feature_custom_upstream_origin_enabled: bool,
+    pub feature_custom_upstream_origin_enabled: FeatureMode,
     pub feature_homepage_enabled: bool,
     pub ongoing_downloads: OngoingDownloadsMap,
     pub chunk_uploads: Arc<RwLock<HashMap<String, ChunkUpload>>>,
@@ -139,6 +182,13 @@ impl AppState {
             self.max_total_size,
             self.max_file_age_days,
             &self.upload_dir,
+        );
+
+        // Update feature flag metrics
+        self.metrics.update_feature_flags(
+            &self.feature_upload_enabled,
+            &self.feature_mirror_enabled,
+            &self.feature_custom_upstream_origin_enabled,
         );
 
         Stats {

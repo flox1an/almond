@@ -1,4 +1,4 @@
-use prometheus::{Registry, IntCounter, IntCounterVec, IntGauge, Opts};
+use prometheus::{Registry, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts};
 use std::path::Path;
 use tracing::warn;
 
@@ -16,6 +16,7 @@ pub struct Metrics {
     pub max_total_files: IntGauge,
     pub max_storage_bytes: IntGauge,
     pub max_age: IntGauge,
+    pub feature_enabled: IntGaugeVec,
 }
 
 impl Metrics {
@@ -74,6 +75,12 @@ impl Metrics {
         ).expect("Failed to create metrics_max_age gauge");
         registry.register(Box::new(max_age.clone())).expect("Failed to register metrics_max_age");
 
+        let feature_enabled = IntGaugeVec::new(
+            Opts::new("almond_feature_enabled", "Feature enabled status (0=off, 1=wot, 2=public)"),
+            &["feature"]
+        ).expect("Failed to create metrics_feature_enabled gauge");
+        registry.register(Box::new(feature_enabled.clone())).expect("Failed to register metrics_feature_enabled");
+
         Self {
             registry,
             files_uploaded,
@@ -86,6 +93,7 @@ impl Metrics {
             max_total_files,
             max_storage_bytes,
             max_age,
+            feature_enabled,
         }
     }
 
@@ -141,5 +149,26 @@ impl Metrics {
         self.downloaded_from_upstream_bytes
             .with_label_values(&[upstream_host])
             .inc_by(bytes);
+    }
+
+    /// Update feature flag metrics
+    pub fn update_feature_flags(
+        &self,
+        upload: &crate::models::FeatureMode,
+        mirror: &crate::models::FeatureMode,
+        custom_upstream: &crate::models::FeatureMode,
+    ) {
+        // Map FeatureMode to numeric values: 0=off, 1=wot, 2=public
+        let to_metric_value = |mode: &crate::models::FeatureMode| -> i64 {
+            match mode {
+                crate::models::FeatureMode::Off => 0,
+                crate::models::FeatureMode::Wot => 1,
+                crate::models::FeatureMode::Public => 2,
+            }
+        };
+
+        self.feature_enabled.with_label_values(&["upload"]).set(to_metric_value(upload));
+        self.feature_enabled.with_label_values(&["mirror"]).set(to_metric_value(mirror));
+        self.feature_enabled.with_label_values(&["custom_upstream"]).set(to_metric_value(custom_upstream));
     }
 }
