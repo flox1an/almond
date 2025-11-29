@@ -140,29 +140,6 @@ docker run -p 3000:3000 \
   almond
 ```
 
-### Environment Variables
-
-All environment variables can be overridden when running the container:
-
-- `BIND_ADDR`: Server bind address
-- `PUBLIC_URL`: Public URL for the service
-- `STORAGE_PATH`: Path where files are stored
-- `MAX_TOTAL_SIZE`: Maximum storage size in MB
-- `MAX_TOTAL_FILES`: Maximum number of files
-- `CLEANUP_INTERVAL_SECS`: Cleanup interval in seconds
-- `MAX_FILE_AGE_DAYS`: Maximum file age in days
-- `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback
-- `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB
-- `MAX_CHUNK_SIZE_MB`: Maximum size for individual chunks in chunked uploads in MB
-- `CHUNK_CLEANUP_TIMEOUT_MINUTES`: Timeout for cleaning up abandoned chunked uploads in minutes
-- `ALLOW_WOT`: Enable web of trust
-- `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys
-- `FEATURE_UPLOAD_ENABLED`: Enable upload endpoint (default: true)
-- `FEATURE_MIRROR_ENABLED`: Enable mirror endpoint (default: true)
-- `FEATURE_LIST_ENABLED`: Enable list endpoint (default: true)
-- `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED`: Enable custom upstream origin via `?origin=` URL parameter (default: false)
-- `FEATURE_HOMEPAGE_ENABLED`: Enable homepage/landing page (default: true)
-
 ### Volume Mounting
 
 The `/app/files` directory in the container is used for file storage. Mount a host directory to persist files:
