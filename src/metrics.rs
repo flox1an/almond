@@ -17,6 +17,7 @@ pub struct Metrics {
     pub max_storage_bytes: IntGauge,
     pub max_age: IntGauge,
     pub feature_enabled: IntGaugeVec,
+    pub storage_usage_percent: IntGauge,
 }
 
 impl Metrics {
@@ -81,6 +82,11 @@ impl Metrics {
         ).expect("Failed to create metrics_feature_enabled gauge");
         registry.register(Box::new(feature_enabled.clone())).expect("Failed to register metrics_feature_enabled");
 
+        let storage_usage_percent = IntGauge::with_opts(
+            Opts::new("almond_storage_usage_percent", "Storage usage as a percentage (0-100)")
+        ).expect("Failed to create metrics_storage_usage_percent gauge");
+        registry.register(Box::new(storage_usage_percent.clone())).expect("Failed to register metrics_storage_usage_percent");
+
         Self {
             registry,
             files_uploaded,
@@ -94,6 +100,7 @@ impl Metrics {
             max_storage_bytes,
             max_age,
             feature_enabled,
+            storage_usage_percent,
         }
     }
 
@@ -129,6 +136,14 @@ impl Metrics {
             }
         };
         self.free_disk_space.set(free_disk_space_bytes as i64);
+
+        // Calculate and update storage usage percentage
+        let storage_usage_percent = if max_total_size > 0 {
+            ((total_size_bytes as f64 / max_total_size as f64) * 100.0) as i64
+        } else {
+            0
+        };
+        self.storage_usage_percent.set(storage_usage_percent);
     }
 
     /// Track bytes served to a user
