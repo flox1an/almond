@@ -345,10 +345,17 @@ fn start_chunk_cleanup_job(state: AppState) {
 
 fn start_trust_network_refresh_job(state: AppState) {
     tokio::spawn(async move {
-        // Only run if ALLOW_WOT is enabled
-        if env::var("ALLOW_WOT").is_err() {
+        // Only run if any feature is using WOT mode
+        let needs_wot = state.feature_upload_enabled.requires_wot()
+            || state.feature_mirror_enabled.requires_wot()
+            || state.feature_custom_upstream_origin_enabled.requires_wot();
+
+        if !needs_wot {
+            info!("⚠️ Trust network refresh disabled - no features using WOT mode");
             return;
         }
+
+        info!("✅ Trust network refresh enabled - features using WOT mode");
 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(4 * 3600));
         loop {
