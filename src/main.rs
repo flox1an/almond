@@ -71,6 +71,7 @@ pub async fn create_app(state: AppState) -> Router {
         .route("/mirror", put(mirror_blob))
         .route("/_stats", get(get_stats))
         .route("/_bloom", get(get_bloom))
+        .route("/_wot", get(get_wot))
         .route("/_upstream", get(get_upstream))
         .route("/_metrics", get(get_metrics))
         .route("/", get(serve_index))
