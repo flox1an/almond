@@ -6,6 +6,7 @@ pub mod upstream;
 pub mod bloom;
 pub mod delete;
 pub mod metrics;
+pub mod wot;
 
 // Re-export the main handler functions
 pub use file_serving::handle_file_request;
@@ -16,3 +17,4 @@ pub use upstream::get_upstream;
 pub use bloom::get_bloom;
 pub use delete::delete_blob;
 pub use metrics::get_metrics;
+pub use wot::get_wot;
