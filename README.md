@@ -83,13 +83,16 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 - `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: 100)
 - `MAX_CHUNK_SIZE_MB`: Maximum size for individual chunks in chunked uploads in MB (default: 100)
 - `CHUNK_CLEANUP_TIMEOUT_MINUTES`: Timeout for cleaning up abandoned chunked uploads in minutes (default: 30)
-- `ALLOW_WOT`: Enable web of trust (optional)
-- `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys (optional)
-- `FEATURE_UPLOAD_ENABLED`: Enable upload endpoint (default: true)
-- `FEATURE_MIRROR_ENABLED`: Enable mirror endpoint (default: true)
+- `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys (optional, used as whitelist with WOT as fallback)
+- `FEATURE_UPLOAD_ENABLED`: Upload endpoint mode - `off`, `wot`, or `public` (default: `public`)
+- `FEATURE_MIRROR_ENABLED`: Mirror endpoint mode - `off`, `wot`, or `public` (default: `public`)
 - `FEATURE_LIST_ENABLED`: Enable list endpoint (default: true)
-- `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED`: Enable custom upstream origin via `?origin=` URL parameter (default: false)
+- `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED`: Custom upstream origin mode - `off`, `wot`, or `public` (default: `off`)
+  - Controls `?origin=`, `?xs=`, and `?as=` URL parameters for upstream lookups
+  - In `wot` mode, validates `?as=` author pubkey against Web of Trust
 - `FEATURE_HOMEPAGE_ENABLED`: Enable homepage/landing page (default: true)
+
+**Note:** Web of Trust (WOT) is automatically enabled when any feature is set to `wot` mode. WOT is built from your follows (specified in `ALLOWED_NPUBS`) using a 2-hop graph from Nostr relays.
 
 ## Internals
 - Blobs are stored in `STORAGE_PATH` within a folder structure with a two layer hierarchy of folders with the first and second letter of the SHA256 storage hash, e.g. 
@@ -125,7 +128,8 @@ docker run -p 3000:3000 \
   -v /path/to/files:/app/files \
   -e STORAGE_PATH=/app/files \
   -e PUBLIC_URL=https://your-domain.com \
-  -e ALLOW_WOT=true \
+  -e FEATURE_UPLOAD_ENABLED=wot \
+  -e FEATURE_MIRROR_ENABLED=wot \
   -e ALLOWED_NPUBS=npub1... \
   -e MAX_TOTAL_SIZE=1000 \
   -e MAX_FILE_AGE_DAYS=7 \

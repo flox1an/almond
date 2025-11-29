@@ -136,10 +136,11 @@ Authorization: Nostr <base64-encoded-event>
 
 ### Web of Trust (WOT)
 
-- Enabled via `ALLOW_WOT=true` environment variable
+- Automatically enabled when any feature is set to `wot` mode
 - Uses Nostr follower graphs to determine trusted pubkeys
+- Built from `ALLOWED_NPUBS` using a 2-hop graph from Nostr relays
 - Only applies to upload/mirror operations (not delete)
-- `trusted_pubkeys` are refreshed periodically via `refresh_trust_network()`
+- `trusted_pubkeys` are refreshed every 4 hours via `refresh_trust_network()`
 
 ## Configuration
 
@@ -165,14 +166,18 @@ Authorization: Nostr <base64-encoded-event>
 - `CHUNK_CLEANUP_TIMEOUT_MINUTES`: Timeout for cleaning up abandoned chunked uploads (default: `30`)
 
 #### Authorization Configuration
-- `ALLOW_WOT`: Enable web of trust (optional)
-- `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys (optional for uploads, **required** for deletes)
+- `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys
+  - Used as whitelist with WOT as fallback for uploads/mirrors
+  - **Required** for delete operations
+  - Used as seed for WOT 2-hop graph when WOT mode is enabled
 
 #### Feature Flags
-- `FEATURE_UPLOAD_ENABLED`: Enable upload endpoint (default: `true`)
-- `FEATURE_MIRROR_ENABLED`: Enable mirror endpoint (default: `true`)
+- `FEATURE_UPLOAD_ENABLED`: Upload endpoint mode - `off`, `wot`, or `public` (default: `public`)
+- `FEATURE_MIRROR_ENABLED`: Mirror endpoint mode - `off`, `wot`, or `public` (default: `public`)
 - `FEATURE_LIST_ENABLED`: Enable list endpoint (default: `true`)
-- `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED`: Enable custom upstream origin via `?origin=` parameter (default: `false`)
+- `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED`: Custom upstream origin mode - `off`, `wot`, or `public` (default: `off`)
+  - Controls `?origin=`, `?xs=`, and `?as=` URL parameters
+  - In `wot` mode, validates `?as=` author pubkey against Web of Trust
 - `FEATURE_HOMEPAGE_ENABLED`: Enable homepage/landing page (default: `true`)
 
 ## Architecture & Code Structure
@@ -330,7 +335,8 @@ docker run -p 3000:3000 \
   -v /path/to/files:/app/files \
   -e STORAGE_PATH=/app/files \
   -e PUBLIC_URL=https://your-domain.com \
-  -e ALLOW_WOT=true \
+  -e FEATURE_UPLOAD_ENABLED=wot \
+  -e FEATURE_MIRROR_ENABLED=wot \
   -e ALLOWED_NPUBS=npub1... \
   -e MAX_TOTAL_SIZE=1000 \
   -e MAX_FILE_AGE_DAYS=7 \

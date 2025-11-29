@@ -210,34 +210,39 @@ async fn load_app_state() -> AppState {
         );
     }
 
-    // Parse feature flags (default to true if not set)
-    let feature_upload_enabled = env::var("FEATURE_UPLOAD_ENABLED")
-        .unwrap_or_else(|_| "true".to_string())
-        .parse::<bool>()
-        .unwrap_or(true);
-    
-    let feature_mirror_enabled = env::var("FEATURE_MIRROR_ENABLED")
-        .unwrap_or_else(|_| "true".to_string())
-        .parse::<bool>()
-        .unwrap_or(true);
-    
+    // Parse feature flags
+    // Upload: default to "public" (enabled for everyone)
+    let feature_upload_enabled = models::FeatureMode::from_str_with_default(
+        &env::var("FEATURE_UPLOAD_ENABLED").unwrap_or_else(|_| "public".to_string()),
+        models::FeatureMode::Public,
+    );
+
+    // Mirror: default to "public" (enabled for everyone)
+    let feature_mirror_enabled = models::FeatureMode::from_str_with_default(
+        &env::var("FEATURE_MIRROR_ENABLED").unwrap_or_else(|_| "public".to_string()),
+        models::FeatureMode::Public,
+    );
+
+    // List: keep as boolean for now
     let feature_list_enabled = env::var("FEATURE_LIST_ENABLED")
         .unwrap_or_else(|_| "true".to_string())
         .parse::<bool>()
         .unwrap_or(true);
-    
-    let feature_custom_upstream_origin_enabled = env::var("FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED")
-        .unwrap_or_else(|_| "false".to_string())
-        .parse::<bool>()
-        .unwrap_or(false);
-    
+
+    // Custom upstream origin: default to "off" (disabled)
+    let feature_custom_upstream_origin_enabled = models::FeatureMode::from_str_with_default(
+        &env::var("FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED").unwrap_or_else(|_| "off".to_string()),
+        models::FeatureMode::Off,
+    );
+
     let feature_homepage_enabled = env::var("FEATURE_HOMEPAGE_ENABLED")
         .unwrap_or_else(|_| "true".to_string())
         .parse::<bool>()
         .unwrap_or(true);
 
-    info!("⚙️ Feature flags - Upload: {}, Mirror: {}, List: {}, CustomUpstreamOrigin: {}, Homepage: {}", 
-          feature_upload_enabled, feature_mirror_enabled, feature_list_enabled, feature_custom_upstream_origin_enabled, feature_homepage_enabled);
+    info!("⚙️ Feature flags - Upload: {}, Mirror: {}, List: {}, CustomUpstreamOrigin: {}, Homepage: {}",
+          feature_upload_enabled.as_str(), feature_mirror_enabled.as_str(), feature_list_enabled,
+          feature_custom_upstream_origin_enabled.as_str(), feature_homepage_enabled);
 
     // Parse blossom server list cache TTL in hours (default: 24 hours)
     let blossom_server_list_cache_ttl_hours = env::var("BLOSSOM_SERVER_LIST_CACHE_TTL_HOURS")
@@ -340,10 +345,17 @@ fn start_chunk_cleanup_job(state: AppState) {
 
 fn start_trust_network_refresh_job(state: AppState) {
     tokio::spawn(async move {
-        // Only run if ALLOW_WOT is enabled
-        if env::var("ALLOW_WOT").is_err() {
+        // Only run if any feature is using WOT mode
+        let needs_wot = state.feature_upload_enabled.requires_wot()
+            || state.feature_mirror_enabled.requires_wot()
+            || state.feature_custom_upstream_origin_enabled.requires_wot();
+
+        if !needs_wot {
+            info!("⚠️ Trust network refresh disabled - no features using WOT mode");
             return;
         }
+
+        info!("✅ Trust network refresh enabled - features using WOT mode");
 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(4 * 3600));
         loop {

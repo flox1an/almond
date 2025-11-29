@@ -62,8 +62,12 @@ pub async fn handle_file_request(
                 // File not found locally - now do upstream server lookup
                 info!("File {} not found locally, checking upstream servers", file_hash);
 
+                // Check if custom upstream origin feature is enabled
+                let upstream_feature_enabled = state.feature_custom_upstream_origin_enabled.is_enabled();
+                let upstream_requires_wot = state.feature_custom_upstream_origin_enabled.requires_wot();
+
                 // Extract custom origin (single server) if provided and feature is enabled
-                let custom_origin = if state.feature_custom_upstream_origin_enabled {
+                let custom_origin = if upstream_feature_enabled {
                     query.origin.as_deref()
                 } else {
                     if query.origin.is_some() {
@@ -74,7 +78,7 @@ pub async fn handle_file_request(
 
                 // Extract xs (servers) parameters - multiple xs query parameters can be provided per BUD-01
                 // xs takes priority, then fall back to legacy servers parameter
-                let xs_servers = if state.feature_custom_upstream_origin_enabled {
+                let xs_servers = if upstream_feature_enabled {
                     if !query.xs.is_empty() {
                         Some(&query.xs[..])
                     } else if !query.servers.is_empty() {
@@ -90,11 +94,22 @@ pub async fn handle_file_request(
                 };
 
                 // Parse author pubkey if provided (BUD-03) - we'll fetch servers lazily only if needed
-                let author_pubkey = if query.author_pubkey.is_some() && state.feature_custom_upstream_origin_enabled {
+                let author_pubkey = if query.author_pubkey.is_some() && upstream_feature_enabled {
                     if let Some(author_str) = &query.author_pubkey {
                         match blossom_servers::parse_pubkey(author_str) {
                             Ok(pubkey) => {
                                 debug!("Parsed author pubkey: {} (from as parameter)", pubkey.to_hex());
+
+                                // If WOT mode is enabled, validate the pubkey is in WOT
+                                if upstream_requires_wot {
+                                    let is_authorized = crate::services::auth::is_pubkey_authorized(&pubkey, &state).await;
+                                    if !is_authorized {
+                                        warn!("Author pubkey {} not in Web of Trust, rejecting upstream lookup", pubkey.to_hex());
+                                        return Err(StatusCode::FORBIDDEN);
+                                    }
+                                    debug!("Author pubkey {} validated in WOT", pubkey.to_hex());
+                                }
+
                                 Some(pubkey)
                             }
                             Err(e) => {

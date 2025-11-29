@@ -21,10 +21,14 @@ pub async fn upload_file(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, AppError> {
-    // Check if upload feature is enabled
-    if !state.feature_upload_enabled {
-        return Err(AppError::Forbidden("Upload feature is disabled".to_string()));
-    }
+    // Check if upload feature is enabled and determine auth mode
+    let auth_mode = match state.feature_upload_enabled {
+        crate::models::FeatureMode::Off => {
+            return Err(AppError::Forbidden("Upload feature is disabled".to_string()));
+        }
+        crate::models::FeatureMode::Wot => auth::AuthMode::WotOnly,
+        crate::models::FeatureMode::Public => auth::AuthMode::Unrestricted,
+    };
 
     // Validate Nostr authorization
     let auth_header = headers
@@ -32,7 +36,7 @@ pub async fn upload_file(
         .and_then(|h| h.to_str().ok())
         .ok_or_else(|| AppError::Unauthorized("Missing Authorization header".to_string()))?;
 
-    let auth_event = auth::validate_nostr_auth(auth_header, &state, auth::AuthMode::Standard).await?;
+    let auth_event = auth::validate_nostr_auth(auth_header, &state, auth_mode).await?;
 
     // Extract content type, extension, and expiration
     let content_type = extract_content_type(&headers);
@@ -83,10 +87,14 @@ pub async fn mirror_blob(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, AppError> {
-    // Check if mirror feature is enabled
-    if !state.feature_mirror_enabled {
-        return Err(AppError::Forbidden("Mirror feature is disabled".to_string()));
-    }
+    // Check if mirror feature is enabled and determine auth mode
+    let auth_mode = match state.feature_mirror_enabled {
+        crate::models::FeatureMode::Off => {
+            return Err(AppError::Forbidden("Mirror feature is disabled".to_string()));
+        }
+        crate::models::FeatureMode::Wot => auth::AuthMode::WotOnly,
+        crate::models::FeatureMode::Public => auth::AuthMode::Unrestricted,
+    };
 
     // Validate Nostr authorization
     let auth_header = headers
@@ -94,7 +102,7 @@ pub async fn mirror_blob(
         .and_then(|h| h.to_str().ok())
         .ok_or_else(|| AppError::Unauthorized("Missing Authorization header".to_string()))?;
 
-    let auth_event = auth::validate_nostr_auth(auth_header, &state, auth::AuthMode::Standard).await?;
+    let auth_event = auth::validate_nostr_auth(auth_header, &state, auth_mode).await?;
 
     // Extract expected SHA-256 from auth event and expiration from headers
     let expected_sha256 = auth::extract_sha256_from_event(&auth_event)
@@ -205,7 +213,7 @@ pub async fn patch_upload(
     use uuid;
 
     // Check if upload feature is enabled
-    if !state.feature_upload_enabled {
+    if !state.feature_upload_enabled.is_enabled() {
         return Err(AppError::Forbidden("Upload feature is disabled".to_string()));
     }
 
@@ -246,13 +254,23 @@ pub async fn patch_upload(
         return Err(AppError::BadRequest(format!("Invalid Content-Type: {}", content_type)));
     }
 
+    // Determine auth mode based on feature configuration
+    let auth_mode = match state.feature_upload_enabled {
+        crate::models::FeatureMode::Off => {
+            // Already checked above, this shouldn't happen
+            return Err(AppError::Forbidden("Upload feature is disabled".to_string()));
+        }
+        crate::models::FeatureMode::Wot => auth::AuthMode::WotOnly,
+        crate::models::FeatureMode::Public => auth::AuthMode::Unrestricted,
+    };
+
     // Validate Nostr authorization
     let auth_header = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .ok_or_else(|| AppError::Unauthorized("Missing Authorization header".to_string()))?;
 
-    let auth_event = auth::validate_nostr_auth(auth_header, &state, auth::AuthMode::Standard).await?;
+    let auth_event = auth::validate_nostr_auth(auth_header, &state, auth_mode).await?;
 
     // Validate authorization for chunk upload
     auth::validate_chunk_upload_auth(&auth_event, sha256, &content_length.to_string())?;

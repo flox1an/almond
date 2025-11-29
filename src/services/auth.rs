@@ -9,10 +9,14 @@ use crate::models::AppState;
 /// Authentication mode for different operations
 #[derive(Debug, Clone, Copy)]
 pub enum AuthMode {
-    /// Standard mode - allows WoT (Web of Trust) for uploads
+    /// Standard mode - allows WoT (Web of Trust) for uploads if allowed_pubkeys is set
     Standard,
     /// Strict mode - only allows explicit whitelist (for delete operations)
     Strict,
+    /// Unrestricted mode - only validates signature, no pubkey authorization checks (for public features)
+    Unrestricted,
+    /// WoT-only mode - requires WoT check, enforces trusted_pubkeys validation
+    WotOnly,
 }
 
 /// Parse and decode Nostr auth header
@@ -92,6 +96,25 @@ pub async fn check_pubkey_authorization(
                 if !trusted_pubkeys.contains_key(&event.pubkey) {
                     return Err(AppError::Unauthorized("Pubkey not authorized".to_string()));
                 }
+            }
+        }
+        AuthMode::Unrestricted => {
+            // Unrestricted mode: no pubkey authorization checks, only signature validation
+            // (signature is already validated before this function is called)
+        }
+        AuthMode::WotOnly => {
+            // WoT-only mode: check allowed_pubkeys first, then require WoT
+            if !state.allowed_pubkeys.is_empty() && state.allowed_pubkeys.contains(&event.pubkey) {
+                // Pubkey is in whitelist, allow it
+                return Ok(());
+            }
+
+            // Check WoT
+            let trusted_pubkeys = state.trusted_pubkeys.read().await;
+            if !trusted_pubkeys.contains_key(&event.pubkey) {
+                return Err(AppError::Unauthorized(
+                    "Pubkey not in Web of Trust".to_string(),
+                ));
             }
         }
     }
@@ -241,4 +264,24 @@ pub fn extract_sha256_from_event(event: &Event) -> Option<String> {
     }
 
     None
+}
+
+/// Check if a pubkey is authorized (in whitelist or WoT)
+/// Returns true if the pubkey is in allowed_pubkeys or trusted_pubkeys
+pub async fn is_pubkey_authorized(pubkey: &PublicKey, state: &AppState) -> bool {
+    // Check whitelist first
+    if !state.allowed_pubkeys.is_empty() && state.allowed_pubkeys.contains(pubkey) {
+        return true;
+    }
+
+    // Check WoT
+    let trusted_pubkeys = state.trusted_pubkeys.read().await;
+    trusted_pubkeys.contains_key(pubkey)
+}
+
+/// Check if a pubkey is in the Web of Trust
+/// Returns true only if the pubkey is in trusted_pubkeys (WoT)
+pub async fn is_pubkey_in_wot(pubkey: &PublicKey, state: &AppState) -> bool {
+    let trusted_pubkeys = state.trusted_pubkeys.read().await;
+    trusted_pubkeys.contains_key(pubkey)
 }
