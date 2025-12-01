@@ -3,9 +3,11 @@ use axum::{
 	http::{header, HeaderMap},
 	response::Response,
 };
-use bloomfilter::Bloom;
+use xorf::{BinaryFuse16, Filter};
 use serde::Deserialize;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
 use crate::models::AppState;
 
@@ -13,8 +15,6 @@ use crate::models::AppState;
 pub struct WotQuery {
 	// format: json|bin (default: json)
 	pub format: Option<String>,
-	// false positive rate (default ~0.01)
-	pub fp: Option<f64>,
     // optional hex pubkey to test against the filter
     pub test: Option<String>,
 }
@@ -26,14 +26,32 @@ pub async fn get_wot(
 ) -> Result<Response, axum::http::StatusCode> {
 	// Collect all pubkeys from trusted_pubkeys (the WOT)
 	let trusted_pubkeys = state.trusted_pubkeys.read().await;
-	let num_items = trusted_pubkeys.len().max(1);
-	let fp = q.fp.unwrap_or(0.01).clamp(1e-6, 0.2);
-	let mut bloom = Bloom::new_for_fp_rate(num_items, fp);
-	for pubkey in trusted_pubkeys.keys() {
-		// Insert pubkey as hex string bytes
-		bloom.set(pubkey.to_hex().as_bytes());
+	let num_items = trusted_pubkeys.len();
+
+	// Binary fuse filters need at least one item
+	if num_items == 0 {
+		let payload = serde_json::json!({
+			"count": 0,
+			"error": "no items in WOT",
+		});
+		let resp = Response::builder()
+			.status(axum::http::StatusCode::OK)
+			.header(header::CONTENT_TYPE, "application/json")
+			.body(axum::body::Body::from(serde_json::to_vec(&payload).unwrap()))
+			.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+		return Ok(resp);
 	}
-    let bits = bloom.bitmap();
+
+	// Hash pubkeys to u64 values for the filter
+	let keys: Vec<u64> = trusted_pubkeys.keys().map(|pubkey| {
+		let mut hasher = DefaultHasher::new();
+		pubkey.to_hex().hash(&mut hasher);
+		hasher.finish()
+	}).collect();
+
+	// Build the binary fuse filter
+	let filter = BinaryFuse16::try_from(&keys)
+		.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // If a test pubkey is provided, respond with JSON test result regardless of format
     if let Some(mut probe) = q.test {
@@ -50,12 +68,15 @@ pub async fn get_wot(
                 .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
             return Ok(resp);
         }
-        let maybe = bloom.check(probe.as_bytes());
+        // Hash the test pubkey to u64
+        let mut hasher = DefaultHasher::new();
+        probe.hash(&mut hasher);
+        let key_hash = hasher.finish();
+        let maybe = filter.contains(&key_hash);
         let payload = serde_json::json!({
             "test": probe,
             "maybe": maybe,
             "count": num_items,
-            "fp": fp,
         });
         let resp = Response::builder()
             .status(axum::http::StatusCode::OK)
@@ -72,13 +93,17 @@ pub async fn get_wot(
 		.unwrap_or(true);
 
 	if want_json {
-		// Structure: { n, fp, k, m, bits (base64) }
+		// Get the filter's internal data
+		// BinaryFuse16 stores fingerprints as Vec<u16>
+		let fingerprints_bytes: Vec<u8> = filter.fingerprints.iter()
+			.flat_map(|&fp| fp.to_le_bytes())
+			.collect();
+
+		// Structure: { count, fingerprints_b64, len }
 		let payload = serde_json::json!({
 			"count": num_items,
-			"fp": fp,
-			"k": bloom.number_of_hash_functions(),
-			"m": bits.len() * 8,
-			"bits_b64": BASE64.encode(bits),
+			"len": filter.len(),
+			"fingerprints_b64": BASE64.encode(&fingerprints_bytes),
 		});
 		let resp = Response::builder()
 			.status(axum::http::StatusCode::OK)
@@ -87,11 +112,15 @@ pub async fn get_wot(
 			.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 		Ok(resp)
 	} else {
-		// Binary: raw bitmap
+		// Binary: raw fingerprints as u16 little-endian
+		let fingerprints_bytes: Vec<u8> = filter.fingerprints.iter()
+			.flat_map(|&fp| fp.to_le_bytes())
+			.collect();
+
 		let resp = Response::builder()
 			.status(axum::http::StatusCode::OK)
 			.header(header::CONTENT_TYPE, "application/octet-stream")
-			.body(axum::body::Body::from(bits.to_vec()))
+			.body(axum::body::Body::from(fingerprints_bytes))
 			.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 		Ok(resp)
 	}
