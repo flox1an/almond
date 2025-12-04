@@ -97,6 +97,8 @@ pub struct AppState {
     pub failed_upstream_lookups: Arc<RwLock<HashMap<String, Instant>>>,
     pub blossom_server_lists: Arc<RwLock<HashMap<PublicKey, (Vec<String>, Instant)>>>,
     pub blossom_server_list_cache_ttl_hours: u64,
+    /// Filter algorithm: "bloom", "binary-fuse-8", "binary-fuse-16", or "binary-fuse-32"
+    pub filter_algorithm: String,
     // Prometheus metrics
     pub metrics: Metrics,
 }

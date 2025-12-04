@@ -69,9 +69,9 @@ pub async fn create_app(state: AppState) -> Router {
         .route("/list", get(list_blobs))
         .route("/list/{id}", get(list_blobs))
         .route("/mirror", put(mirror_blob))
-        .route("/_bloom", get(get_bloom))
         .route("/_fuse", get(get_fuse))
         .route("/_wot", get(get_wot))
+        .route("/filter", get(get_filter))
         .route("/_upstream", get(get_upstream))
         .route("/_metrics", get(get_metrics))
         .route("/metrics", get(get_metrics))
@@ -253,6 +253,21 @@ async fn load_app_state() -> AppState {
     
     info!("⚙️ Blossom server list cache TTL: {} hours", blossom_server_list_cache_ttl_hours);
 
+    // Parse filter algorithm from environment variable (default: binary-fuse-16)
+    let filter_algorithm = env::var("FILTER_ALGORITHM")
+        .unwrap_or_else(|_| "binary-fuse-16".to_string())
+        .to_lowercase();
+
+    // Validate filter algorithm
+    let filter_algorithm = match filter_algorithm.as_str() {
+        "bloom" | "binary-fuse-8" | "binary-fuse-16" | "binary-fuse-32" => filter_algorithm,
+        _ => {
+            warn!("⚠️ Invalid FILTER_ALGORITHM '{}', defaulting to 'binary-fuse-16'", filter_algorithm);
+            "binary-fuse-16".to_string()
+        }
+    };
+    info!("⚙️ Filter algorithm: {}", filter_algorithm);
+
     // Parse allowed pubkeys from environment variable
     let allowed_pubkeys: Vec<PublicKey> = env::var("ALLOWED_NPUBS")
         .unwrap_or_default()
@@ -305,6 +320,7 @@ async fn load_app_state() -> AppState {
         failed_upstream_lookups: Arc::new(RwLock::new(HashMap::new())),
         blossom_server_lists: Arc::new(RwLock::new(HashMap::new())),
         blossom_server_list_cache_ttl_hours,
+        filter_algorithm,
         metrics,
     }
 }
