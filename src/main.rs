@@ -45,12 +45,12 @@ async fn serve_index(State(state): State<AppState>) -> Result<axum::response::Re
         http::header,
         response::Response,
     };
-    
+
     // Check if homepage feature is enabled
     if !state.feature_homepage_enabled {
         return Err(StatusCode::NOT_FOUND);
     }
-    
+
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
@@ -58,6 +58,18 @@ async fn serve_index(State(state): State<AppState>) -> Result<axum::response::Re
         .unwrap())
 }
 
+async fn serve_filter_test() -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
+    use axum::{
+        http::header,
+        response::Response,
+    };
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(axum::body::Body::from(include_str!("filter-test.html")))
+        .unwrap())
+}
 
 
 pub async fn create_app(state: AppState) -> Router {
@@ -77,6 +89,7 @@ pub async fn create_app(state: AppState) -> Router {
         .route("/metrics", get(get_metrics))
         .route("/", get(serve_index))
         .route("/index.html", get(serve_index))
+        .route("/filter-test.html", get(serve_filter_test))
         .route("/{filename}", delete(delete_blob))
         .route(
             "/{filename}",

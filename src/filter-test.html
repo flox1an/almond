@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Filter Test - Almond</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: "Courier New", Courier, monospace;
+        background: linear-gradient(to bottom, #111, #000);
+        color: rgb(255, 73, 133);
+        padding: 20px;
+        min-height: 100vh;
+      }
+      .container {
+        max-width: 800px;
+        margin: 0 auto;
+      }
+      h1 {
+        margin-bottom: 30px;
+        text-align: center;
+        letter-spacing: 0.1em;
+      }
+      .section {
+        background: rgba(255, 73, 133, 0.05);
+        border: 1px solid rgba(255, 73, 133, 0.3);
+        padding: 20px;
+        margin-bottom: 20px;
+        border-radius: 5px;
+      }
+      .section h2 {
+        margin-bottom: 15px;
+        font-size: 1.2em;
+        color: rgb(255, 100, 150);
+      }
+      label {
+        display: block;
+        margin-bottom: 5px;
+        font-size: 0.9em;
+      }
+      input[type="text"] {
+        width: 100%;
+        padding: 10px;
+        background: #111;
+        border: 1px solid rgba(255, 73, 133, 0.5);
+        color: rgb(255, 73, 133);
+        font-family: "Courier New", Courier, monospace;
+        font-size: 0.9em;
+        margin-bottom: 10px;
+      }
+      input[type="text"]:focus {
+        outline: none;
+        border-color: rgb(255, 73, 133);
+      }
+      button {
+        background: rgba(255, 73, 133, 0.2);
+        border: 1px solid rgb(255, 73, 133);
+        color: rgb(255, 73, 133);
+        padding: 10px 20px;
+        cursor: pointer;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 1em;
+        transition: all 0.3s;
+      }
+      button:hover {
+        background: rgba(255, 73, 133, 0.4);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .result {
+        margin-top: 15px;
+        padding: 15px;
+        background: rgba(0, 0, 0, 0.5);
+        border-left: 3px solid rgb(255, 73, 133);
+        word-wrap: break-word;
+      }
+      .result pre {
+        white-space: pre-wrap;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 0.85em;
+      }
+      .success {
+        color: rgb(100, 255, 100);
+      }
+      .failure {
+        color: rgb(255, 100, 100);
+      }
+      .link {
+        color: rgb(100, 200, 255);
+        text-decoration: underline;
+      }
+      .error {
+        color: rgb(255, 100, 100);
+        margin-top: 10px;
+      }
+      .loading {
+        color: rgb(255, 200, 100);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🌸 Filter Test Tool</h1>
+
+      <div class="section">
+        <h2>1. Download Filter</h2>
+        <label for="filter-url">Filter Endpoint URL:</label>
+        <input
+          type="text"
+          id="filter-url"
+          value="https://almond.slidestr.net/filter"
+          placeholder="https://example.com/filter"
+        />
+        <button id="download-btn" onclick="downloadFilter()">Download Filter</button>
+        <div id="filter-result"></div>
+      </div>
+
+      <div class="section">
+        <h2>2. Test SHA256 Hash</h2>
+        <label for="sha256-input">SHA256 Hash (64 hex chars):</label>
+        <input
+          type="text"
+          id="sha256-input"
+          placeholder="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          maxlength="64"
+        />
+        <button id="test-btn" onclick="testHash()" disabled>Test Hash</button>
+        <div id="test-result"></div>
+      </div>
+    </div>
+
+    <script>
+      let filterData = null;
+      let filterType = null;
+
+      async function downloadFilter() {
+        const url = document.getElementById('filter-url').value.trim();
+        const resultDiv = document.getElementById('filter-result');
+        const testBtn = document.getElementById('test-btn');
+        const downloadBtn = document.getElementById('download-btn');
+
+        if (!url) {
+          resultDiv.innerHTML = '<div class="error">Please enter a URL</div>';
+          return;
+        }
+
+        resultDiv.innerHTML = '<div class="loading">Downloading filter...</div>';
+        downloadBtn.disabled = true;
+        testBtn.disabled = true;
+        filterData = null;
+
+        try {
+          const response = await fetch(url);
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
+          const data = await response.json();
+          filterData = data;
+          filterType = data.type;
+
+          resultDiv.innerHTML = `<div class="result">
+<div class="success">✓ Filter downloaded successfully</div>
+<pre>${JSON.stringify(data, null, 2)}</pre>
+</div>`;
+
+          testBtn.disabled = false;
+        } catch (error) {
+          resultDiv.innerHTML = `<div class="error">✗ Error: ${error.message}</div>`;
+          testBtn.disabled = true;
+        } finally {
+          downloadBtn.disabled = false;
+        }
+      }
+
+      // Convert SHA-256 hex string to u64 fingerprint (first 16 hex chars, big-endian)
+      function sha256ToU64(hex) {
+        const bytes = [];
+        for (let i = 0; i < 16; i += 2) {
+          bytes.push(parseInt(hex.substr(i, 2), 16));
+        }
+
+        // Convert to u64 big-endian
+        let result = 0n;
+        for (let i = 0; i < 8; i++) {
+          result = (result << 8n) | BigInt(bytes[i]);
+        }
+        return result;
+      }
+
+      // MurmurHash3 mix64 finalization (matches Rust xorf implementation)
+      function murmur3Mix64(k) {
+        k = BigInt.asUintN(64, k);
+        k ^= k >> 33n;
+        k = BigInt.asUintN(64, k * 0xff51afd7ed558ccdn);
+        k ^= k >> 33n;
+        k = BigInt.asUintN(64, k * 0xc4ceb9fe1a85ec53n);
+        k ^= k >> 33n;
+        return k;
+      }
+
+      // Mix function (matches Rust xorf implementation)
+      function mix(key, seed) {
+        // Add with wrapping
+        const sum = BigInt.asUintN(64, BigInt(key) + BigInt(seed));
+        return murmur3Mix64(sum);
+      }
+
+      // Fingerprint function (matches Rust xorf implementation)
+      function fingerprint(hash) {
+        return hash ^ (hash >> 32n);
+      }
+
+      // Hash of hash function (matches Rust xorf implementation)
+      function hashOfHash(hash, segmentLength, segmentLengthMask, segmentCountLength) {
+        // Compute hi = (hash * segment_count_length) >> 64
+        const product = hash * BigInt(segmentCountLength);
+        const hi = product >> 64n;
+        const h0 = Number(BigInt.asUintN(32, hi));
+
+        let h1 = h0 + segmentLength;
+        let h2 = h1 + segmentLength;
+
+        h1 ^= Number((hash >> 18n) & BigInt(segmentLengthMask));
+        h2 ^= Number(hash & BigInt(segmentLengthMask));
+
+        return [h0, h1, h2];
+      }
+
+      // Deserialize binary fuse filter from base64 (bincode format)
+      function deserializeBinaryFuse16(base64Data) {
+        const binaryString = atob(base64Data);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+
+        // Bincode format: Descriptor + Vec<u16>
+        // Descriptor: seed (u64) + segment_length (u32) + segment_length_mask (u32) + segment_count_length (u32)
+        // Vec<u16>: length (u64) + data (u16 array)
+        const view = new DataView(bytes.buffer);
+
+        const seed = view.getBigUint64(0, true); // little-endian
+        const segmentLength = view.getUint32(8, true);
+        const segmentLengthMask = view.getUint32(12, true);
+        const segmentCountLength = view.getUint32(16, true);
+        const fingerprintsLength = Number(view.getBigUint64(20, true)); // u64 length prefix
+
+        const fingerprints = [];
+        for (let i = 0; i < fingerprintsLength; i++) {
+          const offset = 28 + i * 2; // Start at byte 28, each u16 is 2 bytes
+          fingerprints.push(view.getUint16(offset, true));
+        }
+
+        return {
+          seed,
+          segmentLength,
+          segmentLengthMask,
+          segmentCountLength,
+          fingerprints
+        };
+      }
+
+      // Test if hash is in binary fuse filter (matches Rust xorf implementation)
+      function testBinaryFuse16(filter, hashU64) {
+        const { seed, segmentLength, segmentLengthMask, segmentCountLength, fingerprints } = filter;
+
+        // Step 1: Mix the key with seed
+        const hash = mix(hashU64, seed);
+
+        // Step 2: Compute fingerprint
+        let f = Number(BigInt.asUintN(16, fingerprint(hash)));
+
+        // Step 3: Compute three hash positions
+        const [h0, h1, h2] = hashOfHash(hash, segmentLength, segmentLengthMask, segmentCountLength);
+
+        // Step 4: XOR fingerprints at all three positions
+        f ^= fingerprints[h0];
+        f ^= fingerprints[h1];
+        f ^= fingerprints[h2];
+
+        // Step 5: Check if result is zero
+        return (f & 0xFFFF) === 0;
+      }
+
+      async function testHash() {
+        const hash = document.getElementById('sha256-input').value.trim().toLowerCase();
+        const resultDiv = document.getElementById('test-result');
+        const url = document.getElementById('filter-url').value.trim();
+
+        if (!hash) {
+          resultDiv.innerHTML = '<div class="error">Please enter a SHA256 hash</div>';
+          return;
+        }
+
+        if (hash.length !== 64 || !/^[0-9a-f]{64}$/.test(hash)) {
+          resultDiv.innerHTML = '<div class="error">Invalid SHA256 hash (must be 64 hex characters)</div>';
+          return;
+        }
+
+        if (!filterData) {
+          resultDiv.innerHTML = '<div class="error">Please download a filter first</div>';
+          return;
+        }
+
+        resultDiv.innerHTML = '<div class="loading">Testing hash against filter...</div>';
+
+        try {
+          // Client-side check (if binary-fuse-16)
+          let clientResult = null;
+          if (filterType === 'binary-fuse-16' && filterData.filter) {
+            try {
+              const filter = deserializeBinaryFuse16(filterData.filter);
+              const hashU64 = sha256ToU64(hash);
+              clientResult = testBinaryFuse16(filter, hashU64);
+            } catch (e) {
+              console.error('Client-side check failed:', e);
+            }
+          }
+
+          // Server-side check for verification
+          const testUrl = `${url}?test=${hash}`;
+          const response = await fetch(testUrl);
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
+          const data = await response.json();
+
+          // Comparison indicator
+          let comparisonHtml = '';
+          if (clientResult !== null) {
+            const match = clientResult === data.maybe;
+            if (match) {
+              comparisonHtml = '<div class="success">✓ Client and server results match</div>';
+            } else {
+              comparisonHtml = '<div class="failure">⚠ Client and server results differ!</div>';
+            }
+          }
+
+          if (data.maybe) {
+            const downloadUrl = url.replace('/filter', `/${hash}`);
+            resultDiv.innerHTML = `<div class="result">
+<div class="success">✓ Hash found in filter!</div>
+${comparisonHtml}
+<div>Hash: <code>${hash}</code></div>
+<div>Server result: <strong>MATCH</strong></div>
+${clientResult !== null ? `<div>Client result: <strong>${clientResult ? 'MATCH' : 'NO MATCH'}</strong></div>` : ''}
+<div>Count: ${data.count} blobs</div>
+<div>Type: ${data.type}</div>
+<div style="margin-top: 10px;">
+  <a href="${downloadUrl}" class="link" target="_blank">→ Download: ${downloadUrl}</a>
+</div>
+</div>`;
+          } else {
+            resultDiv.innerHTML = `<div class="result">
+<div class="failure">✗ Hash NOT found in filter</div>
+${comparisonHtml}
+<div>Hash: <code>${hash}</code></div>
+<div>Server result: <strong>NO MATCH</strong></div>
+${clientResult !== null ? `<div>Client result: <strong>${clientResult ? 'MATCH' : 'NO MATCH'}</strong></div>` : ''}
+<div>Count: ${data.count} blobs</div>
+<div>Type: ${data.type}</div>
+</div>`;
+          }
+        } catch (error) {
+          resultDiv.innerHTML = `<div class="error">✗ Error: ${error.message}</div>`;
+        }
+      }
+
+      // Allow Enter key to submit
+      document.getElementById('filter-url').addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') downloadFilter();
+      });
+
+      document.getElementById('sha256-input').addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') testHash();
+      });
+    </script>
+  </body>
+</html>
