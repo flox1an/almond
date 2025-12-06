@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Filter Test - Almond</title>
+    <script src="https://cdn.jsdelivr.net/npm/@msgpack/msgpack@3.0.0/dist.es5+umd/msgpack.min.js"></script>
     <style>
       * {
         margin: 0;
@@ -234,7 +235,7 @@
         return [h0, h1, h2];
       }
 
-      // Deserialize binary fuse filter from base64 (bincode format)
+      // Deserialize binary fuse filter from base64 (MessagePack format)
       function deserializeBinaryFuse16(base64Data) {
         const binaryString = atob(base64Data);
         const bytes = new Uint8Array(binaryString.length);
@@ -242,29 +243,19 @@
           bytes[i] = binaryString.charCodeAt(i);
         }
 
-        // Bincode format: Descriptor + Vec<u16>
-        // Descriptor: seed (u64) + segment_length (u32) + segment_length_mask (u32) + segment_count_length (u32)
-        // Vec<u16>: length (u64) + data (u16 array)
-        const view = new DataView(bytes.buffer);
+        // MessagePack deserialization
+        // The Rust struct is serialized as a tuple/array with 5 elements:
+        // [seed (u64), segment_length (u32), segment_length_mask (u32),
+        //  segment_count_length (u32), fingerprints (Vec<u16>)]
+        const data = MessagePack.decode(bytes);
 
-        const seed = view.getBigUint64(0, true); // little-endian
-        const segmentLength = view.getUint32(8, true);
-        const segmentLengthMask = view.getUint32(12, true);
-        const segmentCountLength = view.getUint32(16, true);
-        const fingerprintsLength = Number(view.getBigUint64(20, true)); // u64 length prefix
-
-        const fingerprints = [];
-        for (let i = 0; i < fingerprintsLength; i++) {
-          const offset = 28 + i * 2; // Start at byte 28, each u16 is 2 bytes
-          fingerprints.push(view.getUint16(offset, true));
-        }
-
+        // data should be an array: [seed, segment_length, segment_length_mask, segment_count_length, fingerprints]
         return {
-          seed,
-          segmentLength,
-          segmentLengthMask,
-          segmentCountLength,
-          fingerprints
+          seed: BigInt(data[0]),
+          segmentLength: data[1],
+          segmentLengthMask: data[2],
+          segmentCountLength: data[3],
+          fingerprints: data[4]
         };
       }
 

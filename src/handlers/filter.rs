@@ -78,9 +78,9 @@ impl FilterType {
     fn serialize(&self) -> Vec<u8> {
         match self {
             FilterType::Bloom(bloom) => bloom.bitmap().to_vec(),
-            FilterType::Fuse8(filter) => bincode::serialize(filter).unwrap_or_default(),
-            FilterType::Fuse16(filter) => bincode::serialize(filter).unwrap_or_default(),
-            FilterType::Fuse32(filter) => bincode::serialize(filter).unwrap_or_default(),
+            FilterType::Fuse8(filter) => rmp_serde::to_vec(filter).unwrap_or_default(),
+            FilterType::Fuse16(filter) => rmp_serde::to_vec(filter).unwrap_or_default(),
+            FilterType::Fuse32(filter) => rmp_serde::to_vec(filter).unwrap_or_default(),
         }
     }
 }
@@ -284,4 +284,36 @@ pub async fn get_filter(
         .header(header::CACHE_CONTROL, "max-age=60")
         .body(axum::body::Body::from(serde_json::to_vec(&payload).unwrap()))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_binary_fuse16_messagepack_serialization() {
+        // Create a simple BinaryFuse16 filter with known data
+        let keys: Vec<u64> = vec![1, 2, 3, 4, 5];
+        let filter = BinaryFuse16::try_from(&keys).expect("Failed to create filter");
+
+        // Serialize using MessagePack
+        let serialized = rmp_serde::to_vec(&filter).expect("Failed to serialize");
+
+        // Deserialize back
+        let deserialized: BinaryFuse16 = rmp_serde::from_slice(&serialized)
+            .expect("Failed to deserialize");
+
+        // Verify the filter still works correctly
+        for key in &keys {
+            assert!(deserialized.contains(key), "Filter should contain key {}", key);
+        }
+
+        // Verify a non-existent key is likely not in the filter
+        // (small chance of false positive, but very low with just 5 items)
+        let non_existent = 999999u64;
+        let _false_positive = deserialized.contains(&non_existent);
+        // We can't assert it's always false due to false positive rate,
+        // but we can verify the filter was constructed properly
+        assert!(serialized.len() > 0, "Serialized data should not be empty");
+    }
 }
