@@ -4,10 +4,56 @@ use axum::{
     response::Response,
 };
 use reqwest::header as reqwest_header;
+use std::path::Path;
 use tracing::info;
 
 use crate::constants::*;
 use crate::models::AppState;
+
+/// Get MIME type from file path with proper handling for HLS and other media types
+pub fn get_mime_type(path: &Path) -> String {
+    // Check for extensions that need explicit handling
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        match ext.to_lowercase().as_str() {
+            // HLS playlist
+            "m3u8" => return "application/vnd.apple.mpegurl".to_string(),
+            // MPEG-TS segments
+            "ts" => return "video/mp2t".to_string(),
+            // DASH manifest
+            "mpd" => return "application/dash+xml".to_string(),
+            _ => {}
+        }
+    }
+
+    // Fall back to mime_guess for other types
+    mime_guess::from_path(path)
+        .first()
+        .map(|m| m.essence_str().to_string())
+        .unwrap_or_else(|| DEFAULT_MIME_TYPE.to_string())
+}
+
+/// Get file extension from MIME type with proper handling for HLS and other media types
+pub fn get_extension_from_mime(content_type: &str) -> Option<String> {
+    // Strip any parameters (e.g., charset, codecs)
+    let mime_type = content_type.split(';').next().unwrap_or(content_type).trim();
+
+    // Check for MIME types that need explicit handling
+    match mime_type {
+        // HLS playlist
+        "application/vnd.apple.mpegurl" | "application/x-mpegurl" | "audio/mpegurl" | "audio/x-mpegurl" => {
+            return Some("m3u8".to_string());
+        }
+        // MPEG-TS segments
+        "video/mp2t" => return Some("ts".to_string()),
+        // DASH manifest
+        "application/dash+xml" => return Some("mpd".to_string()),
+        _ => {}
+    }
+
+    // Fall back to mime_guess for other types
+    mime_guess::get_mime_extensions_str(mime_type)
+        .and_then(|exts| exts.first().map(|ext| ext.to_string()))
+}
 
 /// Extract content type from headers with fallback
 pub fn extract_content_type(headers: &HeaderMap) -> String {

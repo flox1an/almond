@@ -13,7 +13,7 @@ use tokio_util::io::ReaderStream;
 use tracing::{debug, info, warn};
 
 use crate::constants::*;
-use crate::helpers::*;
+use crate::helpers::{get_mime_type, track_download_stats};
 use crate::models::{AppState, FileRequestQuery};
 use crate::utils::{find_file, parse_range_header};
 use crate::services::blossom_servers;
@@ -231,10 +231,7 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
             let stream = ReaderStream::new(file.take(length));
             let body = Body::from_stream(stream);
 
-            let mime = mime_guess::from_path(&path)
-                .first()
-                .map(|m| m.essence_str().to_string())
-                .unwrap_or(DEFAULT_MIME_TYPE.into());
+            let mime = get_mime_type(&path);
 
             return Ok(Response::builder()
                 .status(StatusCode::PARTIAL_CONTENT)
@@ -257,13 +254,7 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
 
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header(
-            header::CONTENT_TYPE,
-            mime_guess::from_path(&path)
-                .first()
-                .map(|m| m.essence_str().to_string())
-                .unwrap_or(DEFAULT_MIME_TYPE.into()),
-        )
+        .header(header::CONTENT_TYPE, get_mime_type(&path))
         .header(axum::http::header::CACHE_CONTROL, CACHE_CONTROL_IMMUTABLE)
         .header(axum::http::header::EXPIRES, expires_header.clone())
         .header(header::CONTENT_DISPOSITION, content_disposition)

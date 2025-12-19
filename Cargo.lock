@@ -65,6 +65,7 @@ dependencies = [
  "prometheus",
  "regex",
  "reqwest",
+ "rmp",
  "rmp-serde",
  "serde",
  "serde_html_form",

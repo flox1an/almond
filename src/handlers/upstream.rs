@@ -601,13 +601,9 @@ async fn prepare_download_state(
     content_type: &str,
 ) -> Result<(std::path::PathBuf, Arc<AtomicU64>, Arc<Notify>), StatusCode> {
     // Strip codecs and other parameters from content type before extracting extension
-    let clean_content_type = match content_type.split(';').next() {
-        Some(ct) => ct.trim(),
-        None => content_type.trim(),
-    };
-    // Derive extension from clean content type
-    let file_extension = mime_guess::get_mime_extensions_str(clean_content_type)
-        .and_then(|exts| exts.first().map(|ext| format!(".{}", ext)))
+    // Derive extension from content type
+    let file_extension = get_extension_from_mime(&content_type)
+        .map(|ext| format!(".{}", ext))
         .unwrap_or_default();
 
     // Create temp file with proper extension derived from content type
@@ -678,12 +674,8 @@ async fn stream_and_save_from_upstream(
         );
     }
 
-    // Strip codecs and other parameters from content type before extracting extension
-    let clean_content_type = match content_type.split(';').next() {
-        Some(ct) => ct.trim(),
-        None => content_type.trim(),
-    };
-    let extension = clean_content_type.split('/').next_back().map(|s| s.to_string());
+    // Derive extension from content type
+    let extension = get_extension_from_mime(&content_type);
 
     info!(
         "Starting download from upstream: {} to temp file: {}",
@@ -944,12 +936,8 @@ async fn download_file_from_upstream_background(
         }
     }
 
-    // Strip codecs and other parameters from content type before extracting extension
-    let clean_content_type = match content_type.split(';').next() {
-        Some(ct) => ct.trim(),
-        None => content_type.trim(),
-    };
-    let extension = clean_content_type.split('/').next_back().map(|s| s.to_string());
+    // Derive extension from content type
+    let extension = get_extension_from_mime(&content_type);
 
     info!(
         "Starting background download from upstream: {} to temp file: {}",

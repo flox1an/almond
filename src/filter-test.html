@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Filter Test - Almond</title>
-    <script src="https://cdn.jsdelivr.net/npm/@msgpack/msgpack@3.0.0/dist.es5+umd/msgpack.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@msgpack/msgpack@3.1.2/dist.umd/msgpack.min.js"></script>
     <style>
       * {
         margin: 0;
@@ -116,7 +116,7 @@
         <input
           type="text"
           id="filter-url"
-          value="https://almond.slidestr.net/filter"
+          value="/filter"
           placeholder="https://example.com/filter"
         />
         <button id="download-btn" onclick="downloadFilter()">Download Filter</button>
@@ -138,8 +138,233 @@
     </div>
 
     <script>
-      let filterData = null;
-      let filterType = null;
+      /**
+       * BinaryFuseFilter - Client-side implementation of Binary Fuse Filter
+       *
+       * This class provides a reusable implementation for working with binary fuse filters,
+       * including downloading filters from servers, deserializing MessagePack data, and
+       * testing SHA-256 hashes against the filter.
+       *
+       * @example
+       * const filter = new BinaryFuseFilter();
+       * await filter.download('https://example.com/filter');
+       * const exists = filter.testHash('53860ca3a463ad7170fe1f1e5b08bf4b...');
+       */
+      class BinaryFuseFilter {
+        constructor() {
+          this.filterData = null;
+          this.filterType = null;
+          this.deserializedFilter = null;
+        }
+
+        /**
+         * Download filter data from a URL
+         * @param {string} url - The filter endpoint URL
+         * @returns {Promise<Object>} The filter data
+         */
+        async download(url) {
+          const response = await fetch(url);
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
+          const data = await response.json();
+          this.filterData = data;
+          this.filterType = data.type;
+
+          // Pre-deserialize if it's a binary-fuse-16 filter
+          if (this.filterType === 'binary-fuse-16' && data.filter) {
+            try {
+              this.deserializedFilter = this._deserializeBinaryFuse16(data.filter);
+              console.log('Successfully deserialized filter:', this.deserializedFilter);
+            } catch (e) {
+              console.error('Failed to deserialize filter:', e);
+              console.error('Stack trace:', e.stack);
+              this.deserializedFilter = null;
+            }
+          }
+
+          return data;
+        }
+
+        /**
+         * Test if a SHA-256 hash exists in the filter (client-side)
+         * @param {string} hash - 64-character hex SHA-256 hash
+         * @returns {boolean|null} True if hash may exist, false if definitely doesn't exist, null if can't test
+         */
+        testHash(hash) {
+          if (!this.deserializedFilter) {
+            return null;
+          }
+
+          if (!this._validateSha256(hash)) {
+            throw new Error('Invalid SHA256 hash format');
+          }
+
+          const hashU64 = this._sha256ToU64(hash);
+          return this._testBinaryFuse16(this.deserializedFilter, hashU64);
+        }
+
+
+        /**
+         * Validate SHA-256 hash format
+         * @private
+         */
+        _validateSha256(hash) {
+          return hash.length === 64 && /^[0-9a-f]{64}$/i.test(hash);
+        }
+
+        /**
+         * Convert SHA-256 hex string to u64 fingerprint (first 16 hex chars, big-endian)
+         * @private
+         */
+        _sha256ToU64(hex) {
+          const bytes = [];
+          for (let i = 0; i < 16; i += 2) {
+            bytes.push(parseInt(hex.substr(i, 2), 16));
+          }
+
+          // Convert to u64 big-endian
+          let result = 0n;
+          for (let i = 0; i < 8; i++) {
+            result = (result << 8n) | BigInt(bytes[i]);
+          }
+          return result;
+        }
+
+        /**
+         * MurmurHash3 mix64 finalization (matches Rust xorf implementation)
+         * @private
+         */
+        _murmur3Mix64(k) {
+          k = BigInt.asUintN(64, k);
+          k ^= k >> 33n;
+          k = BigInt.asUintN(64, k * 0xff51afd7ed558ccdn);
+          k ^= k >> 33n;
+          k = BigInt.asUintN(64, k * 0xc4ceb9fe1a85ec53n);
+          k ^= k >> 33n;
+          return k;
+        }
+
+        /**
+         * Mix function (matches Rust xorf implementation)
+         * @private
+         */
+        _mix(key, seed) {
+          // Add with wrapping
+          const sum = BigInt.asUintN(64, BigInt(key) + BigInt(seed));
+          return this._murmur3Mix64(sum);
+        }
+
+        /**
+         * Fingerprint function (matches Rust xorf implementation)
+         * @private
+         */
+        _fingerprint(hash) {
+          return hash ^ (hash >> 32n);
+        }
+
+        /**
+         * Hash of hash function (matches Rust xorf implementation)
+         * @private
+         */
+        _hashOfHash(hash, segmentLength, segmentLengthMask, segmentCountLength) {
+          // Compute hi = (hash * segment_count_length) >> 64
+          const product = hash * BigInt(segmentCountLength);
+          const hi = product >> 64n;
+          const h0 = Number(BigInt.asUintN(32, hi));
+
+          let h1 = h0 + segmentLength;
+          let h2 = h1 + segmentLength;
+
+          h1 ^= Number((hash >> 18n) & BigInt(segmentLengthMask));
+          h2 ^= Number(hash & BigInt(segmentLengthMask));
+
+          return [h0, h1, h2];
+        }
+
+        /**
+         * Deserialize binary fuse filter from base64 (MessagePack format)
+         * @private
+         */
+        _deserializeBinaryFuse16(base64Data) {
+          const binaryString = atob(base64Data);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+
+          // MessagePack deserialization with BigInt support
+          // The Rust struct is serialized as a tuple/array with 5 elements:
+          // [seed (u64), segment_length (u32), segment_length_mask (u32),
+          //  segment_count_length (u32), fingerprints (Vec<u16>)]
+
+          console.log('Bytes length:', bytes.length);
+          console.log('First 20 bytes:', Array.from(bytes.slice(0, 20)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '));
+
+          // Decode using MessagePack
+          // NOTE: Do NOT use useBigInt64: true in browser - it has issues with the UMD build
+          // The seed will be decoded as a number (which might lose precision for large values)
+          // but we'll convert it to BigInt manually
+          const data = MessagePack.decode(bytes);
+
+          console.log('Decoded data:', data);
+          console.log('Seed type:', typeof data[0]);
+          console.log('Seed value:', data[0]);
+
+          // data should be an array: [seed, segment_length, segment_length_mask, segment_count_length, fingerprints]
+          // Convert seed to BigInt (it may be a number or already a BigInt or a string)
+          let seed;
+          if (typeof data[0] === 'bigint') {
+            seed = data[0];
+          } else if (typeof data[0] === 'string') {
+            seed = BigInt(data[0]);
+          } else if (typeof data[0] === 'number') {
+            // For numbers, we need to handle large integers carefully
+            // If the number is within safe integer range, convert directly
+            // Otherwise, this might lose precision - but MessagePack should preserve it
+            seed = BigInt(Math.floor(data[0]));
+          } else {
+            throw new Error(`Unexpected seed type: ${typeof data[0]}`);
+          }
+
+          return {
+            seed: seed,
+            segmentLength: data[1],
+            segmentLengthMask: data[2],
+            segmentCountLength: data[3],
+            fingerprints: data[4]
+          };
+        }
+
+        /**
+         * Test if hash is in binary fuse filter (matches Rust xorf implementation)
+         * @private
+         */
+        _testBinaryFuse16(filter, hashU64) {
+          const { seed, segmentLength, segmentLengthMask, segmentCountLength, fingerprints } = filter;
+
+          // Step 1: Mix the key with seed
+          const hash = this._mix(hashU64, seed);
+
+          // Step 2: Compute fingerprint
+          let f = Number(BigInt.asUintN(16, this._fingerprint(hash)));
+
+          // Step 3: Compute three hash positions
+          const [h0, h1, h2] = this._hashOfHash(hash, segmentLength, segmentLengthMask, segmentCountLength);
+
+          // Step 4: XOR fingerprints at all three positions
+          f ^= fingerprints[h0];
+          f ^= fingerprints[h1];
+          f ^= fingerprints[h2];
+
+          // Step 5: Check if result is zero
+          return (f & 0xFFFF) === 0;
+        }
+      }
+
+      // UI integration code
+      const binaryFuseFilter = new BinaryFuseFilter();
 
       async function downloadFilter() {
         const url = document.getElementById('filter-url').value.trim();
@@ -155,17 +380,9 @@
         resultDiv.innerHTML = '<div class="loading">Downloading filter...</div>';
         downloadBtn.disabled = true;
         testBtn.disabled = true;
-        filterData = null;
 
         try {
-          const response = await fetch(url);
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-          }
-
-          const data = await response.json();
-          filterData = data;
-          filterType = data.type;
+          const data = await binaryFuseFilter.download(url);
 
           resultDiv.innerHTML = `<div class="result">
 <div class="success">✓ Filter downloaded successfully</div>
@@ -179,106 +396,6 @@
         } finally {
           downloadBtn.disabled = false;
         }
-      }
-
-      // Convert SHA-256 hex string to u64 fingerprint (first 16 hex chars, big-endian)
-      function sha256ToU64(hex) {
-        const bytes = [];
-        for (let i = 0; i < 16; i += 2) {
-          bytes.push(parseInt(hex.substr(i, 2), 16));
-        }
-
-        // Convert to u64 big-endian
-        let result = 0n;
-        for (let i = 0; i < 8; i++) {
-          result = (result << 8n) | BigInt(bytes[i]);
-        }
-        return result;
-      }
-
-      // MurmurHash3 mix64 finalization (matches Rust xorf implementation)
-      function murmur3Mix64(k) {
-        k = BigInt.asUintN(64, k);
-        k ^= k >> 33n;
-        k = BigInt.asUintN(64, k * 0xff51afd7ed558ccdn);
-        k ^= k >> 33n;
-        k = BigInt.asUintN(64, k * 0xc4ceb9fe1a85ec53n);
-        k ^= k >> 33n;
-        return k;
-      }
-
-      // Mix function (matches Rust xorf implementation)
-      function mix(key, seed) {
-        // Add with wrapping
-        const sum = BigInt.asUintN(64, BigInt(key) + BigInt(seed));
-        return murmur3Mix64(sum);
-      }
-
-      // Fingerprint function (matches Rust xorf implementation)
-      function fingerprint(hash) {
-        return hash ^ (hash >> 32n);
-      }
-
-      // Hash of hash function (matches Rust xorf implementation)
-      function hashOfHash(hash, segmentLength, segmentLengthMask, segmentCountLength) {
-        // Compute hi = (hash * segment_count_length) >> 64
-        const product = hash * BigInt(segmentCountLength);
-        const hi = product >> 64n;
-        const h0 = Number(BigInt.asUintN(32, hi));
-
-        let h1 = h0 + segmentLength;
-        let h2 = h1 + segmentLength;
-
-        h1 ^= Number((hash >> 18n) & BigInt(segmentLengthMask));
-        h2 ^= Number(hash & BigInt(segmentLengthMask));
-
-        return [h0, h1, h2];
-      }
-
-      // Deserialize binary fuse filter from base64 (MessagePack format)
-      function deserializeBinaryFuse16(base64Data) {
-        const binaryString = atob(base64Data);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
-        }
-
-        // MessagePack deserialization
-        // The Rust struct is serialized as a tuple/array with 5 elements:
-        // [seed (u64), segment_length (u32), segment_length_mask (u32),
-        //  segment_count_length (u32), fingerprints (Vec<u16>)]
-        const data = MessagePack.decode(bytes);
-
-        // data should be an array: [seed, segment_length, segment_length_mask, segment_count_length, fingerprints]
-        return {
-          seed: BigInt(data[0]),
-          segmentLength: data[1],
-          segmentLengthMask: data[2],
-          segmentCountLength: data[3],
-          fingerprints: data[4]
-        };
-      }
-
-      // Test if hash is in binary fuse filter (matches Rust xorf implementation)
-      function testBinaryFuse16(filter, hashU64) {
-        const { seed, segmentLength, segmentLengthMask, segmentCountLength, fingerprints } = filter;
-
-        // Step 1: Mix the key with seed
-        const hash = mix(hashU64, seed);
-
-        // Step 2: Compute fingerprint
-        let f = Number(BigInt.asUintN(16, fingerprint(hash)));
-
-        // Step 3: Compute three hash positions
-        const [h0, h1, h2] = hashOfHash(hash, segmentLength, segmentLengthMask, segmentCountLength);
-
-        // Step 4: XOR fingerprints at all three positions
-        f ^= fingerprints[h0];
-        f ^= fingerprints[h1];
-        f ^= fingerprints[h2];
-
-        // Step 5: Check if result is zero
-        return (f & 0xFFFF) === 0;
       }
 
       async function testHash() {
@@ -296,7 +413,7 @@
           return;
         }
 
-        if (!filterData) {
+        if (!binaryFuseFilter.filterData) {
           resultDiv.innerHTML = '<div class="error">Please download a filter first</div>';
           return;
         }
@@ -304,49 +421,21 @@
         resultDiv.innerHTML = '<div class="loading">Testing hash against filter...</div>';
 
         try {
-          // Client-side check (if binary-fuse-16)
-          let clientResult = null;
-          if (filterType === 'binary-fuse-16' && filterData.filter) {
-            try {
-              const filter = deserializeBinaryFuse16(filterData.filter);
-              const hashU64 = sha256ToU64(hash);
-              clientResult = testBinaryFuse16(filter, hashU64);
-            } catch (e) {
-              console.error('Client-side check failed:', e);
-            }
+          // Client-side check only
+          const result = binaryFuseFilter.testHash(hash);
+
+          if (result === null) {
+            resultDiv.innerHTML = '<div class="error">Cannot test hash (filter not available or unsupported type)</div>';
+            return;
           }
 
-          // Server-side check for verification
-          const testUrl = `${url}?test=${hash}`;
-          const response = await fetch(testUrl);
-
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-          }
-
-          const data = await response.json();
-
-          // Comparison indicator
-          let comparisonHtml = '';
-          if (clientResult !== null) {
-            const match = clientResult === data.maybe;
-            if (match) {
-              comparisonHtml = '<div class="success">✓ Client and server results match</div>';
-            } else {
-              comparisonHtml = '<div class="failure">⚠ Client and server results differ!</div>';
-            }
-          }
-
-          if (data.maybe) {
+          if (result) {
             const downloadUrl = url.replace('/filter', `/${hash}`);
             resultDiv.innerHTML = `<div class="result">
 <div class="success">✓ Hash found in filter!</div>
-${comparisonHtml}
 <div>Hash: <code>${hash}</code></div>
-<div>Server result: <strong>MATCH</strong></div>
-${clientResult !== null ? `<div>Client result: <strong>${clientResult ? 'MATCH' : 'NO MATCH'}</strong></div>` : ''}
-<div>Count: ${data.count} blobs</div>
-<div>Type: ${data.type}</div>
+<div>Count: ${binaryFuseFilter.filterData.count} blobs</div>
+<div>Type: ${binaryFuseFilter.filterData.type}</div>
 <div style="margin-top: 10px;">
   <a href="${downloadUrl}" class="link" target="_blank">→ Download: ${downloadUrl}</a>
 </div>
@@ -354,12 +443,9 @@ ${clientResult !== null ? `<div>Client result: <strong>${clientResult ? 'MATCH' 
           } else {
             resultDiv.innerHTML = `<div class="result">
 <div class="failure">✗ Hash NOT found in filter</div>
-${comparisonHtml}
 <div>Hash: <code>${hash}</code></div>
-<div>Server result: <strong>NO MATCH</strong></div>
-${clientResult !== null ? `<div>Client result: <strong>${clientResult ? 'MATCH' : 'NO MATCH'}</strong></div>` : ''}
-<div>Count: ${data.count} blobs</div>
-<div>Type: ${data.type}</div>
+<div>Count: ${binaryFuseFilter.filterData.count} blobs</div>
+<div>Type: ${binaryFuseFilter.filterData.type}</div>
 </div>`;
           }
         } catch (error) {

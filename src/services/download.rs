@@ -4,6 +4,7 @@ use tokio::sync::Notify;
 use tracing::info;
 
 use crate::error::AppResult;
+use crate::helpers::get_extension_from_mime;
 use crate::models::AppState;
 
 /// Prepare download state for tracking ongoing downloads
@@ -12,11 +13,9 @@ pub async fn prepare_download_state(
     filename: &str,
     content_type: &str,
 ) -> AppResult<(PathBuf, Arc<AtomicU64>, Arc<Notify>)> {
-    // Strip codecs and other parameters from content type before extracting extension
-    let clean_content_type = content_type.split(';').next().unwrap_or(content_type).trim();
-    // Derive extension from clean content type
-    let file_extension = mime_guess::get_mime_extensions_str(clean_content_type)
-        .and_then(|exts| exts.first().map(|ext| format!(".{}", ext)))
+    // Derive extension from content type
+    let file_extension = get_extension_from_mime(content_type)
+        .map(|ext| format!(".{}", ext))
         .unwrap_or_default();
 
     // Create temp file with proper extension

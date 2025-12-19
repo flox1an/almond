@@ -40,8 +40,7 @@ pub async fn upload_file(
 
     // Extract content type, extension, and expiration
     let content_type = extract_content_type(&headers);
-    let extension = mime_guess::get_mime_extensions_str(&content_type)
-        .and_then(|mime| mime.first().map(|ext| ext.to_string()));
+    let extension = get_extension_from_mime(&content_type);
     let expiration = extract_expiration(&headers);
 
     // Prepare temp file
@@ -134,12 +133,7 @@ pub async fn mirror_blob(
 
     // Prepare temp file
     file_storage::ensure_temp_dir(&state).await?;
-    // Strip codecs and other parameters from content type before extracting extension
-    let clean_content_type = match content_type.split(';').next() {
-        Some(ct) => ct.trim(),
-        None => content_type.trim(),
-    };
-    let extension = clean_content_type.split('/').next_back().map(|s| format!(".{}", s));
+    let extension = get_extension_from_mime(&content_type);
     let temp_path = file_storage::create_temp_path(&state, "mirror", extension.as_deref());
     let _temp_guard = TempFileGuard::new(temp_path.clone());
 
@@ -166,18 +160,12 @@ pub async fn mirror_blob(
     info!("✅ SHA256 verification passed");
 
     // Finalize upload
-    // Strip codecs and other parameters from content type before extracting extension
-    let clean_content_type = match content_type.split(';').next() {
-        Some(ct) => ct.trim(),
-        None => content_type.trim(),
-    };
-    let extension_str = clean_content_type.split('/').next_back().map(String::from);
     upload::finalize_upload(
         &state,
         &temp_path,
         &expected_sha256,
         body_size,
-        extension_str,
+        get_extension_from_mime(&content_type),
         Some(content_type.clone()),
         expiration,
     )
@@ -546,13 +534,12 @@ async fn reconstruct_blob(
     info!("✅ SHA256 verification passed");
 
     // Finalize upload
-    let extension = chunk_upload.upload_type.split('/').next_back().map(String::from);
     upload::finalize_upload(
         state,
         &temp_path,
         expected_sha256,
         chunk_upload.upload_length,
-        extension.clone(),
+        get_extension_from_mime(&chunk_upload.upload_type),
         Some(chunk_upload.upload_type.clone()),
         chunk_upload.expiration,
     )

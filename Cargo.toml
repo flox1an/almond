@@ -41,3 +41,4 @@ axum-extra = { version = "0.12.1", features = ["query"] }
 serde_html_form = "0.2.8"
 prometheus = "0.13"
 fs2 = "0.4"
+rmp = "0.8.14"

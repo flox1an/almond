@@ -1,4 +1,4 @@
-use mime_guess;
+use crate::helpers::get_extension_from_mime;
 use nostr_relay_pool::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::metrics::Metrics;
@@ -113,13 +113,7 @@ impl AppState {
     ) -> BlobDescriptor {
         let extension = content_type
             .as_ref()
-            .map(|ct| {
-                // Strip codecs and other parameters from content type before extracting extension
-                let clean_ct = ct.split(';').next().unwrap_or(ct).trim();
-                clean_ct
-            })
-            .and_then(|ct| mime_guess::get_mime_extensions_str(ct))
-            .and_then(|mime| mime.first().map(|ext| ext.to_string()));
+            .and_then(|ct| get_extension_from_mime(ct));
 
         let url = match extension {
             Some(ext) => format!("{}/{}.{}", self.public_url, sha256, ext),
