@@ -50,6 +50,7 @@ pub async fn handle_file_request(
                                 .unwrap_or_else(|| DEFAULT_MIME_TYPE.into()),
                         )
                         .header(header::CONTENT_LENGTH, file_metadata.size)
+                        .header(header::ACCEPT_RANGES, "bytes")
                         .body(Body::empty())
                         .unwrap())
                 } else {
@@ -240,6 +241,7 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
                     header::CONTENT_RANGE,
                     format!("bytes {}-{}/{}", start, end, total_size),
                 )
+                .header(header::ACCEPT_RANGES, "bytes")
                 .header(axum::http::header::CACHE_CONTROL, CACHE_CONTROL_IMMUTABLE)
                 .header(axum::http::header::EXPIRES, expires_header.clone())
                 .header(header::CONTENT_DISPOSITION, content_disposition.clone())
@@ -255,6 +257,7 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, get_mime_type(&path))
+        .header(header::ACCEPT_RANGES, "bytes")
         .header(axum::http::header::CACHE_CONTROL, CACHE_CONTROL_IMMUTABLE)
         .header(axum::http::header::EXPIRES, expires_header.clone())
         .header(header::CONTENT_DISPOSITION, content_disposition)
