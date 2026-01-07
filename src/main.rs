@@ -82,6 +82,7 @@ pub async fn create_app(state: AppState) -> Router {
         .route("/list/{id}", get(list_blobs))
         .route("/mirror", put(mirror_blob))
         .route("/_wot", get(get_wot))
+        .route("/report", put(report_blob))
         .route("/filter", get(get_filter))
         .route("/_upstream", get(get_upstream))
         .route("/_metrics", get(get_metrics))
@@ -253,9 +254,24 @@ async fn load_app_state() -> AppState {
         .parse::<bool>()
         .unwrap_or(true);
 
-    info!("⚙️ Feature flags - Upload: {}, Mirror: {}, List: {}, CustomUpstreamOrigin: {}, Homepage: {}",
+    // Report feature: default to "off" (disabled)
+    let feature_report_enabled = models::FeatureMode::from_str_with_default(
+        &env::var("FEATURE_REPORT_ENABLED").unwrap_or_else(|_| "off".to_string()),
+        models::FeatureMode::Off,
+    );
+
+    // Report action: quarantine (default) or delete
+    let report_action = models::ReportAction::from_str_with_default(
+        &env::var("REPORT_ACTION").unwrap_or_else(|_| "quarantine".to_string()),
+    );
+
+    info!("⚙️ Feature flags - Upload: {}, Mirror: {}, List: {}, CustomUpstreamOrigin: {}, Homepage: {}, Report: {}",
           feature_upload_enabled.as_str(), feature_mirror_enabled.as_str(), feature_list_enabled,
-          feature_custom_upstream_origin_enabled.as_str(), feature_homepage_enabled);
+          feature_custom_upstream_origin_enabled.as_str(), feature_homepage_enabled, feature_report_enabled.as_str());
+
+    if feature_report_enabled.is_enabled() {
+        info!("⚙️ Report action: {}", report_action.as_str());
+    }
 
     // Parse blossom server list cache TTL in hours (default: 24 hours)
     let blossom_server_list_cache_ttl_hours = env::var("BLOSSOM_SERVER_LIST_CACHE_TTL_HOURS")
@@ -334,6 +350,8 @@ async fn load_app_state() -> AppState {
         blossom_server_list_cache_ttl_hours,
         filter_algorithm,
         metrics,
+        report_action,
+        feature_report_enabled,
     }
 }
 

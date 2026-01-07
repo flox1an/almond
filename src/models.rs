@@ -53,6 +53,34 @@ impl FeatureMode {
     }
 }
 
+/// Action to take when a blob is reported (BUD-09)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportAction {
+    /// Quarantine the blob (move to quarantine directory, still accessible to admins)
+    Quarantine,
+    /// Delete the blob permanently
+    Delete,
+}
+
+impl ReportAction {
+    /// Parse from string value (quarantine/delete, case-insensitive)
+    /// Falls back to Quarantine if the string doesn't match
+    pub fn from_str_with_default(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "delete" => ReportAction::Delete,
+            "quarantine" | _ => ReportAction::Quarantine,
+        }
+    }
+
+    /// Convert to string for logging
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReportAction::Quarantine => "quarantine",
+            ReportAction::Delete => "delete",
+        }
+    }
+}
+
 type OngoingDownloadsMap = Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -101,6 +129,10 @@ pub struct AppState {
     pub filter_algorithm: String,
     // Prometheus metrics
     pub metrics: Metrics,
+    /// Action to take when a blob is reported (quarantine or delete)
+    pub report_action: ReportAction,
+    /// Whether reports feature is enabled
+    pub feature_report_enabled: FeatureMode,
 }
 
 impl AppState {
