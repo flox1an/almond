@@ -7,6 +7,10 @@ edition = "2021"
 name = "inspect_filter"
 path = "src/bin/inspect_filter.rs"
 
+[[bin]]
+name = "analyze_reports"
+path = "src/bin/analyze_reports.rs"
+
 [dependencies]
 axum = "0.8.6"
 headers = "0.4.1"
