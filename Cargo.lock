@@ -78,6 +78,7 @@ dependencies = [
  "nostr",
  "nostr-relay-pool",
  "prometheus",
+ "rand 0.8.5",
  "regex",
  "reqwest",
  "rmp",

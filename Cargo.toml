@@ -51,3 +51,4 @@ rmp = "0.8.14"
 cdk = { version = "0.14", default-features = false, features = ["wallet"] }
 cdk-sqlite = { version = "0.14", features = ["wallet"] }
 cashu = "0.14"
+rand = "0.8"
