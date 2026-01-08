@@ -93,13 +93,14 @@ impl IntoResponse for AppError {
                 .status(StatusCode::PAYMENT_REQUIRED)
                 .header("X-Cashu", encoded)
                 .body(Body::from(format!("Payment required: {} {}", amount_sats, unit)))
-                .unwrap()
+                .expect("Failed to build payment required response")
                 .into_response();
         }
 
         let status = match &self {
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
+            // Note: PaymentRequired is handled with early return above, this arm is kept for exhaustiveness
             AppError::PaymentRequired { .. } => StatusCode::PAYMENT_REQUIRED,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
