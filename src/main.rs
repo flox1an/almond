@@ -273,6 +273,57 @@ async fn load_app_state() -> AppState {
         info!("⚙️ Report action: {}", report_action.as_str());
     }
 
+    // Parse Cashu payment configuration (BUD-07)
+    let feature_paid_upload = env::var("FEATURE_PAID_UPLOAD")
+        .unwrap_or_else(|_| "off".to_string())
+        .to_lowercase()
+        == "on";
+
+    let feature_paid_mirror = env::var("FEATURE_PAID_MIRROR")
+        .unwrap_or_else(|_| "off".to_string())
+        .to_lowercase()
+        == "on";
+
+    let feature_paid_download = env::var("FEATURE_PAID_DOWNLOAD")
+        .unwrap_or_else(|_| "off".to_string())
+        .to_lowercase()
+        == "on";
+
+    let cashu_price_per_mb = env::var("CASHU_PRICE_PER_MB")
+        .unwrap_or_else(|_| "1".to_string())
+        .parse::<u64>()
+        .expect("Invalid value for CASHU_PRICE_PER_MB");
+
+    let cashu_accepted_mints: Vec<String> = env::var("CASHU_ACCEPTED_MINTS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|m| {
+            let m = m.trim();
+            if m.is_empty() {
+                None
+            } else {
+                Some(m.to_string())
+            }
+        })
+        .collect();
+
+    let cashu_wallet_path = PathBuf::from(
+        env::var("CASHU_WALLET_PATH").unwrap_or_else(|_| "./cashu_wallet.db".to_string()),
+    );
+
+    // Validate: if any paid feature is on, mints must be configured
+    let any_paid_feature = feature_paid_upload || feature_paid_mirror || feature_paid_download;
+    if any_paid_feature && cashu_accepted_mints.is_empty() {
+        panic!("CASHU_ACCEPTED_MINTS must be set when paid features are enabled");
+    }
+
+    if any_paid_feature {
+        info!(
+            "💰 Cashu payments enabled - Price: {} sats/MB, Mints: {:?}",
+            cashu_price_per_mb, cashu_accepted_mints
+        );
+    }
+
     // Parse blossom server list cache TTL in hours (default: 24 hours)
     let blossom_server_list_cache_ttl_hours = env::var("BLOSSOM_SERVER_LIST_CACHE_TTL_HOURS")
         .unwrap_or_else(|_| "24".to_string())
@@ -352,6 +403,13 @@ async fn load_app_state() -> AppState {
         metrics,
         report_action,
         feature_report_enabled,
+        feature_paid_upload,
+        feature_paid_mirror,
+        feature_paid_download,
+        cashu_price_per_mb,
+        cashu_accepted_mints,
+        cashu_wallet_path,
+        cashu_wallet: None, // Initialized separately in Task 5
     }
 }
 

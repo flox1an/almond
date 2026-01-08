@@ -1,7 +1,8 @@
 use crate::helpers::get_extension_from_mime;
+use crate::metrics::Metrics;
+use cdk::wallet::Wallet as CdkWallet;
 use nostr_relay_pool::prelude::*;
 use serde::{Deserialize, Serialize};
-use crate::metrics::Metrics;
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -133,6 +134,14 @@ pub struct AppState {
     pub report_action: ReportAction,
     /// Whether reports feature is enabled
     pub feature_report_enabled: FeatureMode,
+    // Cashu payment configuration (BUD-07)
+    pub feature_paid_upload: bool,
+    pub feature_paid_mirror: bool,
+    pub feature_paid_download: bool,
+    pub cashu_price_per_mb: u64,
+    pub cashu_accepted_mints: Vec<String>,
+    pub cashu_wallet_path: PathBuf,
+    pub cashu_wallet: Option<Arc<RwLock<CdkWallet>>>,
 }
 
 impl AppState {
