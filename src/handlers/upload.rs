@@ -13,7 +13,53 @@ use tracing::{error, info};
 use crate::error::AppError;
 use crate::helpers::*;
 use crate::models::AppState;
-use crate::services::{auth, file_storage, upload};
+use crate::services::{auth, cashu, file_storage, upload};
+
+/// Check if payment is required and process it
+///
+/// Supports two flows:
+/// 1. Preemptive: Client sends X-Cashu with first request (validated after size known)
+/// 2. Reactive: Client gets 402, then retries with X-Cashu
+async fn check_payment(
+    state: &AppState,
+    headers: &HeaderMap,
+    size_bytes: u64,
+    feature_enabled: bool,
+) -> Result<(), AppError> {
+    if !feature_enabled {
+        return Ok(());
+    }
+
+    let required_sats = cashu::calculate_price(size_bytes, state.cashu_price_per_mb);
+
+    // Check for X-Cashu header (preemptive or retry payment)
+    let cashu_header = cashu::extract_cashu_header(headers);
+
+    match cashu_header {
+        None => {
+            // No payment provided, return 402
+            Err(AppError::PaymentRequired {
+                amount_sats: required_sats,
+                unit: "sat".to_string(),
+                mints: state.cashu_accepted_mints.clone(),
+            })
+        }
+        Some(token_str) => {
+            // Parse and verify token
+            let token = cashu::parse_token(&token_str)?;
+
+            // Verify amount is sufficient for actual size
+            cashu::verify_token_basics(&token, required_sats, &state.cashu_accepted_mints)?;
+
+            // Receive token into wallet
+            if let Some(wallet) = &state.cashu_wallet {
+                cashu::receive_token(wallet, &token).await?;
+            }
+
+            Ok(())
+        }
+    }
+}
 
 /// Handle file uploads - REFACTORED VERSION
 pub async fn upload_file(
@@ -51,6 +97,9 @@ pub async fn upload_file(
     // Stream to temp file and calculate hash
     let body_stream = req.into_body().into_data_stream();
     let (sha256, total_bytes) = upload::stream_to_temp_file(body_stream, &temp_path).await?;
+
+    // Check payment if required (after we know the size)
+    check_payment(&state, &headers, total_bytes, state.feature_paid_upload).await?;
 
     // Validate authorization matches the hash
     auth::validate_upload_auth(&auth_event, &sha256)?;
@@ -128,8 +177,13 @@ pub async fn mirror_blob(
     let content_type = extract_content_type_from_response(response.headers());
     let content_length = response.content_length();
     let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
-    
+
     upload::check_size_limit(content_length, max_size_bytes)?;
+
+    // Check payment if required
+    if let Some(size) = content_length {
+        check_payment(&state, &headers, size, state.feature_paid_mirror).await?;
+    }
 
     // Prepare temp file
     file_storage::ensure_temp_dir(&state).await?;
