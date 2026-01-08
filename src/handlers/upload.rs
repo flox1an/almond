@@ -98,11 +98,11 @@ pub async fn upload_file(
     let body_stream = req.into_body().into_data_stream();
     let (sha256, total_bytes) = upload::stream_to_temp_file(body_stream, &temp_path).await?;
 
-    // Check payment if required (after we know the size)
-    check_payment(&state, &headers, total_bytes, state.feature_paid_upload).await?;
-
-    // Validate authorization matches the hash
+    // Validate authorization matches the hash (must come before payment check)
     auth::validate_upload_auth(&auth_event, &sha256)?;
+
+    // Check payment if required (after we know the size and auth is validated)
+    check_payment(&state, &headers, total_bytes, state.feature_paid_upload).await?;
 
     // Finalize upload
     upload::finalize_upload(
@@ -438,6 +438,9 @@ pub async fn patch_upload(
 
     if total_received >= upload_length {
         info!("🎉 Upload complete! Reconstructing final blob for {}", sha256);
+
+        // Check payment if required (for the full upload size)
+        check_payment(&state, &headers, upload_length, state.feature_paid_upload).await?;
 
         // Clone data and release lock
         let chunk_upload_data = chunk_upload.clone();
