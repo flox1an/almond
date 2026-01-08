@@ -332,8 +332,9 @@ async fn load_app_state() -> AppState {
                 Some(wallet)
             }
             Err(e) => {
-                error!("Failed to initialize Cashu wallet: {}", e);
-                panic!("Cannot start with paid features enabled but wallet initialization failed");
+                error!("💰 Failed to initialize Cashu wallet: {}", e);
+                error!("💰 Cannot start with paid features enabled but wallet initialization failed");
+                std::process::exit(1);
             }
         }
     } else {
