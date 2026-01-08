@@ -17,6 +17,8 @@ use crate::helpers::{get_mime_type, track_download_stats};
 use crate::models::{AppState, FileRequestQuery};
 use crate::utils::{find_file, parse_range_header};
 use crate::services::blossom_servers;
+use crate::services::cashu;
+use crate::error::AppError;
 
 /// Handle file requests (GET/HEAD)
 pub async fn handle_file_request(
@@ -24,7 +26,7 @@ pub async fn handle_file_request(
     State(state): State<AppState>,
     Query(query): Query<FileRequestQuery>,
     req: Request,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, AppError> {
     // Extract range header for logging
     let range_header = req.headers().get(header::RANGE)
         .and_then(|h| h.to_str().ok())
@@ -54,6 +56,31 @@ pub async fn handle_file_request(
                         .body(Body::empty())
                         .unwrap())
                 } else {
+                    // Check payment for download if required
+                    if state.feature_paid_download {
+                        let required_sats = cashu::calculate_price(file_metadata.size, state.cashu_price_per_mb);
+                        let headers = req.headers();
+                        let cashu_header = cashu::extract_cashu_header(headers);
+
+                        match cashu_header {
+                            None => {
+                                return Err(AppError::PaymentRequired {
+                                    amount_sats: required_sats,
+                                    unit: "sat".to_string(),
+                                    mints: state.cashu_accepted_mints.clone(),
+                                });
+                            }
+                            Some(token_str) => {
+                                let token = cashu::parse_token(&token_str)?;
+                                cashu::verify_token_basics(&token, required_sats, &state.cashu_accepted_mints)?;
+
+                                if let Some(wallet) = &state.cashu_wallet {
+                                    cashu::receive_token(wallet, &token).await?;
+                                }
+                            }
+                        }
+                    }
+
                     // Track download statistics
                     track_download_stats(&state, file_metadata.size).await;
                     serve_file_with_range(file_metadata.path, req.headers().clone()).await
@@ -106,7 +133,7 @@ pub async fn handle_file_request(
                                     let is_authorized = crate::services::auth::is_pubkey_authorized(&pubkey, &state).await;
                                     if !is_authorized {
                                         warn!("Author pubkey {} not in Web of Trust, rejecting upstream lookup", pubkey.to_hex());
-                                        return Err(StatusCode::FORBIDDEN);
+                                        return Err(AppError::Forbidden("Author pubkey not in Web of Trust".to_string()));
                                     }
                                     debug!("Author pubkey {} validated in WOT", pubkey.to_hex());
                                 }
@@ -159,7 +186,7 @@ pub async fn handle_file_request(
                                 "File {} not found in upstream servers recently (cached), returning 404",
                                 file_hash
                             );
-                            return Err(StatusCode::NOT_FOUND);
+                            return Err(AppError::NotFound("File not found (cached upstream failure)".to_string()));
                         }
                     }
                 } else {
@@ -186,22 +213,22 @@ pub async fn handle_file_request(
                         } else {
                             debug!("Skipping failed lookups cache because custom origin or xs servers were used");
                         }
-                        Err(StatusCode::NOT_FOUND)
+                        Err(AppError::NotFound("File not found".to_string()))
                     }
                 }
             }
         }
     } else {
         // Invalid filename format (no hash found)
-        Err(StatusCode::NOT_FOUND)
+        Err(AppError::NotFound("Invalid filename format".to_string()))
     }
 }
 
 /// Serve file with range support
-async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::HeaderMap) -> Result<Response, StatusCode> {
+async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::HeaderMap) -> Result<Response, AppError> {
     use axum::http::header::RANGE;
     let range_header = headers.get(RANGE).and_then(|r| r.to_str().ok());
-    
+
     debug!("Serving file: {} (range: {})", path.display(), range_header.unwrap_or("none"));
 
     let expires_dt = chrono::Utc::now() + chrono::Duration::days(365);
@@ -213,11 +240,11 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
 
     let mut file = File::open(&path)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::IoError(format!("Failed to open file: {}", e)))?;
     let metadata = file
         .metadata()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::IoError(format!("Failed to read file metadata: {}", e)))?;
     let total_size = metadata.len();
 
     if let Some(range_header) = range_header {
@@ -225,10 +252,10 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
             let (start, end) = range;
             let length = end - start + 1;
             debug!("Serving range: bytes {}-{}/{} (length: {})", start, end, total_size, length);
-            
+
             file.seek(SeekFrom::Start(start))
                 .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .map_err(|e| AppError::IoError(format!("Failed to seek in file: {}", e)))?;
             let stream = ReaderStream::new(file.take(length));
             let body = Body::from_stream(stream);
 
