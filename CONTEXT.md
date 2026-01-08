@@ -7,7 +7,7 @@ This document provides a comprehensive overview of the Almond project, compiled 
 **Almond** (Any Large Media ON Demand) is a temporary BLOSSOM file storage service with Nostr-based authorization and web of trust support.
 
 ### Key Characteristics
-- 🌸 Implements Blossom API (BUD-1, BUD-2, BUD-4, BUD-10)
+- 🌸 Implements Blossom API (BUD-1, BUD-2, BUD-4, BUD-7, BUD-10)
 - 🌸 Temporary file storage with automatic cleanup (FIFO)
 - 🌸 No ownership tracking, no manual delete (except via DELETE endpoint)
 - 🌸 Filesystem-only storage, no database
@@ -142,6 +142,49 @@ Authorization: Nostr <base64-encoded-event>
 - Only applies to upload/mirror operations (not delete)
 - `trusted_pubkeys` are refreshed every 4 hours via `refresh_trust_network()`
 
+## Cashu Payments (BUD-07)
+
+When paid features are enabled, the server implements the BUD-07/NUT-24 payment flow.
+
+### Two Payment Flows Supported
+
+**1. Reactive Flow (402 round-trip):**
+1. Client makes request without payment
+2. Server returns `HTTP 402 Payment Required` with `X-Cashu` header
+3. Client obtains Cashu token from accepted mint
+4. Client retries request with `X-Cashu: cashuB...` header
+5. Server verifies token, receives it into wallet, proceeds
+
+**2. Preemptive Flow (single request):**
+1. Client calculates expected price (size_mb * CASHU_PRICE_PER_MB)
+2. Client includes `X-Cashu: cashuB...` header with first request
+3. Server validates amount is sufficient for actual size
+4. If sufficient: receives token, proceeds with operation
+5. If insufficient: returns 402 with remaining amount needed
+
+### Price Discovery (HEAD /upload)
+
+Clients can query pricing before uploading:
+```
+HEAD /upload
+```
+Response headers (when paid uploads enabled):
+- `X-Price-Per-MB`: Price in sats per megabyte
+- `X-Price-Unit`: Currency unit (always "sat")
+- `X-Accepted-Mints`: Comma-separated list of accepted mint URLs
+
+### Payment Request Format (X-Cashu header on 402 response)
+```json
+{
+  "a": 10,           // Amount in sats
+  "u": "sat",        // Unit
+  "m": ["https://mint.example.com"]  // Accepted mints
+}
+```
+
+### Payment Proof Format (X-Cashu header on request)
+Standard Cashu token string starting with `cashuA` or `cashuB`.
+
 ## Configuration
 
 ### Environment Variables
@@ -170,6 +213,14 @@ Authorization: Nostr <base64-encoded-event>
   - Used as whitelist with WOT as fallback for uploads/mirrors
   - **Required** for delete operations
   - Used as seed for WOT 2-hop graph when WOT mode is enabled
+
+#### Cashu Payment Configuration (BUD-07)
+- `FEATURE_PAID_UPLOAD`: Enable paid uploads - `off` or `on` (default: `off`)
+- `FEATURE_PAID_MIRROR`: Enable paid mirrors - `off` or `on` (default: `off`)
+- `FEATURE_PAID_DOWNLOAD`: Enable paid downloads - `off` or `on` (default: `off`)
+- `CASHU_PRICE_PER_MB`: Price per megabyte in satoshis (default: `1`)
+- `CASHU_ACCEPTED_MINTS`: Comma-separated list of accepted Cashu mint URLs (required if any paid feature enabled)
+- `CASHU_WALLET_PATH`: Path to SQLite wallet database (default: `./cashu_wallet.db`)
 
 #### Feature Flags
 - `FEATURE_UPLOAD_ENABLED`: Upload endpoint mode - `off`, `wot`, or `public` (default: `public`)
