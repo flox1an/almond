@@ -1,5 +1,7 @@
+use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use base64::{engine::general_purpose::URL_SAFE, Engine};
 use std::fmt;
 
 /// Custom error type for the application
@@ -8,7 +10,13 @@ pub enum AppError {
     /// Authentication/authorization errors
     Unauthorized(String),
     Forbidden(String),
-    
+    /// Payment required (402)
+    PaymentRequired {
+        amount_sats: u64,
+        unit: String,
+        mints: Vec<String>,
+    },
+
     /// Validation errors
     BadRequest(String),
     PayloadTooLarge(String),
@@ -34,6 +42,19 @@ impl fmt::Display for AppError {
         match self {
             AppError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
             AppError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
+            AppError::PaymentRequired {
+                amount_sats,
+                unit,
+                mints,
+            } => {
+                write!(
+                    f,
+                    "Payment required: {} {} (mints: {})",
+                    amount_sats,
+                    unit,
+                    mints.join(", ")
+                )
+            }
             AppError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
             AppError::PayloadTooLarge(msg) => write!(f, "Payload too large: {}", msg),
             AppError::NotFound(msg) => write!(f, "Not found: {}", msg),
@@ -51,9 +72,35 @@ impl std::error::Error for AppError {}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        // Handle PaymentRequired specially with X-Cashu header
+        if let AppError::PaymentRequired {
+            amount_sats,
+            unit,
+            mints,
+        } = &self
+        {
+            // Build NUT-18 payment request
+            let payment_request = serde_json::json!({
+                "a": amount_sats,
+                "u": unit,
+                "m": mints,
+            });
+
+            // Encode as cashuA (base64url of JSON)
+            let encoded = format!("cashuA{}", URL_SAFE.encode(payment_request.to_string()));
+
+            return Response::builder()
+                .status(StatusCode::PAYMENT_REQUIRED)
+                .header("X-Cashu", encoded)
+                .body(Body::from(format!("Payment required: {} {}", amount_sats, unit)))
+                .unwrap()
+                .into_response();
+        }
+
         let status = match &self {
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
+            AppError::PaymentRequired { .. } => StatusCode::PAYMENT_REQUIRED,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
@@ -66,7 +113,7 @@ impl IntoResponse for AppError {
         };
 
         let body = self.to_string();
-        
+
         (status, body).into_response()
     }
 }
@@ -89,6 +136,7 @@ impl From<AppError> for StatusCode {
         match err {
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
+            AppError::PaymentRequired { .. } => StatusCode::PAYMENT_REQUIRED,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
