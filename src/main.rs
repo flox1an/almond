@@ -31,9 +31,27 @@ use axum::{
 use handlers::*;
 use middleware::cors_middleware;
 
-// Missing handler functions
-async fn head_upload() -> &'static str {
-    "Method not allowed"
+// HEAD /upload handler for price discovery (BUD-07)
+async fn head_upload(
+    State(state): State<AppState>,
+) -> axum::response::Response<axum::body::Body> {
+    use axum::http::header;
+    use axum::response::Response;
+
+    // Build response with server capabilities
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::ACCEPT, "application/octet-stream");
+
+    // Add payment info if paid uploads are enabled
+    if state.feature_paid_upload {
+        builder = builder
+            .header("X-Price-Per-MB", state.cashu_price_per_mb.to_string())
+            .header("X-Price-Unit", "sat")
+            .header("X-Accepted-Mints", state.cashu_accepted_mints.join(","));
+    }
+
+    builder.body(axum::body::Body::empty()).unwrap()
 }
 
 async fn options_upload() -> &'static str {
