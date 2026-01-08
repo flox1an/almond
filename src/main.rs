@@ -324,6 +324,22 @@ async fn load_app_state() -> AppState {
         );
     }
 
+    // Initialize Cashu wallet if any paid feature is enabled
+    let cashu_wallet = if any_paid_feature {
+        match crate::services::cashu::init_wallet(&cashu_wallet_path, &cashu_accepted_mints).await {
+            Ok(wallet) => {
+                info!("💰 Cashu wallet ready for payments");
+                Some(wallet)
+            }
+            Err(e) => {
+                error!("Failed to initialize Cashu wallet: {}", e);
+                panic!("Cannot start with paid features enabled but wallet initialization failed");
+            }
+        }
+    } else {
+        None
+    };
+
     // Parse blossom server list cache TTL in hours (default: 24 hours)
     let blossom_server_list_cache_ttl_hours = env::var("BLOSSOM_SERVER_LIST_CACHE_TTL_HOURS")
         .unwrap_or_else(|_| "24".to_string())
@@ -409,7 +425,7 @@ async fn load_app_state() -> AppState {
         cashu_price_per_mb,
         cashu_accepted_mints,
         cashu_wallet_path,
-        cashu_wallet: None, // Initialized separately in Task 5
+        cashu_wallet,
     }
 }
 
