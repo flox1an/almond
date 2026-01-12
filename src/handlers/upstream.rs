@@ -21,6 +21,8 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+use crate::services::upload::validate_upstream_url;
+
 use crate::constants::*;
 use crate::helpers::*;
 use crate::models::AppState;
@@ -80,11 +82,23 @@ pub async fn try_upstream_servers(
 
     // Try custom origin first if provided (single server)
     if let Some(origin_url) = custom_origin {
-        let normalized_origin = crate::helpers::normalize_server_url(origin_url);
-        info!("Trying custom origin server first: {}", normalized_origin);
-        let file_url = format!("{}/{}", normalized_origin.trim_end_matches('/'), filename);
-        info!("Trying upstream server: {}", file_url);
-        tried_servers.insert(normalized_origin.clone());
+        // Validate URL against SSRF before making request
+        let normalized_origin = match validate_upstream_url(origin_url).await {
+            Ok(url) => url,
+            Err(e) => {
+                warn!("Custom origin URL validation failed (SSRF protection): {} - {}", origin_url, e);
+                // Skip this server and continue to xs_servers or configured upstream servers
+                String::new()
+            }
+        };
+
+        if normalized_origin.is_empty() {
+            info!("Custom origin failed validation, trying xs servers or configured upstream servers");
+        } else {
+            info!("Trying custom origin server first: {}", normalized_origin);
+            let file_url = format!("{}/{}", normalized_origin.trim_end_matches('/'), filename);
+            info!("Trying upstream server: {}", file_url);
+            tried_servers.insert(normalized_origin.clone());
 
         // Create request with all relevant headers for upstream servers
         let request = client.get(&file_url);
@@ -162,13 +176,21 @@ pub async fn try_upstream_servers(
         }
         // If custom origin failed, continue to xs_servers or configured upstream servers
         info!("Custom origin failed, trying xs servers or configured upstream servers");
+        }
     }
 
     // Priority 1: Try xs servers if provided
     if let Some(servers) = xs_servers {
         info!("Priority 1: Trying xs servers ({} servers)", servers.len());
         for server in servers {
-            let normalized_server = crate::helpers::normalize_server_url(server);
+            // Validate URL against SSRF before making request
+            let normalized_server = match validate_upstream_url(server).await {
+                Ok(url) => url,
+                Err(e) => {
+                    warn!("xs server URL validation failed (SSRF protection): {} - {}", server, e);
+                    continue;
+                }
+            };
 
             // Skip if we've already tried this server
             if tried_servers.contains(&normalized_server) {
@@ -206,7 +228,14 @@ pub async fn try_upstream_servers(
     if !state.upstream_servers.is_empty() {
         info!("Priority 2: Trying local UPSTREAM_SERVERS ({} servers)", state.upstream_servers.len());
         for server in &state.upstream_servers {
-            let normalized_server = crate::helpers::normalize_server_url(server);
+            // Validate URL against SSRF before making request
+            let normalized_server = match validate_upstream_url(server).await {
+                Ok(url) => url,
+                Err(e) => {
+                    warn!("UPSTREAM_SERVER URL validation failed (SSRF protection): {} - {}", server, e);
+                    continue;
+                }
+            };
 
             // Skip if we've already tried this server
             if tried_servers.contains(&normalized_server) {
@@ -247,7 +276,14 @@ pub async fn try_upstream_servers(
             Ok(user_servers) if !user_servers.is_empty() => {
                 info!("Fetched {} servers from user's server list (BUD-03)", user_servers.len());
                 for server in &user_servers {
-                    let normalized_server = crate::helpers::normalize_server_url(server);
+                    // Validate URL against SSRF before making request
+                    let normalized_server = match validate_upstream_url(server).await {
+                        Ok(url) => url,
+                        Err(e) => {
+                            warn!("User server URL validation failed (SSRF protection): {} - {}", server, e);
+                            continue;
+                        }
+                    };
 
                     // Skip if we've already tried this server
                     if tried_servers.contains(&normalized_server) {
@@ -390,26 +426,36 @@ async fn proxy_request_to_upstream(
 
     // Try custom origin first if provided
     if let Some(origin_url) = custom_origin {
-        let normalized_origin = crate::helpers::normalize_server_url(origin_url);
-        let file_url = format!("{}/{}", normalized_origin.trim_end_matches('/'), filename);
-        info!("Proxying to custom origin server: {}", file_url);
-        tried_servers.insert(normalized_origin.clone());
-
-        // Create request with all relevant headers
-        let request = client.get(&file_url);
-        let request = copy_headers_to_reqwest(headers, request);
-
-        match request.send().await {
-            Ok(response) if response.status().is_success() => {
-                info!("Successfully proxied request to custom origin: {}", file_url);
-                let content_type = extract_content_type_from_response(response.headers());
-                return proxy_upstream_response(response, &content_type, filename).await;
-            }
-            Ok(response) => {
-                info!("Custom origin server {} returned status: {}", file_url, response.status());
-            }
+        // Validate URL against SSRF before making request
+        let normalized_origin = match validate_upstream_url(origin_url).await {
+            Ok(url) => url,
             Err(e) => {
-                warn!("Failed to proxy to custom origin {}: {}", file_url, e);
+                warn!("Custom origin URL validation failed (SSRF protection): {} - {}", origin_url, e);
+                String::new()
+            }
+        };
+
+        if !normalized_origin.is_empty() {
+            let file_url = format!("{}/{}", normalized_origin.trim_end_matches('/'), filename);
+            info!("Proxying to custom origin server: {}", file_url);
+            tried_servers.insert(normalized_origin.clone());
+
+            // Create request with all relevant headers
+            let request = client.get(&file_url);
+            let request = copy_headers_to_reqwest(headers, request);
+
+            match request.send().await {
+                Ok(response) if response.status().is_success() => {
+                    info!("Successfully proxied request to custom origin: {}", file_url);
+                    let content_type = extract_content_type_from_response(response.headers());
+                    return proxy_upstream_response(response, &content_type, filename).await;
+                }
+                Ok(response) => {
+                    info!("Custom origin server {} returned status: {}", file_url, response.status());
+                }
+                Err(e) => {
+                    warn!("Failed to proxy to custom origin {}: {}", file_url, e);
+                }
             }
         }
     }
@@ -417,7 +463,15 @@ async fn proxy_request_to_upstream(
     // Priority 1: Try xs servers if provided
     if let Some(servers) = xs_servers {
         for server in servers {
-            let normalized_server = crate::helpers::normalize_server_url(server);
+            // Validate URL against SSRF before making request
+            let normalized_server = match validate_upstream_url(server).await {
+                Ok(url) => url,
+                Err(e) => {
+                    warn!("xs server URL validation failed (SSRF protection): {} - {}", server, e);
+                    continue;
+                }
+            };
+
             if tried_servers.contains(&normalized_server) {
                 continue;
             }
@@ -447,7 +501,15 @@ async fn proxy_request_to_upstream(
 
     // Priority 2: Try local UPSTREAM_SERVERS
     for server in &state.upstream_servers {
-        let normalized_server = crate::helpers::normalize_server_url(server);
+        // Validate URL against SSRF before making request
+        let normalized_server = match validate_upstream_url(server).await {
+            Ok(url) => url,
+            Err(e) => {
+                warn!("UPSTREAM_SERVER URL validation failed (SSRF protection): {} - {}", server, e);
+                continue;
+            }
+        };
+
         if tried_servers.contains(&normalized_server) {
             continue;
         }
@@ -479,7 +541,15 @@ async fn proxy_request_to_upstream(
         info!("Fetching user server list for proxying: {}", pubkey.to_hex());
         if let Ok(user_servers) = crate::services::blossom_servers::fetch_user_server_list(state, pubkey).await {
             for server in &user_servers {
-                let normalized_server = crate::helpers::normalize_server_url(server);
+                // Validate URL against SSRF before making request
+                let normalized_server = match validate_upstream_url(server).await {
+                    Ok(url) => url,
+                    Err(e) => {
+                        warn!("User server URL validation failed (SSRF protection): {} - {}", server, e);
+                        continue;
+                    }
+                };
+
                 if tried_servers.contains(&normalized_server) {
                     continue;
                 }

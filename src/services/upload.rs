@@ -14,7 +14,7 @@ use crate::models::AppState;
 use crate::services::file_storage;
 
 /// Check if an IP address is in a private/local range
-fn is_private_ip(ip: IpAddr) -> bool {
+pub fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => {
             let octets = ipv4.octets();
@@ -285,6 +285,15 @@ pub async fn fetch_from_url(url: &str) -> AppResult<reqwest::Response> {
     }
 
     Ok(response)
+}
+
+/// Validate an upstream server URL for SSRF protection
+/// Normalizes the URL (adds https:// if missing) and validates against private IPs
+/// Returns the normalized URL if valid, or an error if the URL is invalid or resolves to a private IP
+pub async fn validate_upstream_url(server_url: &str) -> AppResult<String> {
+    let normalized = crate::helpers::normalize_server_url(server_url);
+    validate_url_for_ssrf(&normalized).await?;
+    Ok(normalized)
 }
 
 /// Check file size against limit (from Content-Length header)
