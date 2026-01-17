@@ -122,11 +122,14 @@ pub async fn upload_file(
     // Create response
     let descriptor = state.create_blob_descriptor(&sha256, total_bytes, Some(content_type), expiration);
 
-    Ok(Response::builder()
+    let json_body = serde_json::to_string(&descriptor)
+        .map_err(|e| AppError::InternalError(format!("Failed to serialize response: {}", e)))?;
+
+    Response::builder()
         .status(StatusCode::CREATED)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_string(&descriptor).unwrap()))
-        .unwrap())
+        .body(Body::from(json_body))
+        .map_err(|e| AppError::InternalError(format!("Failed to build response: {}", e)))
 }
 
 /// Handle blob mirroring - REFACTORED VERSION
@@ -231,14 +234,17 @@ pub async fn mirror_blob(
     // Create response
     let descriptor = state.create_blob_descriptor(&expected_sha256, body_size, Some(content_type), expiration);
 
-    info!("🎉 Mirror operation completed successfully: {} -> {} ({} bytes)", 
+    info!("🎉 Mirror operation completed successfully: {} -> {} ({} bytes)",
           url, expected_sha256, body_size);
 
-    Ok(Response::builder()
+    let json_body = serde_json::to_string(&descriptor)
+        .map_err(|e| AppError::InternalError(format!("Failed to serialize response: {}", e)))?;
+
+    Response::builder()
         .status(StatusCode::CREATED)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_string(&descriptor).unwrap()))
-        .unwrap())
+        .body(Body::from(json_body))
+        .map_err(|e| AppError::InternalError(format!("Failed to build response: {}", e)))
 }
 
 /// Handle chunked uploads - REFACTORED VERSION
@@ -460,11 +466,14 @@ pub async fn patch_upload(
 
                 info!("🏁 Chunked upload completed successfully: {} ({} bytes)", sha256, descriptor.size);
 
-                Ok(Response::builder()
+                let json_body = serde_json::to_string(&descriptor)
+                    .map_err(|e| AppError::InternalError(format!("Failed to serialize response: {}", e)))?;
+
+                Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::to_string(&descriptor).unwrap()))
-                    .unwrap())
+                    .body(Body::from(json_body))
+                    .map_err(|e| AppError::InternalError(format!("Failed to build response: {}", e)))
             }
             Err(e) => {
                 error!("Failed to reconstruct blob: {}", e);
@@ -478,10 +487,10 @@ pub async fn patch_upload(
         info!("⏳ Chunk accepted: {} bytes remaining - {} chunks received",
               remaining, chunk_upload.chunks.len());
 
-        Ok(Response::builder()
+        Response::builder()
             .status(StatusCode::NO_CONTENT)
             .body(Body::empty())
-            .unwrap())
+            .map_err(|e| AppError::InternalError(format!("Failed to build response: {}", e)))
     }
 }
 

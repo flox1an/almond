@@ -1,4 +1,5 @@
 use mime_guess::from_path;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use std::{
     collections::HashMap,
@@ -9,6 +10,12 @@ use tokio::{fs, sync::RwLock};
 use tracing::{error, info, warn};
 
 use crate::models::{AppState, FileMetadata};
+
+// Pre-compiled regex for SHA256 hash extraction - compiled once at startup
+static SHA256_FILENAME_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^([a-fA-F0-9]{64})(\.[a-zA-Z0-9]+)?$")
+        .expect("Failed to compile SHA256 filename regex")
+});
 
 pub fn get_nested_path(upload_dir: &Path, hash: &str, extension: Option<&str>, expiration: Option<u64>) -> PathBuf {
     let first_level = &hash[..1];
@@ -229,8 +236,9 @@ pub async fn enforce_storage_limits(state: &AppState) {
 }
 
 pub fn get_sha256_hash_from_filename(filename: &str) -> Option<String> {
-    let re = Regex::new(r"^([a-fA-F0-9]{64})(\.[a-zA-Z0-9]+)?$").unwrap();
-    re.captures(filename).map(|captures| captures[1].to_string())
+    SHA256_FILENAME_REGEX
+        .captures(filename)
+        .map(|captures| captures[1].to_string())
 }
 
 pub async fn find_file(

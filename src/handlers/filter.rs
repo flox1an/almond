@@ -254,12 +254,14 @@ pub async fn get_filter(
             "filter": "",
         });
 
+        let body = serde_json::to_vec(&payload)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ETAG, &etag)
             .header(header::CACHE_CONTROL, "max-age=60")
-            .body(axum::body::Body::from(serde_json::to_vec(&payload).unwrap()))
+            .body(axum::body::Body::from(body))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
     }
 
@@ -269,10 +271,12 @@ pub async fn get_filter(
             let payload = serde_json::json!({
                 "error": format!("failed to construct filter: {}", msg),
             });
+            let body = serde_json::to_vec(&payload)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             return Ok(Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(serde_json::to_vec(&payload).unwrap()))
+                .body(axum::body::Body::from(body))
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
         }
     };
@@ -295,12 +299,14 @@ pub async fn get_filter(
         payload["m"] = serde_json::json!(bloom.bitmap().len() * 8);
     }
 
+    let body = serde_json::to_vec(&payload)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ETAG, &etag)
         .header(header::CACHE_CONTROL, "max-age=60")
-        .body(axum::body::Body::from(serde_json::to_vec(&payload).unwrap()))
+        .body(axum::body::Body::from(body))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?)
 }
 

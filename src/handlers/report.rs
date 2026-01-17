@@ -235,13 +235,14 @@ pub async fn report_blob(
 
     if processed_hashes.is_empty() {
         warn!("No blobs were processed from report");
-        return Ok(Response::builder()
+        let body = serde_json::to_string(&serde_json::json!({
+            "error": "No matching blobs found"
+        })).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header("Content-Type", "application/json")
-            .body(Body::from(serde_json::to_string(&serde_json::json!({
-                "error": "No matching blobs found"
-            })).unwrap()))
-            .unwrap());
+            .body(Body::from(body))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     info!(
@@ -264,9 +265,11 @@ pub async fn report_blob(
         action: state.report_action.as_str().to_string(),
     };
 
-    Ok(Response::builder()
+    let body = serde_json::to_string(&response)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_string(&response).unwrap()))
-        .unwrap())
+        .body(Body::from(body))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }

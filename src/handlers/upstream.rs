@@ -651,15 +651,16 @@ async fn proxy_upstream_response(
     }
 
     // Build response first, then insert Content-Disposition to ensure it overwrites any existing header
-    let mut response = response_builder.body(body).unwrap();
-    
+    let mut response = response_builder
+        .body(body)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     // Set Content-Disposition header with clean filename to prevent browser from appending codecs
     // Use insert() to ensure we overwrite any existing Content-Disposition from upstream
     let content_disposition = format!("inline; filename=\"{}\"", clean_filename);
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        content_disposition.parse().unwrap(),
-    );
+    if let Ok(header_value) = content_disposition.parse() {
+        response.headers_mut().insert(header::CONTENT_DISPOSITION, header_value);
+    }
 
     Ok(response)
 }
@@ -859,16 +860,16 @@ async fn stream_and_save_from_upstream(
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .body(body)
-        .unwrap();
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Apply streaming headers
     response = apply_streaming_headers(response, &content_type, filename);
 
     // Add Content-Length if available from upstream
     if let Some(len) = content_length {
-        response
-            .headers_mut()
-            .insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
+        if let Ok(header_value) = len.to_string().parse() {
+            response.headers_mut().insert(header::CONTENT_LENGTH, header_value);
+        }
     }
 
     // ---- Cleanup: complete download, finalize file & index
@@ -1195,17 +1196,24 @@ fn apply_streaming_headers(
     content_type: &str,
     filename: &str,
 ) -> Response<Body> {
+    use axum::http::HeaderValue;
+
     let headers = response.headers_mut();
 
     // Extract MIME type essence (without parameters like codecs=avc1) to prevent browser from appending to filename
     let mime_type = content_type.split(';').next().unwrap_or(content_type).trim();
 
-    headers.insert(header::CONTENT_TYPE, mime_type.parse().unwrap());
+    // Parse MIME type - fall back gracefully if parsing fails
+    if let Ok(header_value) = mime_type.parse() {
+        headers.insert(header::CONTENT_TYPE, header_value);
+    }
+
+    // Static header values - these are compile-time constants
     headers.insert(
         header::CACHE_CONTROL,
-        CACHE_CONTROL_IMMUTABLE.parse().unwrap(),
+        HeaderValue::from_static(CACHE_CONTROL_IMMUTABLE),
     );
-    headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
 
     // Add Content-Disposition header to prevent save dialog
     let filename_display = std::path::Path::new(filename)
@@ -1213,10 +1221,9 @@ fn apply_streaming_headers(
         .and_then(|n| n.to_str())
         .unwrap_or("file");
     let content_disposition = format!("inline; filename=\"{}\"", filename_display);
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        content_disposition.parse().unwrap(),
-    );
+    if let Ok(header_value) = content_disposition.parse() {
+        headers.insert(header::CONTENT_DISPOSITION, header_value);
+    }
 
     info!(
         "Applied streaming headers: Content-Type={}, Content-Disposition=inline; filename=\"{}\"",

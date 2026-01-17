@@ -34,7 +34,7 @@ use middleware::cors_middleware;
 // HEAD /upload handler for price discovery (BUD-07)
 async fn head_upload(
     State(state): State<AppState>,
-) -> axum::response::Response<axum::body::Body> {
+) -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
     use axum::http::header;
     use axum::response::Response;
 
@@ -51,7 +51,9 @@ async fn head_upload(
             .header("X-Accepted-Mints", state.cashu_accepted_mints.join(","));
     }
 
-    builder.body(axum::body::Body::empty()).unwrap()
+    builder
+        .body(axum::body::Body::empty())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn options_upload() -> &'static str {
@@ -69,11 +71,11 @@ async fn serve_index(State(state): State<AppState>) -> Result<axum::response::Re
         return Err(StatusCode::NOT_FOUND);
     }
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .body(axum::body::Body::from(include_str!("index.html")))
-        .unwrap())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn serve_filter_test() -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
@@ -82,11 +84,11 @@ async fn serve_filter_test() -> Result<axum::response::Response<axum::body::Body
         response::Response,
     };
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .body(axum::body::Body::from(include_str!("filter-test.html")))
-        .unwrap())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 
@@ -172,7 +174,9 @@ async fn load_app_state() -> AppState {
     // Parse storage path from environment variable
     let storage_path = env::var("STORAGE_PATH").unwrap_or_else(|_| "./files".to_string());
     let upload_dir = PathBuf::from(&storage_path);
-    fs::create_dir_all(&upload_dir).await.unwrap();
+    fs::create_dir_all(&upload_dir)
+        .await
+        .expect("Failed to create storage directory");
     info!("⚙️ Storage path: {}", upload_dir.display());
 
     // Clear temp directory on startup

@@ -43,7 +43,7 @@ pub async fn handle_file_request(
                 info!("File {} found locally, serving immediately (skipping upstream lookup)", file_hash);
                 
                 if req.method() == Method::HEAD {
-                    Ok(Response::builder()
+                    Response::builder()
                         .status(StatusCode::OK)
                         .header(
                             header::CONTENT_TYPE,
@@ -54,7 +54,7 @@ pub async fn handle_file_request(
                         .header(header::CONTENT_LENGTH, file_metadata.size)
                         .header(header::ACCEPT_RANGES, "bytes")
                         .body(Body::empty())
-                        .unwrap())
+                        .map_err(|e| AppError::InternalError(format!("Failed to build HEAD response: {}", e)))
                 } else {
                     // Check payment for download if required
                     if state.feature_paid_download {
@@ -233,7 +233,8 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
 
     let expires_dt = chrono::Utc::now() + chrono::Duration::days(365);
     let expires_str = expires_dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
-    let expires_header = hyper::http::HeaderValue::from_str(&expires_str).unwrap();
+    let expires_header = hyper::http::HeaderValue::from_str(&expires_str)
+        .map_err(|e| AppError::InternalError(format!("Failed to create expires header: {}", e)))?;
 
     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let content_disposition = format!("inline; filename=\"{}\"", filename);
@@ -261,7 +262,7 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
 
             let mime = get_mime_type(&path);
 
-            return Ok(Response::builder()
+            return Response::builder()
                 .status(StatusCode::PARTIAL_CONTENT)
                 .header(header::CONTENT_TYPE, mime)
                 .header(
@@ -273,7 +274,7 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
                 .header(axum::http::header::EXPIRES, expires_header.clone())
                 .header(header::CONTENT_DISPOSITION, content_disposition.clone())
                 .body(body)
-                .unwrap());
+                .map_err(|e| AppError::InternalError(format!("Failed to build range response: {}", e)));
         }
     }
 
@@ -281,7 +282,7 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, get_mime_type(&path))
         .header(header::ACCEPT_RANGES, "bytes")
@@ -289,5 +290,5 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
         .header(axum::http::header::EXPIRES, expires_header.clone())
         .header(header::CONTENT_DISPOSITION, content_disposition)
         .body(body)
-        .unwrap())
+        .map_err(|e| AppError::InternalError(format!("Failed to build file response: {}", e)))
 }

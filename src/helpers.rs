@@ -105,21 +105,25 @@ pub async fn track_upload_stats(state: &AppState, size: u64) {
 }
 
 /// Create a simple error response
+#[allow(dead_code)]
 pub fn create_error_response(status: StatusCode, message: String) -> Response<Body> {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/plain")
         .body(Body::from(message))
-        .unwrap()
+        .expect("Failed to build error response")
 }
 
 /// Create a JSON response
-pub fn create_json_response<T: serde::Serialize>(data: T) -> Response<Body> {
+#[allow(dead_code)]
+pub fn create_json_response<T: serde::Serialize>(data: T) -> Result<Response<Body>, StatusCode> {
+    let body = serde_json::to_string(&data)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_string(&data).unwrap()))
-        .unwrap()
+        .body(Body::from(body))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Copy relevant headers from one HeaderMap to a reqwest request builder

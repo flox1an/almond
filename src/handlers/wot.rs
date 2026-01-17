@@ -43,10 +43,12 @@ pub async fn get_wot(
             let payload = serde_json::json!({
                 "error": "invalid pubkey hex (need exactly 64 hex chars)",
             });
+            let body = serde_json::to_vec(&payload)
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
             let resp = Response::builder()
                 .status(axum::http::StatusCode::BAD_REQUEST)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(serde_json::to_vec(&payload).unwrap()))
+                .body(axum::body::Body::from(body))
                 .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
             return Ok(resp);
         }
@@ -57,10 +59,12 @@ pub async fn get_wot(
             "count": num_items,
             "fp": fp,
         });
+        let body = serde_json::to_vec(&payload)
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
         let resp = Response::builder()
             .status(axum::http::StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(axum::body::Body::from(serde_json::to_vec(&payload).unwrap()))
+            .body(axum::body::Body::from(body))
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
         return Ok(resp);
     }
@@ -80,10 +84,12 @@ pub async fn get_wot(
 			"m": bits.len() * 8,
 			"bits_b64": BASE64.encode(bits),
 		});
+		let body = serde_json::to_vec(&payload)
+			.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 		let resp = Response::builder()
 			.status(axum::http::StatusCode::OK)
 			.header(header::CONTENT_TYPE, "application/json")
-			.body(axum::body::Body::from(serde_json::to_vec(&payload).unwrap()))
+			.body(axum::body::Body::from(body))
 			.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 		Ok(resp)
 	} else {

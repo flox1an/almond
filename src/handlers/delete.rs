@@ -203,8 +203,8 @@ pub async fn delete_blob(
     info!("🎉 Successfully deleted blob: {}", sha256);
 
     // Return 204 No Content on success
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::NO_CONTENT)
         .body(Body::empty())
-        .unwrap())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }

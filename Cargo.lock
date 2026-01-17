@@ -77,6 +77,7 @@ dependencies = [
  "mime_guess",
  "nostr",
  "nostr-relay-pool",
+ "once_cell",
  "prometheus",
  "rand 0.8.5",
  "regex",
