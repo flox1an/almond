@@ -72,18 +72,35 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 
 ## Environment Variables
 
+### Server Configuration
 - `BIND_ADDR`: Address to bind the server to (default: "127.0.0.1:3000")
-- `PUBLIC_URL`: Public URL for the service (default: "http://127.0.0.1:3000")
+- `PUBLIC_URL`: Public URL for the service (default: "http://127.0.0.1:3000" or "https://127.0.0.1:3000" if HTTPS enabled)
+
+### HTTPS/TLS Configuration
+- `ENABLE_HTTPS`: Enable HTTPS with TLS (default: false)
+- `TLS_CERT_PATH`: Path to TLS certificate file (default: "./cert.pem")
+- `TLS_KEY_PATH`: Path to TLS private key file (default: "./key.pem")
+- `TLS_AUTO_GENERATE`: Auto-generate self-signed certificate if not found (default: true)
+
+### Storage Configuration
 - `STORAGE_PATH`: Path where files are stored (default: "./files")
 - `MAX_TOTAL_SIZE`: Maximum total storage size in MB (default: 99999)
 - `MAX_TOTAL_FILES`: Maximum number of files (default: 99999999)
 - `CLEANUP_INTERVAL_SECS`: Interval for cleanup checks in seconds (default: 30)
 - `MAX_FILE_AGE_DAYS`: Maximum age of files in days, 0 for no limit (default: 0)
+
+### Upstream Configuration
 - `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback (optional)
 - `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: 100)
+
+### Upload Configuration
 - `MAX_CHUNK_SIZE_MB`: Maximum size for individual chunks in chunked uploads in MB (default: 100)
 - `CHUNK_CLEANUP_TIMEOUT_MINUTES`: Timeout for cleaning up abandoned chunked uploads in minutes (default: 30)
+
+### Authorization Configuration
 - `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys (optional, used as whitelist with WOT as fallback)
+
+### Feature Flags
 - `FEATURE_UPLOAD_ENABLED`: Upload endpoint mode - `off`, `wot`, or `public` (default: `public`)
 - `FEATURE_MIRROR_ENABLED`: Mirror endpoint mode - `off`, `wot`, or `public` (default: `public`)
 - `FEATURE_LIST_ENABLED`: Enable list endpoint (default: true)
@@ -93,6 +110,59 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 - `FEATURE_HOMEPAGE_ENABLED`: Enable homepage/landing page (default: true)
 
 **Note:** Web of Trust (WOT) is automatically enabled when any feature is set to `wot` mode. WOT is built from your follows (specified in `ALLOWED_NPUBS`) using a 2-hop graph from Nostr relays.
+
+## HTTPS Configuration
+
+### Automatic Self-Signed Certificates
+
+By default, if you enable HTTPS and no certificates are found, Almond will automatically generate self-signed certificates:
+
+```bash
+ENABLE_HTTPS=true cargo run
+```
+
+This will:
+1. Generate a self-signed certificate (`cert.pem`) and private key (`key.pem`)
+2. Start the server with HTTPS on the configured address
+3. Accept connections from `localhost`, `127.0.0.1`, and `::1`
+
+**Note:** Browsers will show a security warning for self-signed certificates. You'll need to manually trust the certificate or use it for development/testing only.
+
+### Using Custom Certificates
+
+To use your own certificates (e.g., from Let's Encrypt):
+
+```bash
+ENABLE_HTTPS=true \
+TLS_CERT_PATH=/path/to/cert.pem \
+TLS_KEY_PATH=/path/to/key.pem \
+TLS_AUTO_GENERATE=false \
+cargo run
+```
+
+### Docker with HTTPS
+
+Self-signed (auto-generated):
+```bash
+docker run -p 3000:3000 \
+  -v /path/to/files:/app/files \
+  -e ENABLE_HTTPS=true \
+  -e PUBLIC_URL=https://your-domain.com \
+  ghcr.io/flox1an/almond
+```
+
+With custom certificates:
+```bash
+docker run -p 3000:3000 \
+  -v /path/to/files:/app/files \
+  -v /path/to/certs:/app/certs \
+  -e ENABLE_HTTPS=true \
+  -e TLS_CERT_PATH=/app/certs/cert.pem \
+  -e TLS_KEY_PATH=/app/certs/key.pem \
+  -e TLS_AUTO_GENERATE=false \
+  -e PUBLIC_URL=https://your-domain.com \
+  ghcr.io/flox1an/almond
+```
 
 ## Internals
 - Blobs are stored in `STORAGE_PATH` within a folder structure with a two layer hierarchy of folders with the first and second letter of the SHA256 storage hash, e.g. 

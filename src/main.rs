@@ -6,6 +6,7 @@ pub mod metrics;
 pub mod middleware;
 pub mod models;
 pub mod services;
+pub mod tls;
 pub mod trust_network;
 pub mod utils;
 
@@ -169,7 +170,32 @@ async fn load_app_state() -> AppState {
 
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
 
-    let public_url = env::var("PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
+    // HTTPS/TLS configuration
+    let enable_https = env::var("ENABLE_HTTPS")
+        .unwrap_or_else(|_| "false".to_string())
+        .parse::<bool>()
+        .unwrap_or(false);
+    
+    let tls_cert_path = PathBuf::from(
+        env::var("TLS_CERT_PATH").unwrap_or_else(|_| "./cert.pem".to_string())
+    );
+    
+    let tls_key_path = PathBuf::from(
+        env::var("TLS_KEY_PATH").unwrap_or_else(|_| "./key.pem".to_string())
+    );
+    
+    let tls_auto_generate = env::var("TLS_AUTO_GENERATE")
+        .unwrap_or_else(|_| "true".to_string())
+        .parse::<bool>()
+        .unwrap_or(true);
+
+    let public_url = env::var("PUBLIC_URL").unwrap_or_else(|_| {
+        if enable_https {
+            "https://127.0.0.1:3000".to_string()
+        } else {
+            "http://127.0.0.1:3000".to_string()
+        }
+    });
 
     // Parse storage path from environment variable
     let storage_path = env::var("STORAGE_PATH").unwrap_or_else(|_| "./files".to_string());
@@ -409,6 +435,17 @@ async fn load_app_state() -> AppState {
     let metrics = crate::metrics::Metrics::new();
     info!("✅ Prometheus metrics initialized");
 
+    // Handle HTTPS/TLS setup if enabled
+    if enable_https {
+        info!("🔐 HTTPS enabled");
+        if let Err(e) = crate::tls::ensure_tls_certificates(&tls_cert_path, &tls_key_path, tls_auto_generate) {
+            error!("❌ Failed to setup TLS certificates: {}", e);
+            std::process::exit(1);
+        }
+    } else {
+        info!("⚠️  HTTPS disabled - running in HTTP mode");
+    }
+
     AppState {
         upload_dir,
         file_index,
@@ -523,24 +560,26 @@ fn start_trust_network_refresh_job(state: AppState) {
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    // Install default crypto provider for rustls (required for HTTPS)
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let state = load_app_state().await;
     let addr = state
         .bind_addr
         .parse::<SocketAddr>()
         .expect("Invalid address format");
 
+    // Get HTTPS configuration
+    let enable_https = env::var("ENABLE_HTTPS")
+        .unwrap_or_else(|_| "false".to_string())
+        .parse::<bool>()
+        .unwrap_or(false);
+
     start_cleanup_job(state.clone());
     start_chunk_cleanup_job(state.clone());
     start_trust_network_refresh_job(state.clone());
 
-    let app = create_app(state).await;
-
-    info!("🎧 blossom server listening on {}", addr);
-
-    // Create a TcpListener
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("Failed to bind to address");
+    let app = create_app(state.clone()).await;
 
     // Spawn a task to handle shutdown signals - exit immediately when received
     tokio::spawn(async move {
@@ -573,8 +612,42 @@ async fn main() {
         }
     });
 
-    // Start the server (no graceful shutdown - exit immediately on signal)
-    if let Err(e) = axum::serve(listener, app).await {
-        error!("❌ Server error: {}", e);
+    // Start server with HTTPS or HTTP
+    if enable_https {
+        let tls_cert_path = PathBuf::from(
+            env::var("TLS_CERT_PATH").unwrap_or_else(|_| "./cert.pem".to_string())
+        );
+        let tls_key_path = PathBuf::from(
+            env::var("TLS_KEY_PATH").unwrap_or_else(|_| "./key.pem".to_string())
+        );
+
+        info!("🎧 blossom server listening on https://{}", addr);
+
+        match crate::tls::load_tls_config(&tls_cert_path, &tls_key_path).await {
+            Ok(config) => {
+                if let Err(e) = axum_server::bind_rustls(addr, config)
+                    .serve(app.into_make_service())
+                    .await
+                {
+                    error!("❌ HTTPS server error: {}", e);
+                }
+            }
+            Err(e) => {
+                error!("❌ Failed to load TLS configuration: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        info!("🎧 blossom server listening on http://{}", addr);
+
+        // Create a TcpListener for HTTP
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .expect("Failed to bind to address");
+
+        // Start the server (no graceful shutdown - exit immediately on signal)
+        if let Err(e) = axum::serve(listener, app).await {
+            error!("❌ Server error: {}", e);
+        }
     }
 }

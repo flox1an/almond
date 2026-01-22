@@ -53,3 +53,9 @@ cdk = { version = "0.14", default-features = false, features = ["wallet"] }
 cdk-sqlite = { version = "0.14", features = ["wallet"] }
 cashu = "0.14"
 rand = "0.8"
+
+# HTTPS/TLS support
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rcgen = "0.13"
+rustls-pemfile = "2.2"
+rustls = { version = "0.23", features = ["aws-lc-rs"] }

@@ -640,9 +640,17 @@ async fn proxy_upstream_response(
     if let Some(accept_ranges) = accept_ranges {
         response_builder = response_builder.header(header::ACCEPT_RANGES, accept_ranges);
     }
-    if let Some(cache_control) = cache_control {
-        response_builder = response_builder.header(header::CACHE_CONTROL, cache_control);
-    }
+    // IMPORTANT: When proxying upstream responses, do NOT use upstream's cache-control.
+    // Use no-store to prevent CDNs from caching potentially incomplete streaming responses.
+    // This fixes 416 errors when CDNs cache partial range responses that fail mid-transfer.
+    // Once the file is fully downloaded and stored locally, Almond will serve it with
+    // proper immutable cache headers from serve_file_with_range().
+    let _ = cache_control; // Intentionally ignore upstream's cache-control
+    response_builder = response_builder
+        .header(header::CACHE_CONTROL, "private, no-store")
+        // Vary: Range tells CDNs that responses differ based on Range header,
+        // preventing cache collisions between different range requests
+        .header(header::VARY, "Range");
     if let Some(etag) = etag {
         response_builder = response_builder.header(header::ETAG, etag);
     }
