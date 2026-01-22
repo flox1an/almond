@@ -194,14 +194,31 @@ pub async fn handle_file_request(
                 }
 
                 // Try upstream servers with prioritization: xs → UPSTREAM_SERVERS → user servers (lazy)
-                match crate::handlers::upstream::try_upstream_servers(
-                    &state,
-                    &filename,
-                    req.headers(),
-                    custom_origin,
-                    xs_servers_to_use,
-                    author_pubkey.as_ref(),
-                ).await {
+                // Branch based on upstream mode: proxy vs redirect
+                let upstream_result = if state.upstream_mode.is_redirect() {
+                    // Redirect mode: HEAD check then 302 redirect
+                    info!("Using upstream redirect mode (cache_in_background: {})", state.upstream_mode.caches_in_background());
+                    crate::handlers::upstream::try_upstream_redirect(
+                        &state,
+                        &filename,
+                        custom_origin,
+                        xs_servers_to_use,
+                        author_pubkey.as_ref(),
+                        state.upstream_mode.caches_in_background(),
+                    ).await
+                } else {
+                    // Proxy mode: stream from upstream while saving locally (default)
+                    crate::handlers::upstream::try_upstream_servers(
+                        &state,
+                        &filename,
+                        req.headers(),
+                        custom_origin,
+                        xs_servers_to_use,
+                        author_pubkey.as_ref(),
+                    ).await
+                };
+
+                match upstream_result {
                     Ok(response) => Ok(response),
                     Err(_) => {
                         // Add to failed lookups cache only if no custom origin or xs servers were used

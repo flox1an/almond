@@ -328,6 +328,302 @@ pub async fn try_upstream_servers(
     Err(StatusCode::NOT_FOUND)
 }
 
+/// Try to find file on upstream servers and return a 302 redirect response
+/// Prioritization: custom_origin → xs_servers → UPSTREAM_SERVERS → user servers (lazy fetch)
+/// Uses HEAD requests to verify file exists before redirecting
+pub async fn try_upstream_redirect(
+    state: &AppState,
+    filename: &str,
+    custom_origin: Option<&str>,
+    xs_servers: Option<&[String]>,
+    author_pubkey: Option<&nostr_relay_pool::prelude::PublicKey>,
+    cache_in_background: bool,
+) -> Result<Response, StatusCode> {
+    // Extract hash from filename for internal tracking
+    let file_hash = crate::utils::get_sha256_hash_from_filename(filename)
+        .unwrap_or_else(|| filename.to_string());
+
+    // Check if this file is already being downloaded
+    if state.ongoing_downloads.read().await.contains_key(&file_hash) {
+        info!(
+            "File {} is already being downloaded in background, redirecting to upstream",
+            file_hash
+        );
+    }
+
+    // Track which servers we've already tried to avoid duplicate HEAD requests
+    let mut tried_servers = std::collections::HashSet::<String>::new();
+    let client = Client::new();
+
+    // Try custom origin first if provided (single server)
+    if let Some(origin_url) = custom_origin {
+        let normalized_origin = match validate_upstream_url(origin_url).await {
+            Ok(url) => url,
+            Err(e) => {
+                warn!("Custom origin URL validation failed (SSRF protection): {} - {}", origin_url, e);
+                String::new()
+            }
+        };
+
+        if !normalized_origin.is_empty() {
+            info!("Trying custom origin server first (HEAD): {}", normalized_origin);
+            tried_servers.insert(normalized_origin.clone());
+            let file_url = format!("{}/{}", normalized_origin.trim_end_matches('/'), filename);
+
+            if let Some(response) = try_head_and_redirect(
+                state, &client, &file_url, &file_hash, filename, cache_in_background
+            ).await {
+                return Ok(response);
+            }
+        }
+    }
+
+    // Priority 1: Try xs servers if provided
+    if let Some(servers) = xs_servers {
+        info!("Priority 1: Trying xs servers (HEAD) ({} servers)", servers.len());
+        for server in servers {
+            let normalized_server = match validate_upstream_url(server).await {
+                Ok(url) => url,
+                Err(e) => {
+                    warn!("xs server URL validation failed (SSRF protection): {} - {}", server, e);
+                    continue;
+                }
+            };
+
+            if tried_servers.contains(&normalized_server) {
+                debug!("Skipping already-tried server: {}", normalized_server);
+                continue;
+            }
+
+            tried_servers.insert(normalized_server.clone());
+            let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
+            info!("Trying xs server (HEAD): {}", file_url);
+
+            if let Some(response) = try_head_and_redirect(
+                state, &client, &file_url, &file_hash, filename, cache_in_background
+            ).await {
+                return Ok(response);
+            }
+        }
+        info!("All xs servers failed HEAD check, trying local UPSTREAM_SERVERS");
+    }
+
+    // Priority 2: Try local UPSTREAM_SERVERS
+    if !state.upstream_servers.is_empty() {
+        info!("Priority 2: Trying local UPSTREAM_SERVERS (HEAD) ({} servers)", state.upstream_servers.len());
+        for server in &state.upstream_servers {
+            let normalized_server = match validate_upstream_url(server).await {
+                Ok(url) => url,
+                Err(e) => {
+                    warn!("UPSTREAM_SERVER URL validation failed (SSRF protection): {} - {}", server, e);
+                    continue;
+                }
+            };
+
+            if tried_servers.contains(&normalized_server) {
+                debug!("Skipping already-tried server: {}", normalized_server);
+                continue;
+            }
+
+            tried_servers.insert(normalized_server.clone());
+            let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
+            info!("Trying local UPSTREAM_SERVER (HEAD): {}", file_url);
+
+            if let Some(response) = try_head_and_redirect(
+                state, &client, &file_url, &file_hash, filename, cache_in_background
+            ).await {
+                return Ok(response);
+            }
+        }
+        info!("All local UPSTREAM_SERVERS failed HEAD check");
+    }
+
+    // Priority 3: Fetch and try user servers (lazy fetch) if author pubkey is provided
+    if let Some(pubkey) = author_pubkey {
+        info!("Priority 3: Fetching user server list for pubkey: {} (lazy fetch)", pubkey.to_hex());
+        match crate::services::blossom_servers::fetch_user_server_list(state, pubkey).await {
+            Ok(user_servers) if !user_servers.is_empty() => {
+                info!("Fetched {} servers from user's server list (BUD-03)", user_servers.len());
+                for server in &user_servers {
+                    let normalized_server = match validate_upstream_url(server).await {
+                        Ok(url) => url,
+                        Err(e) => {
+                            warn!("User server URL validation failed (SSRF protection): {} - {}", server, e);
+                            continue;
+                        }
+                    };
+
+                    if tried_servers.contains(&normalized_server) {
+                        debug!("Skipping already-tried server: {}", normalized_server);
+                        continue;
+                    }
+
+                    tried_servers.insert(normalized_server.clone());
+                    let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
+                    info!("Trying user server (HEAD): {}", file_url);
+
+                    if let Some(response) = try_head_and_redirect(
+                        state, &client, &file_url, &file_hash, filename, cache_in_background
+                    ).await {
+                        return Ok(response);
+                    }
+                }
+                info!("All user servers failed HEAD check");
+            }
+            Ok(_) => {
+                info!("User server list is empty for pubkey: {}", pubkey.to_hex());
+            }
+            Err(e) => {
+                warn!("Failed to fetch user server list for pubkey {}: {}", pubkey.to_hex(), e);
+            }
+        }
+    }
+
+    Err(StatusCode::NOT_FOUND)
+}
+
+/// Try HEAD request and return redirect response if successful
+async fn try_head_and_redirect(
+    state: &AppState,
+    client: &Client,
+    file_url: &str,
+    file_hash: &str,
+    filename: &str,
+    cache_in_background: bool,
+) -> Option<Response<Body>> {
+    match client.head(file_url).send().await {
+        Ok(response) if response.status().is_success() => {
+            info!("HEAD check succeeded for: {}", file_url);
+
+            // Get content type and size from HEAD response for background download
+            let content_type = extract_content_type_from_response(response.headers());
+            let content_length = response.content_length();
+
+            // Start background download if requested and not already downloading
+            if cache_in_background {
+                let already_downloading = state.ongoing_downloads.read().await.contains_key(file_hash);
+
+                if !already_downloading {
+                    // Check size limit before starting background download
+                    let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
+                    let should_cache = match content_length {
+                        Some(len) if len > max_size_bytes => {
+                            info!(
+                                "File {} too large for background cache: {} bytes (max: {} MB)",
+                                file_hash, len, state.max_upstream_download_size_mb
+                            );
+                            false
+                        }
+                        _ => true,
+                    };
+
+                    if should_cache {
+                        info!("Starting background download for caching: {}", file_hash);
+                        let state_clone = state.clone();
+                        let file_url_clone = file_url.to_string();
+                        let file_hash_clone = file_hash.to_string();
+                        let content_type_clone = content_type.clone();
+
+                        tokio::spawn(async move {
+                            start_background_download_for_redirect(
+                                &state_clone,
+                                &file_url_clone,
+                                &file_hash_clone,
+                                &content_type_clone,
+                            ).await;
+                        });
+                    }
+                } else {
+                    info!("File {} already being downloaded, skipping duplicate background download", file_hash);
+                }
+            }
+
+            // Build 302 redirect response
+            match build_redirect_response(file_url, filename) {
+                Ok(response) => Some(response),
+                Err(e) => {
+                    error!("Failed to build redirect response: {}", e);
+                    None
+                }
+            }
+        }
+        Ok(response) => {
+            debug!("HEAD check failed for {} with status: {}", file_url, response.status());
+            None
+        }
+        Err(e) => {
+            debug!("HEAD request failed for {}: {}", file_url, e);
+            None
+        }
+    }
+}
+
+/// Build a 302 redirect response to the upstream URL
+fn build_redirect_response(upstream_url: &str, filename: &str) -> Result<Response<Body>, StatusCode> {
+    info!("Redirecting to upstream: {}", upstream_url);
+
+    // Extract clean filename for logging
+    let clean_filename = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+
+    Response::builder()
+        .status(StatusCode::FOUND) // 302
+        .header(header::LOCATION, upstream_url)
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("inline; filename=\"{}\"", clean_filename),
+        )
+        .body(Body::empty())
+        .map_err(|e| {
+            error!("Failed to build redirect response: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+/// Start a background download for caching after redirect
+async fn start_background_download_for_redirect(
+    state: &AppState,
+    file_url: &str,
+    file_hash: &str,
+    content_type: &str,
+) {
+    let client = Client::new();
+
+    // Make GET request to download the file
+    match client.get(file_url).send().await {
+        Ok(response) if response.status().is_success() => {
+            info!("Starting background download from: {}", file_url);
+
+            // Prepare download state
+            match prepare_download_state(state, file_hash, content_type).await {
+                Ok((temp_path, _written_len, _notify)) => {
+                    // Use the existing background download function
+                    download_file_from_upstream_background(
+                        state,
+                        file_url,
+                        response,
+                        file_hash,
+                        content_type,
+                        &temp_path,
+                    ).await;
+                }
+                Err(e) => {
+                    error!("Failed to prepare download state for {}: {:?}", file_hash, e);
+                }
+            }
+        }
+        Ok(response) => {
+            warn!("Background download GET failed for {} with status: {}", file_url, response.status());
+        }
+        Err(e) => {
+            warn!("Background download GET request failed for {}: {}", file_url, e);
+        }
+    }
+}
+
 /// Handle successful upstream response (consolidates range and non-range logic)
 async fn handle_successful_upstream_response(
     state: &AppState,

@@ -202,6 +202,10 @@ Standard Cashu token string starting with `cashuA` or `cashuB`.
 
 #### Upstream Configuration
 - `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback
+- `UPSTREAM_MODE`: How to handle upstream requests - `proxy`, `redirect`, or `redirect_and_cache` (default: `proxy`)
+  - `proxy`: Stream from upstream while saving locally (current behavior)
+  - `redirect`: Issue 302 redirect to upstream, no local caching
+  - `redirect_and_cache`: Issue 302 redirect to upstream, download in background for future requests
 - `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: `100`)
 
 #### Chunked Upload Configuration
@@ -439,8 +443,14 @@ Expected build times:
 - Range request support for upstream proxying
 - Background download while proxying range requests
 
+### Upstream Modes
+- **proxy** (default): Stream from upstream while saving locally. Client receives data immediately while file is cached.
+- **redirect**: Issue 302 redirect to upstream. No local caching. Reduces bandwidth/CPU on Almond server.
+- **redirect_and_cache**: Issue 302 redirect to upstream, but also download in background for future requests. Best of both worlds - immediate redirect for current request, local serving for future requests.
+
 ### Configuration
 - `UPSTREAM_SERVERS`: Comma-separated list of upstream servers
+- `UPSTREAM_MODE`: How to handle upstream requests (`proxy`, `redirect`, `redirect_and_cache`)
 - `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads
 - `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED`: Enable custom origin parameter
 

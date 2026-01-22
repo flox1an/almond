@@ -264,8 +264,14 @@ async fn load_app_state() -> AppState {
         })
         .collect();
 
+    // Parse upstream mode from environment variable (default: proxy)
+    let upstream_mode = models::UpstreamMode::from_str_with_default(
+        &env::var("UPSTREAM_MODE").unwrap_or_else(|_| "proxy".to_string()),
+    );
+
     if !upstream_servers.is_empty() {
         info!("⚙️ Upstream servers: {:?}", upstream_servers);
+        info!("⚙️ Upstream mode: {}", upstream_mode.as_str());
         info!(
             "⚙️ Upstream download size limit: {} MB",
             max_upstream_download_size_mb
@@ -462,6 +468,7 @@ async fn load_app_state() -> AppState {
         files_downloaded: Arc::new(RwLock::new(0)),
         upload_throughput_data: Arc::new(RwLock::new(Vec::new())),
         upstream_servers,
+        upstream_mode,
         max_upstream_download_size_mb,
         max_chunk_size_mb,
         chunk_cleanup_timeout_minutes,

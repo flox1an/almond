@@ -54,6 +54,50 @@ impl FeatureMode {
     }
 }
 
+/// Upstream mode controlling how files are fetched from upstream servers
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UpstreamMode {
+    /// Proxy: Stream from upstream while saving locally (current behavior)
+    #[default]
+    Proxy,
+    /// Redirect: Issue 302 redirect to upstream, no local caching
+    Redirect,
+    /// RedirectAndCache: Issue 302 redirect to upstream, download in background for future requests
+    RedirectAndCache,
+}
+
+impl UpstreamMode {
+    /// Parse from string value (proxy/redirect/redirect_and_cache, case-insensitive)
+    /// Falls back to Proxy if the string doesn't match
+    pub fn from_str_with_default(s: &str) -> Self {
+        match s.to_lowercase().replace('-', "_").as_str() {
+            "proxy" => UpstreamMode::Proxy,
+            "redirect" => UpstreamMode::Redirect,
+            "redirect_and_cache" | "redirectandcache" => UpstreamMode::RedirectAndCache,
+            _ => UpstreamMode::Proxy,
+        }
+    }
+
+    /// Check if this mode uses redirect (vs proxy)
+    pub fn is_redirect(&self) -> bool {
+        matches!(self, UpstreamMode::Redirect | UpstreamMode::RedirectAndCache)
+    }
+
+    /// Check if this mode caches in background after redirect
+    pub fn caches_in_background(&self) -> bool {
+        matches!(self, UpstreamMode::RedirectAndCache)
+    }
+
+    /// Convert to string for logging
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpstreamMode::Proxy => "proxy",
+            UpstreamMode::Redirect => "redirect",
+            UpstreamMode::RedirectAndCache => "redirect_and_cache",
+        }
+    }
+}
+
 /// Action to take when a blob is reported (BUD-09)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReportAction {
@@ -113,6 +157,7 @@ pub struct AppState {
     pub files_downloaded: Arc<RwLock<u64>>,
     pub upload_throughput_data: Arc<RwLock<Vec<(Instant, u64)>>>,
     pub upstream_servers: Vec<String>,
+    pub upstream_mode: UpstreamMode,
     pub max_upstream_download_size_mb: u64,
     pub max_chunk_size_mb: u64,
     pub chunk_cleanup_timeout_minutes: u64,
@@ -301,5 +346,43 @@ mod tests {
         assert_eq!(query.xs[0], "blossom.primal.net");
         assert_eq!(query.xs[1], "video.nostr.build");
         assert_eq!(query.author_pubkey, Some("08039bc2786f9f58c94146c6666fac9a7d7ceb40d0798a8f49140763cc715053".to_string()));
+    }
+
+    #[test]
+    fn test_upstream_mode_parsing() {
+        // Test all valid values
+        assert_eq!(UpstreamMode::from_str_with_default("proxy"), UpstreamMode::Proxy);
+        assert_eq!(UpstreamMode::from_str_with_default("redirect"), UpstreamMode::Redirect);
+        assert_eq!(UpstreamMode::from_str_with_default("redirect_and_cache"), UpstreamMode::RedirectAndCache);
+
+        // Test case insensitivity
+        assert_eq!(UpstreamMode::from_str_with_default("PROXY"), UpstreamMode::Proxy);
+        assert_eq!(UpstreamMode::from_str_with_default("REDIRECT"), UpstreamMode::Redirect);
+        assert_eq!(UpstreamMode::from_str_with_default("REDIRECT_AND_CACHE"), UpstreamMode::RedirectAndCache);
+
+        // Test hyphen variant
+        assert_eq!(UpstreamMode::from_str_with_default("redirect-and-cache"), UpstreamMode::RedirectAndCache);
+
+        // Test default fallback for invalid values
+        assert_eq!(UpstreamMode::from_str_with_default("invalid"), UpstreamMode::Proxy);
+        assert_eq!(UpstreamMode::from_str_with_default(""), UpstreamMode::Proxy);
+    }
+
+    #[test]
+    fn test_upstream_mode_methods() {
+        // Test is_redirect
+        assert!(!UpstreamMode::Proxy.is_redirect());
+        assert!(UpstreamMode::Redirect.is_redirect());
+        assert!(UpstreamMode::RedirectAndCache.is_redirect());
+
+        // Test caches_in_background
+        assert!(!UpstreamMode::Proxy.caches_in_background());
+        assert!(!UpstreamMode::Redirect.caches_in_background());
+        assert!(UpstreamMode::RedirectAndCache.caches_in_background());
+
+        // Test as_str
+        assert_eq!(UpstreamMode::Proxy.as_str(), "proxy");
+        assert_eq!(UpstreamMode::Redirect.as_str(), "redirect");
+        assert_eq!(UpstreamMode::RedirectAndCache.as_str(), "redirect_and_cache");
     }
 }
