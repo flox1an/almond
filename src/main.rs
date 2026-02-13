@@ -611,8 +611,8 @@ fn start_dvm_refresh_job(state: AppState) {
             state.dvm_allowed_kinds
         );
 
-        // Refresh every 4 hours, same as WoT
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(4 * 3600));
+        // Refresh every 5 minutes
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
         loop {
             interval.tick().await;
             match refresh_dvm_pubkeys(&state.dvm_allowed_kinds).await {
