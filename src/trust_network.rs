@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use nostr_relay_pool::{
@@ -143,4 +143,35 @@ pub async fn refresh_trust_network(
 
     pool.disconnect().await;
     Ok(trusted_pubkeys)
+}
+
+/// Discover DVM pubkeys by querying for kind 31990 (NIP-89 DVM announcement) events
+/// that have a #k tag matching any of the allowed kinds.
+pub async fn refresh_dvm_pubkeys(allowed_kinds: &[u16]) -> Result<HashSet<PublicKey>> {
+    let pool = create_pool().await?;
+
+    let k_values: Vec<String> = allowed_kinds.iter().map(|k| k.to_string()).collect();
+
+    println!(
+        "🤖 Fetching DVM announcements for kinds: {:?}",
+        allowed_kinds
+    );
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(31990))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::K), k_values);
+
+    let timeout = Duration::from_secs(15);
+    let events = pool
+        .fetch_events(filter, timeout, ReqExitPolicy::default())
+        .await?;
+
+    println!("🤖 Received {} DVM announcement events", events.len());
+
+    let dvm_pubkeys: HashSet<PublicKey> = events.iter().map(|e| e.pubkey).collect();
+
+    println!("🤖 Found {} unique DVM pubkeys", dvm_pubkeys.len());
+
+    pool.disconnect().await;
+    Ok(dvm_pubkeys)
 }

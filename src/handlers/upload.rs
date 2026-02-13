@@ -73,6 +73,7 @@ pub async fn upload_file(
             return Err(AppError::Forbidden("Upload feature is disabled".to_string()));
         }
         crate::models::FeatureMode::Wot => auth::AuthMode::WotOnly,
+        crate::models::FeatureMode::Dvm => auth::AuthMode::DvmOnly,
         crate::models::FeatureMode::Public => auth::AuthMode::Unrestricted,
     };
 
@@ -144,6 +145,7 @@ pub async fn mirror_blob(
             return Err(AppError::Forbidden("Mirror feature is disabled".to_string()));
         }
         crate::models::FeatureMode::Wot => auth::AuthMode::WotOnly,
+        crate::models::FeatureMode::Dvm => auth::AuthMode::DvmOnly,
         crate::models::FeatureMode::Public => auth::AuthMode::Unrestricted,
     };
 
@@ -309,6 +311,7 @@ pub async fn patch_upload(
             return Err(AppError::Forbidden("Upload feature is disabled".to_string()));
         }
         crate::models::FeatureMode::Wot => auth::AuthMode::WotOnly,
+        crate::models::FeatureMode::Dvm => auth::AuthMode::DvmOnly,
         crate::models::FeatureMode::Public => auth::AuthMode::Unrestricted,
     };
 

@@ -4,7 +4,7 @@ use cdk::wallet::Wallet as CdkWallet;
 use nostr_relay_pool::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{atomic::AtomicU64, Arc},
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -18,6 +18,8 @@ pub enum FeatureMode {
     Off,
     /// Feature is enabled only for WOT (Web of Trust) pubkeys
     Wot,
+    /// Feature is enabled only for DVMs announcing allowed kinds
+    Dvm,
     /// Feature is enabled for everyone
     Public,
 }
@@ -29,14 +31,15 @@ impl FeatureMode {
         match s.to_lowercase().as_str() {
             "off" | "false" => FeatureMode::Off,
             "wot" => FeatureMode::Wot,
+            "dvm" => FeatureMode::Dvm,
             "public" | "true" => FeatureMode::Public,
             _ => default,
         }
     }
 
-    /// Check if feature is enabled (wot or public)
+    /// Check if feature is enabled (wot, dvm, or public)
     pub fn is_enabled(&self) -> bool {
-        matches!(self, FeatureMode::Wot | FeatureMode::Public)
+        matches!(self, FeatureMode::Wot | FeatureMode::Dvm | FeatureMode::Public)
     }
 
     /// Check if feature requires WOT validation
@@ -44,11 +47,17 @@ impl FeatureMode {
         matches!(self, FeatureMode::Wot)
     }
 
+    /// Check if feature requires DVM validation
+    pub fn requires_dvm(&self) -> bool {
+        matches!(self, FeatureMode::Dvm)
+    }
+
     /// Convert to string for metrics/logging
     pub fn as_str(&self) -> &'static str {
         match self {
             FeatureMode::Off => "off",
             FeatureMode::Wot => "wot",
+            FeatureMode::Dvm => "dvm",
             FeatureMode::Public => "public",
         }
     }
@@ -152,6 +161,10 @@ pub struct AppState {
     pub changes_pending: Arc<RwLock<bool>>,
     pub allowed_pubkeys: Vec<PublicKey>,
     pub trusted_pubkeys: Arc<RwLock<HashMap<PublicKey, usize>>>,
+    /// Pubkeys of DVMs that announce services for allowed kinds
+    pub dvm_pubkeys: Arc<RwLock<HashSet<PublicKey>>>,
+    /// NIP-90 kinds that DVMs must announce to be allowed (e.g., 5207 for video-transform-hls)
+    pub dvm_allowed_kinds: Vec<u16>,
     pub max_file_age_days: u64,
     pub files_uploaded: Arc<RwLock<u64>>,
     pub files_downloaded: Arc<RwLock<u64>>,

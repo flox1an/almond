@@ -17,6 +17,8 @@ pub enum AuthMode {
     Unrestricted,
     /// WoT-only mode - requires WoT check, enforces trusted_pubkeys validation
     WotOnly,
+    /// DVM-only mode - requires DVM announcement check, enforces dvm_pubkeys validation
+    DvmOnly,
 }
 
 /// Parse and decode Nostr auth header
@@ -114,6 +116,20 @@ pub async fn check_pubkey_authorization(
             if !trusted_pubkeys.contains_key(&event.pubkey) {
                 return Err(AppError::Unauthorized(
                     "Pubkey not in Web of Trust".to_string(),
+                ));
+            }
+        }
+        AuthMode::DvmOnly => {
+            // DVM-only mode: check allowed_pubkeys first, then require DVM announcement
+            if !state.allowed_pubkeys.is_empty() && state.allowed_pubkeys.contains(&event.pubkey) {
+                return Ok(());
+            }
+
+            // Check DVM pubkeys
+            let dvm_pubkeys = state.dvm_pubkeys.read().await;
+            if !dvm_pubkeys.contains(&event.pubkey) {
+                return Err(AppError::Unauthorized(
+                    "Pubkey not a recognized DVM for allowed kinds".to_string(),
                 ));
             }
         }

@@ -14,7 +14,7 @@ use std::{collections::HashMap, env, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::signal;
 
 use crate::models::AppState;
-use crate::trust_network::refresh_trust_network;
+use crate::trust_network::{refresh_dvm_pubkeys, refresh_trust_network};
 use crate::utils::{build_file_index, enforce_storage_limits, cleanup_abandoned_chunks, cleanup_expired_failed_lookups, cleanup_expired_blossom_server_lists};
 use axum::Router;
 use dotenvy::dotenv;
@@ -418,6 +418,37 @@ async fn load_app_state() -> AppState {
     };
     info!("⚙️ Filter algorithm: {}", filter_algorithm);
 
+    // Parse DVM allowed kinds from environment variable
+    let dvm_allowed_kinds: Vec<u16> = env::var("DVM_ALLOWED_KINDS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|k| {
+            let k = k.trim();
+            if k.is_empty() {
+                None
+            } else {
+                match k.parse::<u16>() {
+                    Ok(kind) => Some(kind),
+                    Err(e) => {
+                        error!("Failed to parse DVM kind '{}': {}", k, e);
+                        None
+                    }
+                }
+            }
+        })
+        .collect();
+
+    // Validate: if any feature uses DVM mode, kinds must be configured
+    let needs_dvm = feature_upload_enabled.requires_dvm()
+        || feature_mirror_enabled.requires_dvm();
+    if needs_dvm && dvm_allowed_kinds.is_empty() {
+        panic!("DVM_ALLOWED_KINDS must be set when any feature uses 'dvm' mode");
+    }
+
+    if !dvm_allowed_kinds.is_empty() {
+        info!("🤖 DVM allowed kinds: {:?}", dvm_allowed_kinds);
+    }
+
     // Parse allowed pubkeys from environment variable
     let allowed_pubkeys: Vec<PublicKey> = env::var("ALLOWED_NPUBS")
         .unwrap_or_default()
@@ -463,6 +494,8 @@ async fn load_app_state() -> AppState {
         changes_pending: Arc::new(RwLock::new(true)),
         allowed_pubkeys,
         trusted_pubkeys: Arc::new(RwLock::new(HashMap::new())),
+        dvm_pubkeys: Arc::new(RwLock::new(std::collections::HashSet::new())),
+        dvm_allowed_kinds,
         max_file_age_days,
         files_uploaded: Arc::new(RwLock::new(0)),
         files_downloaded: Arc::new(RwLock::new(0)),
@@ -563,6 +596,39 @@ fn start_trust_network_refresh_job(state: AppState) {
     });
 }
 
+fn start_dvm_refresh_job(state: AppState) {
+    tokio::spawn(async move {
+        let needs_dvm = state.feature_upload_enabled.requires_dvm()
+            || state.feature_mirror_enabled.requires_dvm();
+
+        if !needs_dvm || state.dvm_allowed_kinds.is_empty() {
+            info!("⚠️ DVM refresh disabled - no features using DVM mode");
+            return;
+        }
+
+        info!(
+            "✅ DVM refresh enabled - allowed kinds: {:?}",
+            state.dvm_allowed_kinds
+        );
+
+        // Refresh every 4 hours, same as WoT
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(4 * 3600));
+        loop {
+            interval.tick().await;
+            match refresh_dvm_pubkeys(&state.dvm_allowed_kinds).await {
+                Ok(pubkeys) => {
+                    info!("🤖 DVM refresh complete: {} pubkeys", pubkeys.len());
+                    let mut dvm_pubkeys = state.dvm_pubkeys.write().await;
+                    *dvm_pubkeys = pubkeys;
+                }
+                Err(e) => {
+                    error!("Failed to refresh DVM pubkeys: {}", e);
+                }
+            }
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
@@ -585,6 +651,7 @@ async fn main() {
     start_cleanup_job(state.clone());
     start_chunk_cleanup_job(state.clone());
     start_trust_network_refresh_job(state.clone());
+    start_dvm_refresh_job(state.clone());
 
     let app = create_app(state.clone()).await;
 

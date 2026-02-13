@@ -173,12 +173,13 @@ impl Metrics {
         mirror: &crate::models::FeatureMode,
         custom_upstream: &crate::models::FeatureMode,
     ) {
-        // Map FeatureMode to numeric values: 0=off, 1=wot, 2=public
+        // Map FeatureMode to numeric values: 0=off, 1=wot, 2=public, 3=dvm
         let to_metric_value = |mode: &crate::models::FeatureMode| -> i64 {
             match mode {
                 crate::models::FeatureMode::Off => 0,
                 crate::models::FeatureMode::Wot => 1,
                 crate::models::FeatureMode::Public => 2,
+                crate::models::FeatureMode::Dvm => 3,
             }
         };
 
