@@ -18,14 +18,14 @@ pub fn generate_self_signed_cert(
         "::1".to_string(),
     ];
 
-    let CertifiedKey { cert, key_pair } = generate_simple_self_signed(subject_alt_names)?;
+    let CertifiedKey { cert, signing_key } = generate_simple_self_signed(subject_alt_names)?;
 
     // Write certificate
     fs::write(cert_path, cert.pem())?;
     info!("✅ Certificate written to: {}", cert_path.display());
 
     // Write private key
-    fs::write(key_path, key_pair.serialize_pem())?;
+    fs::write(key_path, signing_key.serialize_pem())?;
     info!("✅ Private key written to: {}", key_path.display());
 
     warn!("⚠️  Self-signed certificate generated - clients will need to trust it");

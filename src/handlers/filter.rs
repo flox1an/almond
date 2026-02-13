@@ -140,7 +140,7 @@ impl FilterType {
 
     fn serialize(&self) -> Vec<u8> {
         match self {
-            FilterType::Bloom(bloom) => bloom.bitmap().to_vec(),
+            FilterType::Bloom(bloom) => bloom.as_slice().to_vec(),
             FilterType::Fuse8(filter) => serialize_binary_fuse_as_array(filter).unwrap_or_default(),
             FilterType::Fuse16(filter) => serialize_binary_fuse_as_array(filter).unwrap_or_default(),
             FilterType::Fuse32(filter) => serialize_binary_fuse_as_array(filter).unwrap_or_default(),
@@ -158,7 +158,8 @@ fn build_filter(
     match algorithm {
         "bloom" => {
             let num_items = keys.len().max(1);
-            let mut bloom: Bloom<Vec<u8>> = Bloom::new_for_fp_rate(num_items, fp_rate);
+            let mut bloom: Bloom<Vec<u8>> = Bloom::new_for_fp_rate(num_items, fp_rate)
+                .map_err(|_| "failed to create bloom filter")?;
             for key in keys {
                 bloom.set(&key.as_bytes().to_vec());
             }
@@ -296,7 +297,7 @@ pub async fn get_filter(
     if let FilterType::Bloom(ref bloom) = filter {
         payload["fp"] = serde_json::json!(fp_rate);
         payload["k"] = serde_json::json!(bloom.number_of_hash_functions());
-        payload["m"] = serde_json::json!(bloom.bitmap().len() * 8);
+        payload["m"] = serde_json::json!(bloom.as_slice().len() * 8);
     }
 
     let body = serde_json::to_vec(&payload)

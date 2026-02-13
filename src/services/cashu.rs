@@ -174,9 +174,8 @@ pub async fn init_wallet(
         seed
     } else {
         // Generate new cryptographically secure seed
-        use rand::RngCore;
         let mut seed = [0u8; 64];
-        rand::thread_rng().fill_bytes(&mut seed);
+        rand::fill(&mut seed);
 
         // Save seed to file
         std::fs::write(&seed_path, &seed).map_err(|e| {

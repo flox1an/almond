@@ -28,12 +28,13 @@ pub async fn get_wot(
 	let trusted_pubkeys = state.trusted_pubkeys.read().await;
 	let num_items = trusted_pubkeys.len().max(1);
 	let fp = q.fp.unwrap_or(0.01).clamp(1e-6, 0.2);
-	let mut bloom = Bloom::new_for_fp_rate(num_items, fp);
+	let mut bloom = Bloom::new_for_fp_rate(num_items, fp)
+		.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 	for pubkey in trusted_pubkeys.keys() {
 		// Insert pubkey as hex string bytes
 		bloom.set(pubkey.to_hex().as_bytes());
 	}
-    let bits = bloom.bitmap();
+    let bits = bloom.as_slice();
 
     // If a test pubkey is provided, respond with JSON test result regardless of format
     if let Some(mut probe) = q.test {
@@ -52,7 +53,7 @@ pub async fn get_wot(
                 .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
             return Ok(resp);
         }
-        let maybe = bloom.check(probe.as_bytes());
+        let maybe = bloom.check(&probe.as_bytes().to_vec());
         let payload = serde_json::json!({
             "test": probe,
             "maybe": maybe,
@@ -82,7 +83,7 @@ pub async fn get_wot(
 			"fp": fp,
 			"k": bloom.number_of_hash_functions(),
 			"m": bits.len() * 8,
-			"bits_b64": BASE64.encode(bits),
+			"bits_b64": BASE64.encode(&bits),
 		});
 		let body = serde_json::to_vec(&payload)
 			.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
