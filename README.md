@@ -92,6 +92,10 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 
 ### Upstream Configuration
 - `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback (optional)
+- `UPSTREAM_MODE`: How to handle upstream requests (default: `proxy`)
+  - `proxy` — Stream from upstream to client while saving locally. Client gets data immediately and the blob is cached for future requests.
+  - `redirect` — Return a 302 redirect to the upstream server. No local caching, minimal server load.
+  - `redirect_and_cache` — Return a 302 redirect to the upstream, then download the blob in the background for future local serving.
 - `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: 100)
 
 ### Upload Configuration
