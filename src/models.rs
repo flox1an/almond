@@ -165,6 +165,10 @@ pub struct AppState {
     pub dvm_pubkeys: Arc<RwLock<HashSet<PublicKey>>>,
     /// NIP-90 kinds that DVMs must announce to be allowed (e.g., 5207 for video-transform-hls)
     pub dvm_allowed_kinds: Vec<u16>,
+    /// Relays to query for DVM announcements
+    pub dvm_relays: Vec<String>,
+    /// How often to refresh DVM pubkeys (in minutes)
+    pub dvm_refresh_interval_mins: u64,
     pub max_file_age_days: u64,
     pub files_uploaded: Arc<RwLock<u64>>,
     pub files_downloaded: Arc<RwLock<u64>>,

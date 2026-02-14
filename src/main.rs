@@ -449,6 +449,20 @@ async fn load_app_state() -> AppState {
         info!("🤖 DVM allowed kinds: {:?}", dvm_allowed_kinds);
     }
 
+    // Parse DVM relays from environment variable
+    let dvm_relays: Vec<String> = env::var("DVM_RELAYS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Parse DVM refresh interval from environment variable (default: 5 minutes)
+    let dvm_refresh_interval_mins: u64 = env::var("DVM_REFRESH_INTERVAL_MINS")
+        .unwrap_or_else(|_| "5".to_string())
+        .parse()
+        .unwrap_or(5);
+
     // Parse allowed pubkeys from environment variable
     let allowed_pubkeys: Vec<PublicKey> = env::var("ALLOWED_NPUBS")
         .unwrap_or_default()
@@ -496,6 +510,8 @@ async fn load_app_state() -> AppState {
         trusted_pubkeys: Arc::new(RwLock::new(HashMap::new())),
         dvm_pubkeys: Arc::new(RwLock::new(std::collections::HashSet::new())),
         dvm_allowed_kinds,
+        dvm_relays,
+        dvm_refresh_interval_mins,
         max_file_age_days,
         files_uploaded: Arc::new(RwLock::new(0)),
         files_downloaded: Arc::new(RwLock::new(0)),
@@ -607,15 +623,17 @@ fn start_dvm_refresh_job(state: AppState) {
         }
 
         info!(
-            "✅ DVM refresh enabled - allowed kinds: {:?}",
-            state.dvm_allowed_kinds
+            "✅ DVM refresh enabled - allowed kinds: {:?}, interval: {}m",
+            state.dvm_allowed_kinds, state.dvm_refresh_interval_mins
         );
 
-        // Refresh every 5 minutes
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
+        // Refresh periodically
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+            state.dvm_refresh_interval_mins * 60,
+        ));
         loop {
             interval.tick().await;
-            match refresh_dvm_pubkeys(&state.dvm_allowed_kinds).await {
+            match refresh_dvm_pubkeys(&state.dvm_allowed_kinds, &state.dvm_relays).await {
                 Ok(pubkeys) => {
                     info!("🤖 DVM refresh complete: {} pubkeys", pubkeys.len());
                     let mut dvm_pubkeys = state.dvm_pubkeys.write().await;

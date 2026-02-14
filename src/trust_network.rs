@@ -21,10 +21,12 @@ static SEED_RELAYS: &[&str] = &[
     "wss://no.str.cr",
     "wss://nostr21.com",
     "wss://nostrue.com",
+    "wss://relay.nostr.bg",
+    "wss://nostr.bitcoiner.social",
 ];
 
 /// Create and connect to a relay pool
-pub async fn create_pool() -> Result<RelayPool> {
+pub async fn create_pool(custom_relays: &[String]) -> Result<RelayPool> {
     let pool = RelayPool::new();
 
     let relay_options = RelayOptions::default().limits(RelayLimits {
@@ -35,8 +37,15 @@ pub async fn create_pool() -> Result<RelayPool> {
         },
     });
 
-    for seed_relay in SEED_RELAYS.iter().copied() {
-        pool.add_relay(seed_relay, relay_options.clone()).await?;
+    // Use custom relays if provided, otherwise use seed relays
+    if !custom_relays.is_empty() {
+        for relay in custom_relays {
+            pool.add_relay(relay, relay_options.clone()).await?;
+        }
+    } else {
+        for seed_relay in SEED_RELAYS.iter().copied() {
+            pool.add_relay(seed_relay, relay_options.clone()).await?;
+        }
     }
 
     pool.connect().await;
@@ -92,7 +101,7 @@ pub async fn refresh_trust_network(
     owner_pubkeys: &[PublicKey],
 ) -> Result<HashMap<PublicKey, usize>> {
     // Create and connect to the relay pool
-    let pool = create_pool().await?;
+    let pool = create_pool(&[]).await?;
 
     // Use local mutable state.
     let mut pubkey_follower_count: HashMap<String, usize> = HashMap::new();
@@ -147,8 +156,11 @@ pub async fn refresh_trust_network(
 
 /// Discover DVM pubkeys by querying for kind 31990 (NIP-89 DVM announcement) events
 /// that have a #k tag matching any of the allowed kinds.
-pub async fn refresh_dvm_pubkeys(allowed_kinds: &[u16]) -> Result<HashSet<PublicKey>> {
-    let pool = create_pool().await?;
+pub async fn refresh_dvm_pubkeys(
+    allowed_kinds: &[u16],
+    custom_relays: &[String],
+) -> Result<HashSet<PublicKey>> {
+    let pool = create_pool(custom_relays).await?;
 
     let k_values: Vec<String> = allowed_kinds.iter().map(|k| k.to_string()).collect();
 
