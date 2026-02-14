@@ -16,6 +16,7 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
   - Personal server locked to one or a few users (`ALLOWED_NPUBS`)
   - Public upload server with very limited TTL (`MAX_FILE_AGE_DAYS`) or limited size (`MAX_TOTAL_SIZE`).
   - Caching edge server that serves content from upstream blossom servers (`UPSTREAM_SERVERS`).
+  - [Local Blossom Cache](#local-blossom-cache) on `127.0.0.1:24242` that proxies and caches blobs from remote servers via `?xs=` and `?as=` hints.
 
 ## Features
  - 🌸 Blossom API (BUD-1, BUD-2, BUD-4)
@@ -217,6 +218,54 @@ The `/app/files` directory in the container is used for file storage. Mount a ho
 ```bash
 docker run -p 3000:3000 -v /host/path:/app/files almond
 ```
+
+## Local Blossom Cache
+
+Almond can be configured as a [Local Blossom Cache](https://github.com/hzrd149/blossom/blob/master/implementations/local-blossom-cache.md) — a local proxy that caches blobs from remote Blossom servers on `127.0.0.1:24242`.
+
+Clients request blobs via `GET /<sha256>` with `?xs=` (server hints) and `?as=` (author pubkey) query parameters. If the blob isn't cached locally, Almond fetches it from the hinted servers (or the author's BUD-03 server list), caches it, and returns it to the client. Uploads and mirrors are disabled since the cache is populated entirely through proxying.
+
+### Configuration
+
+```bash
+BIND_ADDR=127.0.0.1:24242
+PUBLIC_URL=http://127.0.0.1:24242
+FEATURE_UPLOAD_ENABLED=off
+FEATURE_MIRROR_ENABLED=off
+FEATURE_LIST_ENABLED=true
+FEATURE_HOMEPAGE_ENABLED=true
+FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=public
+UPSTREAM_MODE=proxy
+MAX_TOTAL_SIZE=5000
+MAX_FILE_AGE_DAYS=30
+```
+
+### Docker
+
+```bash
+docker run -p 24242:24242 \
+  -v /path/to/cache:/app/files \
+  -e BIND_ADDR=0.0.0.0:24242 \
+  -e PUBLIC_URL=http://127.0.0.1:24242 \
+  -e FEATURE_UPLOAD_ENABLED=off \
+  -e FEATURE_MIRROR_ENABLED=off \
+  -e FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=public \
+  -e UPSTREAM_MODE=proxy \
+  -e MAX_TOTAL_SIZE=5000 \
+  -e MAX_FILE_AGE_DAYS=30 \
+  ghcr.io/flox1an/almond
+```
+
+### How it works
+
+1. Client requests `GET /abc123...def.jpg?xs=cdn.example.com&as=<pubkey>`
+2. Almond checks the local cache
+3. If cached, returns the blob immediately
+4. If not cached, tries `xs` server hints first, then fetches the author's BUD-03 server list (kind:10063) from `as` hints
+5. Caches the blob locally and returns it to the client
+6. Returns `404` if the blob can't be found on any hinted server
+
+Cache eviction is automatic — oldest files are removed when `MAX_TOTAL_SIZE` or `MAX_FILE_AGE_DAYS` limits are reached.
 
 ## Development
 
