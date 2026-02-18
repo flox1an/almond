@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use nostr_relay_pool::prelude::*;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::error;
+use tracing::{error, info};
 
 use crate::error::{AppError, AppResult};
 use crate::models::AppState;
@@ -125,12 +125,39 @@ pub async fn check_pubkey_authorization(
                 return Ok(());
             }
 
-            // Check DVM pubkeys
-            let dvm_pubkeys = state.dvm_pubkeys.read().await;
-            if !dvm_pubkeys.contains(&event.pubkey) {
-                return Err(AppError::Unauthorized(
-                    "Pubkey not a recognized DVM for allowed kinds".to_string(),
-                ));
+            // Check cached DVM pubkeys
+            {
+                let dvm_pubkeys = state.dvm_pubkeys.read().await;
+                if dvm_pubkeys.contains(&event.pubkey) {
+                    return Ok(());
+                }
+            }
+
+            // Fallback: Check if the pubkey has a recent announcement live (catch new DVMs between refreshes)
+            match crate::trust_network::check_dvm_announcement(
+                event.pubkey,
+                &state.dvm_allowed_kinds,
+                &state.dvm_relays,
+            )
+            .await
+            {
+                Ok(true) => {
+                    info!("🤖 New DVM recognized: {}", event.pubkey.to_hex());
+                    // Update cache
+                    let mut dvm_pubkeys = state.dvm_pubkeys.write().await;
+                    dvm_pubkeys.insert(event.pubkey);
+                }
+                Ok(false) => {
+                    return Err(AppError::Unauthorized(
+                        "Pubkey not a recognized DVM for allowed kinds".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    error!("Failed to check DVM announcement for {}: {}", event.pubkey.to_hex(), e);
+                    return Err(AppError::Unauthorized(
+                        "Pubkey not a recognized DVM for allowed kinds".to_string(),
+                    ));
+                }
             }
         }
     }

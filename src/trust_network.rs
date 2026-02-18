@@ -187,3 +187,28 @@ pub async fn refresh_dvm_pubkeys(
     pool.disconnect().await;
     Ok(dvm_pubkeys)
 }
+
+/// Check if a specific pubkey has a recent DVM announcement (kind 31990) for allowed kinds
+pub async fn check_dvm_announcement(
+    pubkey: PublicKey,
+    allowed_kinds: &[u16],
+    custom_relays: &[String],
+) -> Result<bool> {
+    let pool = create_pool(custom_relays).await?;
+
+    let k_values: Vec<String> = allowed_kinds.iter().map(|k| k.to_string()).collect();
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(31990))
+        .author(pubkey)
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::K), k_values)
+        .limit(1);
+
+    let timeout = Duration::from_secs(5);
+    let events = pool
+        .fetch_events(filter, timeout, ReqExitPolicy::default())
+        .await?;
+
+    pool.disconnect().await;
+    Ok(!events.is_empty())
+}
