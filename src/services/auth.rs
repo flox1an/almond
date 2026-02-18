@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use nostr_relay_pool::prelude::*;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{error, info};
 
 use crate::error::{AppError, AppResult};
@@ -125,11 +125,24 @@ pub async fn check_pubkey_authorization(
                 return Ok(());
             }
 
-            // Check cached DVM pubkeys
+            // Check cached DVM pubkeys (positive cache)
             {
                 let dvm_pubkeys = state.dvm_pubkeys.read().await;
                 if dvm_pubkeys.contains(&event.pubkey) {
                     return Ok(());
+                }
+            }
+
+            // Check negative cache: pubkeys that recently failed the live DVM check
+            const REJECTED_CACHE_TTL: Duration = Duration::from_secs(60);
+            {
+                let rejected = state.dvm_rejected_pubkeys.read().await;
+                if let Some(rejected_at) = rejected.get(&event.pubkey) {
+                    if rejected_at.elapsed() < REJECTED_CACHE_TTL {
+                        return Err(AppError::Unauthorized(
+                            "Pubkey not a recognized DVM for allowed kinds".to_string(),
+                        ));
+                    }
                 }
             }
 
@@ -143,11 +156,15 @@ pub async fn check_pubkey_authorization(
             {
                 Ok(true) => {
                     info!("🤖 New DVM recognized: {}", event.pubkey.to_hex());
-                    // Update cache
+                    // Update positive cache
                     let mut dvm_pubkeys = state.dvm_pubkeys.write().await;
                     dvm_pubkeys.insert(event.pubkey);
+                    return Ok(());
                 }
                 Ok(false) => {
+                    // Cache the negative result to avoid repeated relay queries
+                    let mut rejected = state.dvm_rejected_pubkeys.write().await;
+                    rejected.insert(event.pubkey, Instant::now());
                     return Err(AppError::Unauthorized(
                         "Pubkey not a recognized DVM for allowed kinds".to_string(),
                     ));

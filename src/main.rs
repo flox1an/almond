@@ -509,6 +509,7 @@ async fn load_app_state() -> AppState {
         allowed_pubkeys,
         trusted_pubkeys: Arc::new(RwLock::new(HashMap::new())),
         dvm_pubkeys: Arc::new(RwLock::new(std::collections::HashSet::new())),
+        dvm_rejected_pubkeys: Arc::new(RwLock::new(HashMap::new())),
         dvm_allowed_kinds,
         dvm_relays,
         dvm_refresh_interval_mins,

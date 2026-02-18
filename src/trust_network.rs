@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tracing::info;
 use nostr_relay_pool::{
     prelude::*,
     relay::limits::{RelayEventLimits, RelayMessageLimits},
@@ -67,7 +68,7 @@ async fn get_followers(
     let events = pool
         .fetch_events(filter, timeout, ReqExitPolicy::default())
         .await?;
-    println!("💻 Received {} contact list events", events.len());
+    info!("💻 Received {} contact list events", events.len());
 
     for event in events.iter() {
         let author = event.pubkey;
@@ -107,14 +108,14 @@ pub async fn refresh_trust_network(
     let mut pubkey_follower_count: HashMap<String, usize> = HashMap::new();
 
     // Phase 1: Fetch owner's follows
-    println!("🔍 Fetching owner's follows");
+    info!("🔍 Fetching owner's follows");
     let one_hop_network = get_followers(&pool, owner_pubkeys).await?;
     let empty_vec = Vec::new();
     let followers = one_hop_network.get(&owner_pubkeys[0]).unwrap_or(&empty_vec);
-    println!("✋ Found {} one-hop connections", followers.len());
+    info!("✋ Found {} one-hop connections", followers.len());
 
     // Phase 2: Query follows from one-hop network in batches
-    println!(
+    info!(
         "🌐 Building web of trust graph from {} one-hop keys",
         followers.len()
     );
@@ -133,7 +134,7 @@ pub async fn refresh_trust_network(
         }
     }
 
-    println!(
+    info!(
         "📡 Total network size (unique pubkeys): {}",
         pubkey_follower_count.len()
     );
@@ -145,7 +146,7 @@ pub async fn refresh_trust_network(
         .filter_map(|(pk_str, count)| PublicKey::from_hex(&pk_str).ok().map(|pk| (pk, count)))
         .collect();
 
-    println!(
+    info!(
         "🫂 Total number of trusted pubkeys: {}",
         trusted_pubkeys.len()
     );
@@ -164,7 +165,7 @@ pub async fn refresh_dvm_pubkeys(
 
     let k_values: Vec<String> = allowed_kinds.iter().map(|k| k.to_string()).collect();
 
-    println!(
+    info!(
         "🤖 Fetching DVM announcements for kinds: {:?}",
         allowed_kinds
     );
@@ -178,17 +179,18 @@ pub async fn refresh_dvm_pubkeys(
         .fetch_events(filter, timeout, ReqExitPolicy::default())
         .await?;
 
-    println!("🤖 Received {} DVM announcement events", events.len());
+    info!("🤖 Received {} DVM announcement events", events.len());
 
     let dvm_pubkeys: HashSet<PublicKey> = events.iter().map(|e| e.pubkey).collect();
 
-    println!("🤖 Found {} unique DVM pubkeys", dvm_pubkeys.len());
+    info!("🤖 Found {} unique DVM pubkeys", dvm_pubkeys.len());
 
     pool.disconnect().await;
     Ok(dvm_pubkeys)
 }
 
-/// Check if a specific pubkey has a recent DVM announcement (kind 31990) for allowed kinds
+/// Check if a specific pubkey has a recent DVM announcement (kind 31990) for allowed kinds.
+/// Only considers events published within the last 30 days.
 pub async fn check_dvm_announcement(
     pubkey: PublicKey,
     allowed_kinds: &[u16],
@@ -198,10 +200,17 @@ pub async fn check_dvm_announcement(
 
     let k_values: Vec<String> = allowed_kinds.iter().map(|k| k.to_string()).collect();
 
+    let since_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(30 * 24 * 60 * 60);
+
     let filter = Filter::new()
         .kind(Kind::Custom(31990))
         .author(pubkey)
         .custom_tags(SingleLetterTag::lowercase(Alphabet::K), k_values)
+        .since(Timestamp::from(since_secs))
         .limit(1);
 
     let timeout = Duration::from_secs(5);

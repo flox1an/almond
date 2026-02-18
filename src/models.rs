@@ -163,6 +163,8 @@ pub struct AppState {
     pub trusted_pubkeys: Arc<RwLock<HashMap<PublicKey, usize>>>,
     /// Pubkeys of DVMs that announce services for allowed kinds
     pub dvm_pubkeys: Arc<RwLock<HashSet<PublicKey>>>,
+    /// Pubkeys that recently failed the live DVM announcement check (negative cache with TTL)
+    pub dvm_rejected_pubkeys: Arc<RwLock<HashMap<PublicKey, Instant>>>,
     /// NIP-90 kinds that DVMs must announce to be allowed (e.g., 5207 for video-transform-hls)
     pub dvm_allowed_kinds: Vec<u16>,
     /// Relays to query for DVM announcements
