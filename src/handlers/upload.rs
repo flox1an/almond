@@ -8,12 +8,12 @@ use axum::{
     response::Response,
 };
 use serde_json::Value;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::error::AppError;
 use crate::helpers::*;
 use crate::models::AppState;
-use crate::services::{auth, cashu, file_storage, upload};
+use crate::services::{auth, cashu, file_storage, hls, upload};
 
 /// Check if payment is required and process it
 ///
@@ -232,6 +232,43 @@ pub async fn mirror_blob(
 
     // Track statistics
     track_upload_stats(&state, body_size).await;
+
+    // HLS recursive mirror: if this is a playlist, mirror referenced segments in background
+    if hls::is_hls_playlist(&content_type) {
+        if let Some(origin_base_url) = hls::extract_origin_base_url(url) {
+            // Read the stored playlist to parse references
+            if let Some(metadata) = file_storage::get_file_metadata(&state, &expected_sha256).await {
+                match tokio::fs::read_to_string(&metadata.path).await {
+                    Ok(content) => {
+                        let references = hls::parse_playlist_references(&content);
+                        if !references.is_empty() {
+                            info!(
+                                "[HLS] Detected playlist with {} references, spawning background mirror from {}",
+                                references.len(),
+                                origin_base_url
+                            );
+                            let state_clone = state.clone();
+                            let concurrency = state.hls_mirror_concurrency;
+                            tokio::spawn(async move {
+                                hls::mirror_hls_references(
+                                    state_clone,
+                                    origin_base_url,
+                                    references,
+                                    concurrency,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        warn!("[HLS] Failed to read playlist file for recursive mirror: {}", e);
+                    }
+                }
+            }
+        } else {
+            warn!("[HLS] Could not extract origin base URL from: {}", url);
+        }
+    }
 
     // Create response
     let descriptor = state.create_blob_descriptor(&expected_sha256, body_size, Some(content_type), expiration);
