@@ -204,6 +204,8 @@ pub struct AppState {
     pub cashu_accepted_mints: Vec<String>,
     pub cashu_wallet_path: PathBuf,
     pub cashu_wallet: Option<Arc<RwLock<CdkWallet>>>,
+    /// Maximum parallel segment fetches per HLS mirror operation
+    pub hls_mirror_concurrency: usize,
 }
 
 impl AppState {

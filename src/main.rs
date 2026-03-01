@@ -379,6 +379,12 @@ async fn load_app_state() -> AppState {
     }
 
     // Initialize Cashu wallet if any paid feature is enabled
+
+    let hls_mirror_concurrency: usize = env::var("HLS_MIRROR_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+
     let cashu_wallet = if any_paid_feature {
         match crate::services::cashu::init_wallet(&cashu_wallet_path, &cashu_accepted_mints).await {
             Ok(wallet) => {
@@ -542,6 +548,7 @@ async fn load_app_state() -> AppState {
         cashu_accepted_mints,
         cashu_wallet_path,
         cashu_wallet,
+        hls_mirror_concurrency,
     }
 }
 
