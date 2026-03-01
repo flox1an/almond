@@ -384,6 +384,7 @@ async fn load_app_state() -> AppState {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(4);
+    info!("HLS mirror concurrency: {}", hls_mirror_concurrency);
 
     let cashu_wallet = if any_paid_feature {
         match crate::services::cashu::init_wallet(&cashu_wallet_path, &cashu_accepted_mints).await {

@@ -60,10 +60,14 @@ pub fn extract_origin_base_url(url: &str) -> Option<String> {
 }
 
 
+/// Maximum recursion depth for nested HLS playlists (master -> variant -> segments)
+const MAX_HLS_RECURSION_DEPTH: usize = 10;
+
 /// Mirror a single Blossom reference from the origin server.
 /// Returns Ok(true) if fetched, Ok(false) if skipped (already exists), Err on failure.
 async fn mirror_single_reference(
     state: &AppState,
+    client: &reqwest::Client,
     origin_base_url: &str,
     reference: &HlsReference,
 ) -> Result<bool, String> {
@@ -86,9 +90,6 @@ async fn mirror_single_reference(
     info!("[HLS] Fetching segment: {}", fetch_url);
 
     // Fetch (no SSRF check needed - origin was already validated during the playlist mirror)
-    let client = upload::create_hardened_http_client()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
-
     let response = client.get(&fetch_url).send().await
         .map_err(|e| format!("Failed to fetch {}: {}", fetch_url, e))?;
 
@@ -109,7 +110,7 @@ async fn mirror_single_reference(
     let (calculated_sha256, body_size) = upload::stream_response_to_temp_file(
         response, &temp_path, max_size_bytes,
     ).await.map_err(|e| {
-        let _ = std::fs::remove_file(&temp_path);
+        let _ = tokio::fs::remove_file(&temp_path);
         format!("Failed to stream {}: {}", fetch_url, e)
     })?;
 
@@ -132,11 +133,35 @@ async fn mirror_single_reference(
         Some(content_type),
         None, // no expiration for background-fetched segments
     ).await.map_err(|e| {
-        let _ = std::fs::remove_file(&temp_path);
+        let _ = tokio::fs::remove_file(&temp_path);
         format!("Failed to finalize {}: {}", reference.sha256, e)
     })?;
 
     Ok(true)
+}
+
+/// Try to parse child references from a stored m3u8 playlist.
+async fn try_collect_child_references(
+    state: &AppState,
+    sha256: &str,
+) -> Vec<HlsReference> {
+    if let Some(metadata) = file_storage::get_file_metadata(state, sha256).await {
+        match tokio::fs::read_to_string(&metadata.path).await {
+            Ok(content) => {
+                let child_refs = parse_playlist_references(&content);
+                if !child_refs.is_empty() {
+                    info!("[HLS] Found {} child references in {}", child_refs.len(), sha256);
+                }
+                child_refs
+            }
+            Err(e) => {
+                warn!("[HLS] Failed to read playlist {}: {}", sha256, e);
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    }
 }
 
 /// Mirror all HLS references in the background with bounded concurrency.
@@ -154,6 +179,14 @@ pub async fn mirror_hls_references(
         concurrency
     );
 
+    let client = match upload::create_hardened_http_client() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("[HLS] Failed to create HTTP client: {}", e);
+            return;
+        }
+    };
+
     let mut all_references = references;
     let mut total_fetched = 0usize;
     let mut total_skipped = 0usize;
@@ -163,14 +196,23 @@ pub async fn mirror_hls_references(
     let mut round = 0;
     while !all_references.is_empty() {
         round += 1;
+        if round > MAX_HLS_RECURSION_DEPTH {
+            warn!(
+                "[HLS] Reached max recursion depth ({}), stopping with {} references remaining",
+                MAX_HLS_RECURSION_DEPTH,
+                all_references.len()
+            );
+            break;
+        }
         info!("[HLS] Round {}: processing {} references", round, all_references.len());
 
         let results: Vec<(HlsReference, Result<bool, String>)> = stream::iter(all_references.iter().cloned())
             .map(|reference| {
                 let state = state.clone();
                 let origin = origin_base_url.clone();
+                let client = client.clone();
                 async move {
-                    let result = mirror_single_reference(&state, &origin, &reference).await;
+                    let result = mirror_single_reference(&state, &client, &origin, &reference).await;
                     (reference, result)
                 }
             })
@@ -183,52 +225,16 @@ pub async fn mirror_hls_references(
 
         for (reference, result) in &results {
             match result {
-                Ok(true) => {
-                    total_fetched += 1;
-                    // If this was an m3u8, parse it for more references
-                    if reference.extension.as_deref() == Some("m3u8") {
-                        if let Some(metadata) = file_storage::get_file_metadata(&state, &reference.sha256).await {
-                            match tokio::fs::read_to_string(&metadata.path).await {
-                                Ok(content) => {
-                                    let child_refs = parse_playlist_references(&content);
-                                    if !child_refs.is_empty() {
-                                        info!(
-                                            "[HLS] Found {} child references in {}",
-                                            child_refs.len(),
-                                            reference.sha256
-                                        );
-                                        next_round_references.extend(child_refs);
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("[HLS] Failed to read child playlist {}: {}", reference.sha256, e);
-                                }
-                            }
-                        }
+                Ok(fetched) => {
+                    if *fetched {
+                        total_fetched += 1;
+                    } else {
+                        total_skipped += 1;
                     }
-                }
-                Ok(false) => {
-                    total_skipped += 1;
-                    // Even if skipped (already exists), check if it's an m3u8 we need to recurse into
+                    // Whether newly fetched or already existing, recurse into m3u8 playlists
                     if reference.extension.as_deref() == Some("m3u8") {
-                        if let Some(metadata) = file_storage::get_file_metadata(&state, &reference.sha256).await {
-                            match tokio::fs::read_to_string(&metadata.path).await {
-                                Ok(content) => {
-                                    let child_refs = parse_playlist_references(&content);
-                                    if !child_refs.is_empty() {
-                                        info!(
-                                            "[HLS] Found {} child references in existing playlist {}",
-                                            child_refs.len(),
-                                            reference.sha256
-                                        );
-                                        next_round_references.extend(child_refs);
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("[HLS] Failed to read existing playlist {}: {}", reference.sha256, e);
-                                }
-                            }
-                        }
+                        let child_refs = try_collect_child_references(&state, &reference.sha256).await;
+                        next_round_references.extend(child_refs);
                     }
                 }
                 Err(e) => {
