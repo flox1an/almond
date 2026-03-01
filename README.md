@@ -92,6 +92,10 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 
 ### Upstream Configuration
 - `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback (optional)
+- `UPSTREAM_MODE`: How to handle upstream requests (default: `proxy`)
+  - `proxy`: Stream from upstream while saving locally. Client receives data immediately while the file is cached.
+  - `redirect`: Issue 302 redirect to upstream. No local caching. Reduces bandwidth/CPU on the Almond server.
+  - `redirect_and_cache`: Issue 302 redirect to upstream, but also download in the background for future requests.
 - `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: 100)
 
 ### Upload Configuration
