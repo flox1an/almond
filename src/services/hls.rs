@@ -1,5 +1,11 @@
+use futures_util::stream::{self, StreamExt as FuturesStreamExt};
 use regex::Regex;
 use std::sync::LazyLock;
+use tracing::{error, info, warn};
+
+use crate::helpers::get_extension_from_mime;
+use crate::models::AppState;
+use crate::services::{file_storage, upload};
 
 /// A reference extracted from an HLS playlist (sha256 hash + optional extension)
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +57,194 @@ pub fn extract_origin_base_url(url: &str) -> Option<String> {
         Some(port) => Some(format!("{}://{}:{}", scheme, host, port)),
         None => Some(format!("{}://{}", scheme, host)),
     }
+}
+
+
+/// Mirror a single Blossom reference from the origin server.
+/// Returns Ok(true) if fetched, Ok(false) if skipped (already exists), Err on failure.
+async fn mirror_single_reference(
+    state: &AppState,
+    origin_base_url: &str,
+    reference: &HlsReference,
+) -> Result<bool, String> {
+    // Check if already in index
+    let exists = {
+        let index = state.file_index.read().await;
+        index.contains_key(&reference.sha256)
+    };
+
+    if exists {
+        return Ok(false);
+    }
+
+    // Build fetch URL
+    let fetch_url = match &reference.extension {
+        Some(ext) => format!("{}/{}.{}", origin_base_url, reference.sha256, ext),
+        None => format!("{}/{}", origin_base_url, reference.sha256),
+    };
+
+    info!("[HLS] Fetching segment: {}", fetch_url);
+
+    // Fetch (no SSRF check needed - origin was already validated during the playlist mirror)
+    let client = upload::create_hardened_http_client()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let response = client.get(&fetch_url).send().await
+        .map_err(|e| format!("Failed to fetch {}: {}", fetch_url, e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("HTTP {} for {}", response.status(), fetch_url));
+    }
+
+    // Extract content type from response
+    let content_type = crate::helpers::extract_content_type_from_response(response.headers());
+    let extension = get_extension_from_mime(&content_type);
+    let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
+
+    // Stream to temp file
+    file_storage::ensure_temp_dir(state).await
+        .map_err(|e| format!("Failed to ensure temp dir: {}", e))?;
+    let temp_path = file_storage::create_temp_path(state, "hls_segment", extension.as_deref());
+
+    let (calculated_sha256, body_size) = upload::stream_response_to_temp_file(
+        response, &temp_path, max_size_bytes,
+    ).await.map_err(|e| {
+        let _ = std::fs::remove_file(&temp_path);
+        format!("Failed to stream {}: {}", fetch_url, e)
+    })?;
+
+    // Verify hash
+    if calculated_sha256 != reference.sha256 {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(format!(
+            "SHA256 mismatch for {}: expected {}, got {}",
+            fetch_url, reference.sha256, calculated_sha256
+        ));
+    }
+
+    // Finalize
+    upload::finalize_upload(
+        state,
+        &temp_path,
+        &reference.sha256,
+        body_size,
+        extension,
+        Some(content_type),
+        None, // no expiration for background-fetched segments
+    ).await.map_err(|e| {
+        let _ = std::fs::remove_file(&temp_path);
+        format!("Failed to finalize {}: {}", reference.sha256, e)
+    })?;
+
+    Ok(true)
+}
+
+/// Mirror all HLS references in the background with bounded concurrency.
+/// For any mirrored reference that is itself an m3u8, recursively parse and mirror its references.
+pub async fn mirror_hls_references(
+    state: AppState,
+    origin_base_url: String,
+    references: Vec<HlsReference>,
+    concurrency: usize,
+) {
+    info!(
+        "[HLS] Starting background mirror: {} references from {} (concurrency: {})",
+        references.len(),
+        origin_base_url,
+        concurrency
+    );
+
+    let mut all_references = references;
+    let mut total_fetched = 0usize;
+    let mut total_skipped = 0usize;
+    let mut total_failed = 0usize;
+
+    // Process in rounds to handle recursive m3u8 discovery
+    let mut round = 0;
+    while !all_references.is_empty() {
+        round += 1;
+        info!("[HLS] Round {}: processing {} references", round, all_references.len());
+
+        let results: Vec<(HlsReference, Result<bool, String>)> = stream::iter(all_references.iter().cloned())
+            .map(|reference| {
+                let state = state.clone();
+                let origin = origin_base_url.clone();
+                async move {
+                    let result = mirror_single_reference(&state, &origin, &reference).await;
+                    (reference, result)
+                }
+            })
+            .buffer_unordered(concurrency)
+            .collect()
+            .await;
+
+        // Collect newly discovered m3u8 playlists for recursive processing
+        let mut next_round_references = Vec::new();
+
+        for (reference, result) in &results {
+            match result {
+                Ok(true) => {
+                    total_fetched += 1;
+                    // If this was an m3u8, parse it for more references
+                    if reference.extension.as_deref() == Some("m3u8") {
+                        if let Some(metadata) = file_storage::get_file_metadata(&state, &reference.sha256).await {
+                            match tokio::fs::read_to_string(&metadata.path).await {
+                                Ok(content) => {
+                                    let child_refs = parse_playlist_references(&content);
+                                    if !child_refs.is_empty() {
+                                        info!(
+                                            "[HLS] Found {} child references in {}",
+                                            child_refs.len(),
+                                            reference.sha256
+                                        );
+                                        next_round_references.extend(child_refs);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("[HLS] Failed to read child playlist {}: {}", reference.sha256, e);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(false) => {
+                    total_skipped += 1;
+                    // Even if skipped (already exists), check if it's an m3u8 we need to recurse into
+                    if reference.extension.as_deref() == Some("m3u8") {
+                        if let Some(metadata) = file_storage::get_file_metadata(&state, &reference.sha256).await {
+                            match tokio::fs::read_to_string(&metadata.path).await {
+                                Ok(content) => {
+                                    let child_refs = parse_playlist_references(&content);
+                                    if !child_refs.is_empty() {
+                                        info!(
+                                            "[HLS] Found {} child references in existing playlist {}",
+                                            child_refs.len(),
+                                            reference.sha256
+                                        );
+                                        next_round_references.extend(child_refs);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("[HLS] Failed to read existing playlist {}: {}", reference.sha256, e);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    total_failed += 1;
+                    error!("[HLS] Failed to mirror {}: {}", reference.sha256, e);
+                }
+            }
+        }
+
+        all_references = next_round_references;
+    }
+
+    info!(
+        "[HLS] Background mirror complete: {} fetched, {} skipped (existing), {} failed",
+        total_fetched, total_skipped, total_failed
+    );
 }
 
 #[cfg(test)]
