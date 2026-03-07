@@ -157,6 +157,9 @@ pub async fn mirror_blob(
 
     let auth_event = auth::validate_nostr_auth(auth_header, &state, auth_mode).await?;
 
+    // BUD-11: validate t=upload tag for mirror operations
+    auth::validate_t_tag(&auth_event, "upload")?;
+
     // Extract expected SHA-256 from auth event and expiration from headers
     let expected_sha256 = auth::extract_sha256_from_event(&auth_event)
         .ok_or_else(|| AppError::Unauthorized("No valid SHA-256 hash found in auth event".to_string()))?;

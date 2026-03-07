@@ -4,121 +4,11 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::Response,
 };
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use nostr_relay_pool::prelude::*;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tracing::{error, info, warn};
 
 use crate::models::AppState;
-
-/// Validate Nostr authentication for delete operation (strict mode - no WOT)
-async fn validate_nostr_auth_strict(auth: &str, state: &AppState) -> Result<Event, StatusCode> {
-    let auth_str = auth.to_string();
-
-    if !auth_str.starts_with("Nostr ") {
-        error!("Invalid Authorization header prefix");
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    let base64_str = &auth_str[6..]; // Remove "Nostr " prefix
-    let decoded_bytes = STANDARD.decode(base64_str).map_err(|e| {
-        error!("Failed to decode base64: {}", e);
-        StatusCode::UNAUTHORIZED
-    })?;
-
-    let json_str = String::from_utf8(decoded_bytes).map_err(|e| {
-        error!("Failed to convert to UTF-8: {}", e);
-        StatusCode::UNAUTHORIZED
-    })?;
-
-    let event: Event = serde_json::from_str(&json_str).map_err(|e| {
-        error!("Failed to parse event JSON: {}", e);
-        StatusCode::UNAUTHORIZED
-    })?;
-
-    // Verify the event signature
-    if let Err(e) = event.verify() {
-        error!("Invalid event signature: {}", e);
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    // Check if the event is expired
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    if let Some(expiration) = event.tags.find(TagKind::Expiration) {
-        if let Some(exp_time) = expiration.content() {
-            if let Ok(exp_time) = exp_time.parse::<u64>() {
-                if now > exp_time {
-                    error!("Event expired");
-                    return Err(StatusCode::UNAUTHORIZED);
-                }
-            }
-        }
-    }
-
-    // Check if the event kind is correct (24242 for delete)
-    if event.kind != Kind::Custom(24242) {
-        error!("Invalid event kind: expected 24242, got {:?}", event.kind);
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    // STRICT: Delete requires explicit whitelist - no WOT fallback
-    if state.allowed_pubkeys.is_empty() {
-        error!("Delete operation requires ALLOWED_NPUBS to be configured");
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    // STRICT: Only check allowed_pubkeys, do NOT check trusted_pubkeys (no WOT for delete)
-    if !state.allowed_pubkeys.contains(&event.pubkey) {
-        error!(
-            "Pubkey {} not in ALLOWED_NPUBS whitelist (WOT not allowed for delete)",
-            event.pubkey
-        );
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    Ok(event)
-}
-
-/// Validate authorization event for delete operation
-fn validate_delete_auth(event: &Event, sha256: &str) -> Result<(), StatusCode> {
-    // Check if the event has a 't' tag set to 'delete'
-    let t_tag = event.tags.find(TagKind::Custom("t".into()));
-    if t_tag.is_none() || t_tag.unwrap().content() != Some("delete") {
-        error!("Missing or invalid 't' tag for delete operation");
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    // Check if the event has an 'x' tag matching the SHA-256 hash
-    let x_tags: Vec<_> = event
-        .tags
-        .iter()
-        .filter(|tag| tag.kind() == TagKind::Custom("x".into()))
-        .collect();
-
-    if x_tags.is_empty() {
-        error!("No 'x' tags found in delete authorization");
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    // Verify at least one x tag matches the SHA-256
-    let has_matching_hash = x_tags.iter().any(|tag| {
-        tag.content()
-            .map(|content| content == sha256)
-            .unwrap_or(false)
-    });
-
-    if !has_matching_hash {
-        error!("No matching 'x' tag found for hash {}", sha256);
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    Ok(())
-}
+use crate::services::auth;
 
 /// Handle blob deletion
 pub async fn delete_blob(
@@ -145,27 +35,25 @@ pub async fn delete_blob(
     info!("🗑️  Delete request for blob: {}", sha256);
 
     // Validate Nostr authorization (strict mode - no WOT)
-    let auth = headers.get(header::AUTHORIZATION).ok_or_else(|| {
-        error!("Missing Authorization header");
-        StatusCode::UNAUTHORIZED
-    })?;
-
-    let auth_event: Event = validate_nostr_auth_strict(
-        auth.to_str().map_err(|_| {
-            error!("Invalid Authorization header format");
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .ok_or_else(|| {
+            error!("Missing Authorization header");
             StatusCode::UNAUTHORIZED
-        })?,
-        &state,
-    )
-    .await?;
+        })?;
+
+    let auth_event = auth::validate_nostr_auth(auth_header, &state, auth::AuthMode::Strict)
+        .await
+        .map_err(StatusCode::from)?;
 
     info!(
         "✅ Authorization validated for pubkey: {}",
         auth_event.pubkey
     );
 
-    // Validate delete-specific authorization
-    validate_delete_auth(&auth_event, &sha256)?;
+    // Validate delete-specific authorization (t=delete tag + x tag)
+    auth::validate_delete_auth(&auth_event, &sha256).map_err(StatusCode::from)?;
 
     info!("✅ Delete authorization tags validated");
 
