@@ -9,9 +9,9 @@ use axum::{
 static CORS_ORIGIN: HeaderValue = HeaderValue::from_static("*");
 static CORS_METHODS: HeaderValue = HeaderValue::from_static("GET, PUT, DELETE, OPTIONS, PATCH");
 static CORS_HEADERS: HeaderValue = HeaderValue::from_static(
-    "Content-Type, authorization, x-sha-256, x-content-length, Content-Length, x-content-type, upload-type, upload-length, upload-offset, x-cashu",
+    "Content-Type, authorization, x-sha-256, x-content-length, Content-Length, x-content-type, upload-type, upload-length, upload-offset, x-cashu, x-expiration",
 );
-static CORS_EXPOSE: HeaderValue = HeaderValue::from_static("Content-Length, Allow, X-Cashu, X-Price-Per-MB, X-Price-Unit, X-Accepted-Mints");
+static CORS_EXPOSE: HeaderValue = HeaderValue::from_static("Content-Length, Allow, X-Cashu, X-Price-Per-MB, X-Price-Unit, X-Accepted-Mints, X-Expiration");
 static CORS_MAX_AGE: HeaderValue = HeaderValue::from_static("86400");
 static CORS_ALLOW: HeaderValue = HeaderValue::from_static("PUT, HEAD, OPTIONS, PATCH");
 
