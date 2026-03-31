@@ -48,6 +48,7 @@ pub fn get_extension_from_mime(content_type: &str) -> Option<String> {
         // DASH manifest
         "application/dash+xml" => return Some("mpd".to_string()),
         // Generic binary — mime_guess returns None for this, so provide a sensible default
+        "image/jpeg" | "image/pjpeg" => return Some("jpg".to_string()),
         "application/octet-stream" => return Some("bin".to_string()),
         _ => {}
     }
