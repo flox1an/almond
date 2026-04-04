@@ -262,12 +262,24 @@ fn extract_domain(url: &str) -> String {
 pub fn validate_upload_auth(event: &Event, expected_sha256: &str) -> AppResult<()> {
     validate_t_tag(event, "upload")?;
 
-    let x_tag = event.tags.find(TagKind::x()).ok_or_else(|| {
-        error!("No x tag found in event");
-        AppError::Unauthorized("No x tag found in event".to_string())
-    })?;
+    let x_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind() == TagKind::Custom("x".into()))
+        .collect();
 
-    if x_tag.content() != Some(expected_sha256) {
+    if x_tags.is_empty() {
+        error!("No x tag found in event");
+        return Err(AppError::Unauthorized("No x tag found in event".to_string()));
+    }
+
+    let has_matching_hash = x_tags.iter().any(|tag| {
+        tag.content()
+            .map(|content| content == expected_sha256)
+            .unwrap_or(false)
+    });
+
+    if !has_matching_hash {
         error!("No matching x tag found for hash {}", expected_sha256);
         return Err(AppError::Unauthorized(format!(
             "No matching x tag found for hash {}",
@@ -650,6 +662,22 @@ mod tests {
         let event = build_event(
             &keys,
             vec![valid_expiration_tag(), t_tag("upload"), x_tag(TEST_HASH)],
+        );
+        assert!(validate_upload_auth(&event, TEST_HASH).is_ok());
+    }
+
+    #[test]
+    fn test_upload_auth_valid_when_matching_hash_is_not_first_x_tag() {
+        let keys = Keys::generate();
+        let other_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+        let event = build_event(
+            &keys,
+            vec![
+                valid_expiration_tag(),
+                t_tag("upload"),
+                x_tag(other_hash),
+                x_tag(TEST_HASH),
+            ],
         );
         assert!(validate_upload_auth(&event, TEST_HASH).is_ok());
     }
