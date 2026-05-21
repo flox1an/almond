@@ -1,0 +1,96 @@
+# Build Almond.
+FROM rustlang/rust:nightly-bullseye-slim AS almond-builder
+
+WORKDIR /usr/src/app
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends pkg-config libssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/src/app/target \
+    cargo build --release && \
+    cp /usr/src/app/target/release/almond /tmp/almond
+
+# Download upstream FIPS release binaries instead of rebuilding FIPS from source.
+FROM debian:bullseye-slim AS fips-downloader
+
+ARG FIPS_VERSION=0.3.0
+ARG TARGETARCH
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        tar && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) FIPS_ARCH="x86_64" ;; \
+        arm64) FIPS_ARCH="aarch64" ;; \
+        *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+        "https://github.com/jmcorgan/fips/releases/download/v${FIPS_VERSION}/fips-${FIPS_VERSION}-linux-${FIPS_ARCH}.tar.gz" \
+        -o /tmp/fips.tar.gz; \
+    tar -xzf /tmp/fips.tar.gz -C /tmp; \
+    cp "/tmp/fips-${FIPS_VERSION}-linux-${FIPS_ARCH}/fips" /tmp/fips; \
+    cp "/tmp/fips-${FIPS_VERSION}-linux-${FIPS_ARCH}/fipsctl" /tmp/fipsctl; \
+    cp "/tmp/fips-${FIPS_VERSION}-linux-${FIPS_ARCH}/hosts" /tmp/fips-hosts
+
+FROM debian:bullseye-slim
+
+WORKDIR /app
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        dnsmasq \
+        iproute2 \
+        iptables \
+        iputils-ping \
+        libdbus-1-3 \
+        libssl1.1 \
+        procps && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN printf '%s\n' \
+    'port=53' \
+    'listen-address=127.0.0.1' \
+    'bind-interfaces' \
+    'server=/fips/127.0.0.1#5354' \
+    'no-resolv' \
+    > /etc/dnsmasq.d/fips.conf
+
+COPY --from=almond-builder /tmp/almond /app/almond
+COPY --from=fips-downloader /tmp/fips /usr/local/bin/fips
+COPY --from=fips-downloader /tmp/fipsctl /usr/local/bin/fipsctl
+COPY --from=fips-downloader /tmp/fips-hosts /etc/fips/hosts
+COPY docker-entrypoint-fips.sh /app/docker-entrypoint-fips.sh
+
+RUN chmod +x /app/almond /app/docker-entrypoint-fips.sh /usr/local/bin/fips /usr/local/bin/fipsctl && \
+    mkdir -p /app/files /etc/fips /run/fips
+
+ENV RUST_LOG=info
+ENV BIND_ADDR=0.0.0.0:3000
+ENV PUBLIC_URL=http://localhost:3000
+ENV MAX_TOTAL_SIZE=99999
+ENV MAX_TOTAL_FILES=1000000
+ENV CLEANUP_INTERVAL_SECS=60
+ENV MAX_FILE_AGE_DAYS=0
+ENV FIPS_CONFIG_PATH=/etc/fips/fips.yaml
+ENV FIPS_UDP_BIND=0.0.0.0:2121
+ENV FIPS_TUN_NAME=fips0
+ENV FIPS_TUN_MTU=1280
+ENV FIPS_REWRITE_DNS=true
+ENV FIPS_ISOLATE=false
+
+EXPOSE 3000
+EXPOSE 2121/udp
+
+ENTRYPOINT ["/app/docker-entrypoint-fips.sh"]

@@ -1,0 +1,36 @@
+services:
+  almond-fips:
+    image: ghcr.io/flox1an/almond-fips:main
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    ports:
+      - "3000:3000"
+      - "2121:2121/udp"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      BIND_ADDR: 0.0.0.0:3000
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3000}
+      STORAGE_PATH: /app/files
+      UPSTREAM_SERVERS: ${UPSTREAM_SERVERS:-}
+      UPSTREAM_MODE: ${UPSTREAM_MODE:-proxy}
+      FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED: ${FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED:-public}
+      FIPS_NSEC: ${FIPS_NSEC:?set FIPS_NSEC to a hex or nsec1 FIPS node secret}
+      FIPS_PEER_NPUB: ${FIPS_PEER_NPUB:-}
+      FIPS_PEER_ADDR: ${FIPS_PEER_ADDR:-}
+      FIPS_PEER_ALIAS: ${FIPS_PEER_ALIAS:-peer}
+      FIPS_PEER_TRANSPORT: ${FIPS_PEER_TRANSPORT:-udp}
+      FIPS_PEERS: ${FIPS_PEERS:-}
+      FIPS_UDP_BIND: ${FIPS_UDP_BIND:-0.0.0.0:2121}
+      FIPS_TUN_MTU: ${FIPS_TUN_MTU:-1280}
+      FIPS_REWRITE_DNS: ${FIPS_REWRITE_DNS:-true}
+      FIPS_ISOLATE: ${FIPS_ISOLATE:-false}
+      FIPS_HOSTS: ${FIPS_HOSTS:-}
+    volumes:
+      - almond-fips-files:/app/files
+
+volumes:
+  almond-fips-files:

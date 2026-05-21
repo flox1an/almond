@@ -80,6 +80,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Extract FIPS Docker metadata
+        id: meta-fips
+        uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-fips
+
+      - name: Build and push FIPS Docker image
+        id: build-and-push-fips
+        uses: docker/build-push-action@0565240e2d4ab88bba5387d719585280857ece09 # v5.0.0
+        with:
+          context: .
+          file: Dockerfile.fips
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-fips.outputs.tags }}
+          labels: ${{ steps.meta-fips.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       # Sign the resulting Docker image digest except on PRs.
       # This will only write to the public Rekor transparency log when the Docker
       # repository is public to avoid leaking data.  If you would like to publish
@@ -93,6 +111,13 @@ jobs:
           DIGEST: ${{ steps.build-and-push.outputs.digest }}
         # This step uses the identity token to provision an ephemeral certificate
         # against the sigstore community Fulcio instance.
+        run: echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
+
+      - name: Sign the published FIPS Docker image
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          TAGS: ${{ steps.meta-fips.outputs.tags }}
+          DIGEST: ${{ steps.build-and-push-fips.outputs.digest }}
         run: echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
 
   deploy:

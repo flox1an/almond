@@ -1,3 +1,9 @@
 /target
 /files
 .DS_Store
+
+# Local dev artifacts / secrets
+cert.pem
+key.pem
+storage5/
+*.bak

@@ -215,6 +215,326 @@ docker run -p 3000:3000 \
   almond
 ```
 
+### FIPS-enabled Docker Image
+
+GitHub Actions also builds `ghcr.io/flox1an/almond-fips`, a variant that runs
+FIPS, dnsmasq, and Almond in the same container. It can serve the same Almond
+instance over normal HTTP port publishing and over the FIPS mesh at the same
+time.
+
+Run it with the privileges FIPS needs for the TUN interface:
+
+```bash
+docker run \
+  --cap-add NET_ADMIN \
+  --device /dev/net/tun:/dev/net/tun \
+  --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+  -p 3000:3000 \
+  -p 2121:2121/udp \
+  -v /path/to/files:/app/files \
+  -e STORAGE_PATH=/app/files \
+  -e BIND_ADDR=0.0.0.0:3000 \
+  -e PUBLIC_URL=https://your-domain.com \
+  -e FIPS_NSEC=nsec1... \
+  -e FIPS_PEER_NPUB=npub1... \
+  -e FIPS_PEER_ADDR=203.0.113.10:2121 \
+  -e UPSTREAM_SERVERS=https://npub1upstream....fips \
+  ghcr.io/flox1an/almond-fips:main
+```
+
+FIPS needs the host TUN device mounted into the container:
+`--device /dev/net/tun:/dev/net/tun`. The daemon creates a virtual IPv6 network
+interface, usually `fips0`, on top of that device. `--cap-add NET_ADMIN` is
+needed so the container can create and configure that interface and install the
+small DNS/iptables rules used by the FIPS entrypoint. If `/dev/net/tun` does not
+exist on the host, enable the kernel TUN module first, for example with
+`sudo modprobe tun` on Linux hosts.
+
+With `BIND_ADDR=0.0.0.0:3000`, Almond is reachable both through Docker's
+published HTTP port and through FIPS on `http://<this-node-npub>.fips:3000`
+from peered FIPS nodes. For HTTPS over FIPS, enable Almond's normal TLS settings
+and use `https://<this-node-npub>.fips:3000`.
+
+FIPS DNS is controlled independently:
+
+- `FIPS_REWRITE_DNS=true` (default): container DNS points to dnsmasq, which
+  sends `.fips` names to FIPS and everything else to the original Docker DNS.
+- `FIPS_REWRITE_DNS=false`: FIPS still runs and can host Almond on `fips0`, but
+  container-wide `.fips` DNS is not installed.
+- `FIPS_HOSTS`: optional newline-separated aliases for `/etc/fips/hosts`, e.g.
+  `my-upstream npub1...`; then `https://my-upstream.fips` resolves locally.
+
+The FIPS image accepts the same Almond variables as the normal image, plus:
+
+- `FIPS_NSEC`: FIPS node secret key, hex or `nsec1` (required unless mounting a
+  full config and setting `FIPS_GENERATE_CONFIG=false`)
+- `FIPS_PEER_NPUB`, `FIPS_PEER_ADDR`, `FIPS_PEER_ALIAS`, `FIPS_PEER_TRANSPORT`:
+  optional direct peer configuration
+- `FIPS_PEERS`: optional multi-peer list, one peer per line in the format
+  `npub,addr[,alias[,transport]]`; when set, it overrides single-peer variables
+- `FIPS_UDP_BIND`: UDP transport bind address (default: `0.0.0.0:2121`)
+- `FIPS_TUN_NAME`, `FIPS_TUN_MTU`: TUN interface settings
+- `FIPS_ISOLATE=true`: optional mesh-only mode that blocks non-FIPS egress on
+  the physical container interface
+
+## Hosting Almond over FIPS
+
+The FIPS image can publish Almond in two ways at the same time:
+
+- Normal HTTP(S): Docker publishes Almond on the host with `-p 3000:3000`.
+- FIPS mesh HTTP(S): peered FIPS nodes reach the same Almond process through
+  `fips0` at `http://<this-node-npub>.fips:3000`.
+
+The `fips0` interface is backed by the host TUN device mounted with
+`--device /dev/net/tun:/dev/net/tun`. Without that mount, FIPS cannot create the
+mesh interface and the container will not be able to route `.fips` traffic.
+
+Bind Almond to all interfaces so both paths work:
+
+```bash
+docker run \
+  --cap-add NET_ADMIN \
+  --device /dev/net/tun:/dev/net/tun \
+  --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+  -p 3000:3000 \
+  -p 2121:2121/udp \
+  -v /path/to/files:/app/files \
+  -e STORAGE_PATH=/app/files \
+  -e BIND_ADDR=0.0.0.0:3000 \
+  -e PUBLIC_URL=https://public.example.com \
+  -e FIPS_NSEC=nsec1... \
+  -e FIPS_PEER_NPUB=npub1gateway... \
+  -e FIPS_PEER_ADDR=203.0.113.10:2121 \
+  ghcr.io/flox1an/almond-fips:main
+```
+
+From the public internet, clients use `https://public.example.com`. From FIPS
+peers, clients use:
+
+```text
+http://<this-node-npub>.fips:3000
+```
+
+For TLS inside FIPS, use Almond's normal HTTPS settings:
+
+```bash
+-e ENABLE_HTTPS=true \
+-e TLS_CERT_PATH=/app/certs/cert.pem \
+-e TLS_KEY_PATH=/app/certs/key.pem \
+-e TLS_AUTO_GENERATE=false \
+-v /path/to/certs:/app/certs
+```
+
+Then FIPS peers use `https://<this-node-npub>.fips:3000`. The certificate must
+be valid for the hostname clients use, or clients must explicitly trust it.
+
+Optional short names can be provided with `FIPS_HOSTS`, which writes
+`/etc/fips/hosts` inside the container:
+
+```bash
+-e FIPS_HOSTS='my-almond npub1thisnode...'
+```
+
+Peers that also have that hosts mapping can use `http://my-almond.fips:3000`.
+The canonical `<npub>.fips` name works without aliases.
+
+### Minimal FIPS Service Settings
+
+For normal operation, prefer the bundled Compose file. It contains the reusable
+Docker settings FIPS always needs (`NET_ADMIN`, `/dev/net/tun`, IPv6 sysctl,
+ports, storage volume, and DNS defaults), so the per-node configuration stays
+small.
+
+Create `.env.fips` from `.env.fips.example` and fill in only your node-specific
+values:
+
+```env
+PUBLIC_URL=http://<this-node-npub>.fips:3000
+UPSTREAM_MODE=proxy
+UPSTREAM_SERVERS=
+
+FIPS_NSEC=nsec1...
+FIPS_PEER_NPUB=
+FIPS_PEER_ADDR=
+FIPS_PEER_ALIAS=gateway
+FIPS_PEER_TRANSPORT=udp
+FIPS_PEERS=
+FIPS_HOSTS=
+```
+
+`FIPS_PEERS` is the recommended format for production because it allows multiple
+gateways. Example:
+
+```env
+FIPS_PEERS=npub1aaa...,203.0.113.10:2121,gateway-a,udp
+npub1bbb...,198.51.100.20:2121,gateway-b,udp
+```
+
+Then start the service:
+
+```bash
+docker compose --env-file .env.fips -f docker-compose.fips.yml up -d
+```
+
+The reusable Compose service is:
+
+```yaml
+services:
+  almond-fips:
+    image: ghcr.io/flox1an/almond-fips:main
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    ports:
+      - "3000:3000"
+      - "2121:2121/udp"
+    environment:
+      BIND_ADDR: 0.0.0.0:3000
+      PUBLIC_URL: http://<this-node-npub>.fips:3000
+      STORAGE_PATH: /app/files
+      FEATURE_UPLOAD_ENABLED: public
+      FEATURE_MIRROR_ENABLED: public
+      FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED: public
+      UPSTREAM_MODE: proxy
+      FIPS_NSEC: nsec1...
+      FIPS_PEER_NPUB: npub1gateway...
+      FIPS_PEER_ADDR: 203.0.113.10:2121
+      FIPS_PEER_ALIAS: gateway
+      FIPS_PEERS: |
+        npub1aaa...,203.0.113.10:2121,gateway-a,udp
+        npub1bbb...,198.51.100.20:2121,gateway-b,udp
+      FIPS_REWRITE_DNS: "true"
+    volumes:
+      - almond-files:/app/files
+
+volumes:
+  almond-files:
+```
+
+Add FIPS upstreams by setting `UPSTREAM_SERVERS`:
+
+```yaml
+      UPSTREAM_SERVERS: https://npub1upstream....fips,https://media-cache.fips
+      FIPS_HOSTS: |
+        media-cache npub1upstream...
+```
+
+With multiple FIPS gateways (`FIPS_PEERS`), Almond keeps routing even if one
+gateway is temporarily unavailable, which is especially useful for larger binary
+transfers.
+
+If the service should be public HTTP and FIPS at the same time, keep
+`BIND_ADDR=0.0.0.0:3000` and publish `3000:3000`. If it should only be useful
+inside the mesh, remove the `3000:3000` port mapping and keep the FIPS transport
+port `2121/udp`.
+
+### Coolify Deployment
+
+Use Coolify's Docker Compose deployment mode for Almond FIPS. In Compose mode,
+the compose file is the source of truth, so `cap_add`, `devices`, `sysctls`,
+ports, volumes, and environment variables stay together in one place.
+
+Before deploying, verify the Coolify target server supports TUN:
+
+```bash
+ls -l /dev/net/tun
+```
+
+If the device is missing on a Linux host, enable the kernel module:
+
+```bash
+sudo modprobe tun
+```
+
+Create a new Coolify resource with Docker Compose, paste the
+`docker-compose.fips.yml` service, and set these variables in Coolify:
+
+```env
+PUBLIC_URL=https://your-public-domain.example
+UPSTREAM_MODE=proxy
+UPSTREAM_SERVERS=
+FIPS_NSEC=nsec1...
+FIPS_PEER_NPUB=npub1gateway...
+FIPS_PEER_ADDR=203.0.113.10:2121
+FIPS_PEER_ALIAS=gateway
+FIPS_PEER_TRANSPORT=udp
+FIPS_PEERS=
+FIPS_HOSTS=
+```
+
+For public HTTP(S), assign the Coolify domain to the `almond-fips` service on
+container port `3000`. Coolify's proxy can handle the normal web domain, while
+the same container also serves FIPS peers on `http://<this-node-npub>.fips:3000`.
+
+Keep the FIPS transport UDP port published:
+
+```yaml
+ports:
+  - "2121:2121/udp"
+```
+
+If Coolify's UI is used in image-only mode instead of Compose mode, the same
+runtime settings must go into Custom Docker Options:
+
+```text
+--cap-add NET_ADMIN --device /dev/net/tun:/dev/net/tun --sysctl net.ipv6.conf.all.disable_ipv6=0
+```
+
+Compose mode is easier because it also carries the UDP port, storage volume,
+and `.fips` DNS defaults. If Coolify rejects `devices`, `cap_add`, or `sysctls`
+on your hosting provider, FIPS cannot run inside that container. In that case,
+run FIPS on the host or choose a VPS/bare-metal server where Docker can access
+`/dev/net/tun`.
+
+## Using FIPS Upstreams
+
+Almond can use Blossom upstreams that are reachable only inside the FIPS mesh.
+Use the FIPS image and configure upstreams with `.fips` hostnames:
+
+```bash
+docker run \
+  --cap-add NET_ADMIN \
+  --device /dev/net/tun:/dev/net/tun \
+  --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+  -p 3000:3000 \
+  -p 2121:2121/udp \
+  -v /path/to/files:/app/files \
+  -e STORAGE_PATH=/app/files \
+  -e BIND_ADDR=0.0.0.0:3000 \
+  -e FIPS_NSEC=nsec1... \
+  -e FIPS_PEER_NPUB=npub1gateway... \
+  -e FIPS_PEER_ADDR=203.0.113.10:2121 \
+  -e FIPS_REWRITE_DNS=true \
+  -e UPSTREAM_MODE=proxy \
+  -e UPSTREAM_SERVERS=https://npub1upstream....fips \
+  ghcr.io/flox1an/almond-fips:main
+```
+
+`FIPS_REWRITE_DNS=true` is the default and is needed when Almond should resolve
+`.fips` upstream names. dnsmasq sends `.fips` DNS queries to the FIPS daemon and
+forwards normal DNS to Docker's original resolver.
+
+For friendlier upstream names, provide aliases:
+
+```bash
+-e FIPS_HOSTS='media-cache npub1upstream...'
+-e UPSTREAM_SERVERS=https://media-cache.fips
+```
+
+Custom upstream hints work the same way when enabled:
+
+```bash
+-e FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=public
+```
+
+Then requests may pass `?xs=https://media-cache.fips` or
+`?origin=https://media-cache.fips`. Almond keeps SSRF protection enabled: normal
+private and local addresses stay blocked, while `.fips` hostnames resolving to
+FIPS overlay IPv6 addresses are allowed for upstream fetching.
+
 ### Volume Mounting
 
 The `/app/files` directory in the container is used for file storage. Mount a host directory to persist files:
@@ -292,4 +612,4 @@ cargo run --release
 
 ## License
 
-MIT 
+MIT

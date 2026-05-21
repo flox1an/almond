@@ -1,5 +1,5 @@
 use futures_util::StreamExt;
-use reqwest::{Client, redirect};
+use reqwest::{redirect, Client};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::time::Duration;
@@ -33,6 +33,23 @@ pub fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
+fn is_fips_hostname(host: &str) -> bool {
+    host.trim_end_matches('.')
+        .to_ascii_lowercase()
+        .ends_with(".fips")
+}
+
+fn is_fips_overlay_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(_) => false,
+        IpAddr::V6(ipv6) => ipv6.segments()[0] & 0xff00 == 0xfd00,
+    }
+}
+
+fn is_allowed_private_upstream_ip(host: &str, ip: IpAddr) -> bool {
+    is_fips_hostname(host) && is_fips_overlay_ip(ip)
+}
+
 /// Validate URL is safe to fetch (HTTPS only, no private IPs) - SSRF protection
 pub async fn validate_url_for_ssrf(url: &str) -> AppResult<()> {
     let parsed = reqwest::Url::parse(url)
@@ -49,7 +66,10 @@ pub async fn validate_url_for_ssrf(url: &str) -> AppResult<()> {
         .host_str()
         .ok_or_else(|| AppError::BadRequest("URL has no hostname".to_string()))?;
 
-    info!("🔍 Resolving DNS for hostname: {} (timeout: {}s)", host, DNS_LOOKUP_TIMEOUT_SECS);
+    info!(
+        "🔍 Resolving DNS for hostname: {} (timeout: {}s)",
+        host, DNS_LOOKUP_TIMEOUT_SECS
+    );
 
     // Resolve DNS with timeout
     let dns_future = lookup_host((host, 443));
@@ -73,12 +93,21 @@ pub async fn validate_url_for_ssrf(url: &str) -> AppResult<()> {
     for addr in addrs {
         let ip = addr.ip();
         resolved_ips.push(ip);
-        if is_private_ip(ip) {
-            error!("❌ URL resolves to private/local IP: {} (from hostname: {})", ip, host);
+        if is_private_ip(ip) && !is_allowed_private_upstream_ip(host, ip) {
+            error!(
+                "❌ URL resolves to private/local IP: {} (from hostname: {})",
+                ip, host
+            );
             return Err(AppError::BadRequest(format!(
                 "URL resolves to private/local IP: {}",
                 ip
             )));
+        }
+        if is_allowed_private_upstream_ip(host, ip) {
+            info!(
+                "✅ Resolved {} -> {} (allowed FIPS overlay address)",
+                host, ip
+            );
         }
         has_valid_ip = true;
         info!("✅ Resolved {} -> {} (allowed)", host, ip);
@@ -91,7 +120,11 @@ pub async fn validate_url_for_ssrf(url: &str) -> AppResult<()> {
         )));
     }
 
-    info!("✅ DNS validation passed for {} ({} IP(s) resolved)", host, resolved_ips.len());
+    info!(
+        "✅ DNS validation passed for {} ({} IP(s) resolved)",
+        host,
+        resolved_ips.len()
+    );
     Ok(())
 }
 
@@ -156,7 +189,11 @@ pub async fn stream_to_temp_file(
     })?;
 
     let sha256 = format!("{:x}", hasher.finalize());
-    info!("Upload complete: {} MB total, SHA256: {}", total_bytes / 1_048_576, sha256);
+    info!(
+        "Upload complete: {} MB total, SHA256: {}",
+        total_bytes / 1_048_576,
+        sha256
+    );
 
     Ok((sha256, total_bytes))
 }
@@ -193,7 +230,10 @@ pub async fn stream_response_to_temp_file(
 
         let new_size = body_size + chunk.len() as u64;
         if new_size > max_size_bytes {
-            error!("❌ Download exceeded size limit: {} bytes > {} bytes", new_size, max_size_bytes);
+            error!(
+                "❌ Download exceeded size limit: {} bytes > {} bytes",
+                new_size, max_size_bytes
+            );
             return Err(AppError::PayloadTooLarge(format!(
                 "File too large: {} bytes exceeds limit of {} MB",
                 new_size,
@@ -210,12 +250,18 @@ pub async fn stream_response_to_temp_file(
         body_size += chunk.len() as u64;
 
         if body_size.is_multiple_of(1024 * 1024) {
-            info!("📊 Download progress: {} MB / {} MB", 
-                  body_size / (1024 * 1024), max_size_bytes / (1024 * 1024));
+            info!(
+                "📊 Download progress: {} MB / {} MB",
+                body_size / (1024 * 1024),
+                max_size_bytes / (1024 * 1024)
+            );
         }
     }
 
-    info!("✅ Streaming completed: {} chunks, {} bytes total", chunk_count, body_size);
+    info!(
+        "✅ Streaming completed: {} chunks, {} bytes total",
+        chunk_count, body_size
+    );
 
     temp_file.sync_all().await.map_err(|e| {
         error!("❌ Failed to sync temp file: {}", e);
@@ -238,15 +284,14 @@ pub async fn finalize_upload(
     mime_type: Option<String>,
     expiration: Option<u64>,
 ) -> AppResult<()> {
-    let final_path = file_storage::get_nested_path(
-        &state.upload_dir,
-        sha256,
-        extension.as_deref(),
-        expiration,
-    );
+    let final_path =
+        file_storage::get_nested_path(&state.upload_dir, sha256, extension.as_deref(), expiration);
 
     file_storage::move_file(temp_path, &final_path).await?;
-    file_storage::add_to_index(state, sha256, final_path, extension, mime_type, size, expiration).await?;
+    file_storage::add_to_index(
+        state, sha256, final_path, extension, mime_type, size, expiration,
+    )
+    .await?;
     file_storage::mark_changes_pending(state).await;
 
     Ok(())
@@ -277,7 +322,10 @@ pub async fn fetch_from_url(url: &str) -> AppResult<reqwest::Response> {
     info!("📥 Received HTTP response: {} for URL: {}", status, url);
 
     if !status.is_success() {
-        warn!("⚠️  HTTP request failed with status {} for URL: {}", status, url);
+        warn!(
+            "⚠️  HTTP request failed with status {} for URL: {}",
+            status, url
+        );
         return Err(AppError::BadRequest(format!(
             "Upstream returned status: {}",
             status
@@ -299,9 +347,12 @@ pub async fn validate_upstream_url(server_url: &str) -> AppResult<String> {
 /// Check file size against limit (from Content-Length header)
 pub fn check_size_limit(content_length: Option<u64>, max_size_bytes: u64) -> AppResult<()> {
     if let Some(content_length) = content_length {
-        info!("📊 Content-Length header present: {} bytes ({} MB)", 
-              content_length, content_length / (1024 * 1024));
-        
+        info!(
+            "📊 Content-Length header present: {} bytes ({} MB)",
+            content_length,
+            content_length / (1024 * 1024)
+        );
+
         if content_length > max_size_bytes {
             error!(
                 "❌ File too large: {} bytes ({} MB) exceeds maximum: {} bytes ({} MB)",
@@ -316,9 +367,53 @@ pub fn check_size_limit(content_length: Option<u64>, max_size_bytes: u64) -> App
                 max_size_bytes / (1024 * 1024)
             )));
         }
-        info!("✅ File size check passed: {} bytes within limit", content_length);
+        info!(
+            "✅ File size check passed: {} bytes within limit",
+            content_length
+        );
     } else {
         warn!("⚠️  No Content-Length header, proceeding with streaming download");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv6Addr;
+
+    #[test]
+    fn test_fips_hostname_detection() {
+        assert!(is_fips_hostname("npub123.fips"));
+        assert!(is_fips_hostname("NPUB123.FIPS."));
+        assert!(!is_fips_hostname("example.com"));
+        assert!(!is_fips_hostname("evil-fips.example.com"));
+    }
+
+    #[test]
+    fn test_fips_overlay_ip_detection() {
+        assert!(is_fips_overlay_ip(IpAddr::V6(Ipv6Addr::new(
+            0xfd00, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        assert!(is_fips_overlay_ip(IpAddr::V6(Ipv6Addr::new(
+            0xfdff, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        assert!(!is_fips_overlay_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert!(!is_fips_overlay_ip(IpAddr::V6(Ipv6Addr::new(
+            0xfc00, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        assert!(!is_fips_overlay_ip(IpAddr::V4("10.0.0.1".parse().unwrap())));
+    }
+
+    #[test]
+    fn test_allowed_private_upstream_ip_is_limited_to_fips_overlay() {
+        let fips_ip = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
+        let normal_ula = IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1));
+        let private_v4 = IpAddr::V4("10.0.0.1".parse().unwrap());
+
+        assert!(is_allowed_private_upstream_ip("npub123.fips", fips_ip));
+        assert!(!is_allowed_private_upstream_ip("example.com", fips_ip));
+        assert!(!is_allowed_private_upstream_ip("npub123.fips", normal_ula));
+        assert!(!is_allowed_private_upstream_ip("npub123.fips", private_v4));
+    }
 }

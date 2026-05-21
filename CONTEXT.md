@@ -399,6 +399,34 @@ docker run -p 3000:3000 \
   ghcr.io/flox1an/almond
 ```
 
+#### FIPS-enabled image
+
+GitHub Actions publishes a second image at `ghcr.io/flox1an/almond-fips`.
+It runs FIPS, dnsmasq, and Almond in one container. Almond can be reachable at
+the same time via normal Docker HTTP publishing (`-p 3000:3000`) and via the
+FIPS mesh (`http://<node-npub>.fips:3000`) when `BIND_ADDR=0.0.0.0:3000`.
+
+The container needs `NET_ADMIN`, `/dev/net/tun`, and IPv6 enabled:
+
+```bash
+docker run \
+  --cap-add NET_ADMIN \
+  --device /dev/net/tun:/dev/net/tun \
+  --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+  -p 3000:3000 \
+  -p 2121:2121/udp \
+  -e FIPS_NSEC=nsec1... \
+  -e FIPS_PEER_NPUB=npub1... \
+  -e FIPS_PEER_ADDR=203.0.113.10:2121 \
+  -e UPSTREAM_SERVERS=https://npub1upstream....fips \
+  ghcr.io/flox1an/almond-fips:main
+```
+
+`FIPS_REWRITE_DNS=true` installs container DNS for `.fips` upstream names.
+`FIPS_REWRITE_DNS=false` leaves DNS alone while still running the FIPS service.
+`FIPS_HOSTS` can provide newline-separated `/etc/fips/hosts` aliases, e.g.
+`my-upstream npub1...` for `https://my-upstream.fips`.
+
 ### Docker Build Optimization
 
 The Dockerfile uses BuildKit cache mounts for faster builds:
@@ -472,7 +500,6 @@ Expected build times:
 ## License
 
 MIT
-
 
 
 
