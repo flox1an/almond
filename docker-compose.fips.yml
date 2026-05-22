@@ -10,7 +10,7 @@ services:
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=0
     ports:
-      - "3000:3000"
+      - "3000:80"
       - "2121:2121/udp"
     environment:
       # FIPS identity (replace with your own nsec)
@@ -34,7 +34,7 @@ services:
 
       # Almond
       RUST_LOG: info
-      BIND_ADDR: 0.0.0.0:3000
+      BIND_ADDR: '[::]:80'
       PUBLIC_URL: https://almond.apps2.slidestr.net
       ALLOWED_NPUBS: npub1klr0dy2ul2dx9llk58czvpx73rprcmrvd5dc7ck8esg8f8es06qs427gxc,npub106nla9les99krufcx2r2ylzycvqqhpj25mgpv0l9hf8ew99hwlpqlq7ze5
       FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED: wot

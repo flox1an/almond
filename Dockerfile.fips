@@ -77,7 +77,7 @@ RUN chmod +x /app/almond /app/docker-entrypoint-fips.sh /usr/local/bin/fips /usr
     mkdir -p /app/files /etc/fips /run/fips
 
 ENV RUST_LOG=info
-ENV BIND_ADDR=0.0.0.0:3000
+ENV BIND_ADDR=[::]:3000
 ENV PUBLIC_URL=http://localhost:3000
 ENV MAX_TOTAL_SIZE=99999
 ENV MAX_TOTAL_FILES=1000000
