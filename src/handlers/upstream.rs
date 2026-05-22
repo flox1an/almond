@@ -1151,7 +1151,7 @@ async fn stream_and_save_from_upstream(
             "Download completed: {} total bytes, temp file flushed",
             body_size
         );
-        std::io::Result::<(String, u64)>::Ok((format!("{:x}", hasher.finalize()), body_size))
+        std::io::Result::<(String, u64)>::Ok((hex::encode(hasher.finalize()), body_size))
     });
 
     // ---- Streamer: reads the growing file without blocking the downloader
@@ -1390,7 +1390,7 @@ async fn download_file_from_upstream_background(
         return;
     }
 
-    let sha256 = format!("{:x}", hasher.finalize());
+    let sha256 = hex::encode(hasher.finalize());
     info!("Background download completed: {} bytes, SHA256: {}", body_size, sha256);
 
     // Move to final location

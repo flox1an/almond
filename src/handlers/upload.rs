@@ -626,7 +626,7 @@ async fn reconstruct_blob(
     drop(temp_file);
 
     // Verify hash
-    let calculated_sha256 = format!("{:x}", hasher.finalize());
+    let calculated_sha256 = hex::encode(hasher.finalize());
     info!("🔍 SHA256 verification: calculated {} vs expected {}", calculated_sha256, expected_sha256);
 
     if calculated_sha256 != expected_sha256 {

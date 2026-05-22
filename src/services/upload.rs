@@ -188,7 +188,7 @@ pub async fn stream_to_temp_file(
         AppError::IoError(format!("Failed to sync temp file: {}", e))
     })?;
 
-    let sha256 = format!("{:x}", hasher.finalize());
+    let sha256 = hex::encode(hasher.finalize());
     info!(
         "Upload complete: {} MB total, SHA256: {}",
         total_bytes / 1_048_576,
@@ -268,7 +268,7 @@ pub async fn stream_response_to_temp_file(
         AppError::IoError(format!("Failed to sync temp file: {}", e))
     })?;
 
-    let sha256 = format!("{:x}", hasher.finalize());
+    let sha256 = hex::encode(hasher.finalize());
     info!("🔐 Calculated SHA256: {}", sha256);
 
     Ok((sha256, body_size))
