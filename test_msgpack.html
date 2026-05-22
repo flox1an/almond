@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MessagePack Test</title>
+    <script src="https://cdn.jsdelivr.net/npm/@msgpack/msgpack@3.1.2/dist.umd/msgpack.min.js">
+</head>
+<body>
+    <h1>MessagePack Deserialization Test</h1>
+    <pre id="output"></pre>
+
+    <script>
+        const log = (...args) => {
+            const output = document.getElementById('output');
+            output.textContent += args.join(' ') + '\n';
+        };
+
+        // Base64 from Rust serialization (from localhost:3000/filter with 6 files)
+        const base64Data = "lc+RCi3siQJcwQgHCNwAGM1Wks20uc1JrM1ef82zKs0uzM2wx83/qc3ea80DYs2a5M0gts0P6M0B0802782mFc21pM3zus2XFM2ggM1yF83Brs3OQM1SIg==";
+
+        // Decode base64
+        const binaryString = atob(base64Data);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+
+        log('Raw bytes (hex):', Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' '));
+        log('Raw bytes length:', bytes.length);
+
+        // Test 1: Decode without options
+        log('\n=== Test 1: decode() without options ===');
+        try {
+            const decoded = MessagePack.decode(bytes);
+            log('SUCCESS!');
+            log('Type:', Array.isArray(decoded) ? 'Array' : typeof decoded);
+            log('Length:', decoded.length);
+
+            decoded.forEach((item, i) => {
+                log(`  [${i}]:`, typeof item, '=', item);
+                if (item instanceof Uint8Array || item instanceof Array) {
+                    log(`      Length: ${item.length}, First few:`, item.slice(0, 10));
+                }
+            });
+        } catch (e) {
+            log('FAILED:', e.message);
+            log(e.stack);
+        }
+
+        // Test 2: Decode with useBigInt64
+        log('\n=== Test 2: decode() with useBigInt64: true ===');
+        try {
+            const decoded = MessagePack.decode(bytes, { useBigInt64: true });
+            log('SUCCESS!');
+            log('Type:', Array.isArray(decoded) ? 'Array' : typeof decoded);
+            log('Length:', decoded.length);
+
+            decoded.forEach((item, i) => {
+                const itemStr = typeof item === 'bigint' ? item.toString() + 'n' : JSON.stringify(item);
+                log(`  [${i}]:`, typeof item, '=', itemStr);
+                if (item instanceof Uint8Array || item instanceof Array) {
+                    log(`      Length: ${item.length}, First few:`, item.slice(0, 10));
+                }
+            });
+        } catch (e) {
+            log('FAILED:', e.message);
+            log(e.stack);
+        }
+    </script>
+</body>
+</html>

@@ -8,7 +8,7 @@ use axum::{
     response::Response,
 };
 use serde_json::Value;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::error::AppError;
 use crate::helpers::*;
@@ -245,7 +245,7 @@ pub async fn mirror_blob(
                     Ok(content) => {
                         let references = hls::parse_playlist_references(&content);
                         if !references.is_empty() {
-                            info!(
+                            debug!(
                                 "[HLS] Detected playlist with {} references, spawning background mirror from {}",
                                 references.len(),
                                 origin_base_url
@@ -394,7 +394,7 @@ pub async fn patch_upload(
     // Create chunk file
     let chunk_filename = format!("chunk_{}_{}_{}", sha256, upload_offset, uuid::Uuid::new_v4());
     let chunk_path = chunk_temp_dir.join(&chunk_filename);
-    info!("💾 Creating chunk file: {} (offset: {}, length: {})", chunk_filename, upload_offset, content_length);
+    debug!("💾 Creating chunk file: {} (offset: {}, length: {})", chunk_filename, upload_offset, content_length);
 
     // Stream chunk data to file
     let body_stream = req.into_body().into_data_stream();
@@ -454,9 +454,9 @@ pub async fn patch_upload(
     });
 
     if is_new_upload {
-        info!("🚀 Starting new chunked upload: {} ({} bytes, type: {})", sha256, upload_length, upload_type);
+        debug!("🚀 Starting new chunked upload: {} ({} bytes, type: {})", sha256, upload_length, upload_type);
     } else {
-        info!("📦 Adding chunk to existing upload: {} (offset: {}, length: {})", sha256, upload_offset, content_length);
+        debug!("📦 Adding chunk to existing upload: {} (offset: {}, length: {})", sha256, upload_offset, content_length);
     }
 
     // Validate upload parameters match
@@ -482,7 +482,7 @@ pub async fn patch_upload(
     let total_received: u64 = chunk_upload.chunks.iter().map(|c| c.length).sum();
     let progress_percent = (total_received as f64 / upload_length as f64 * 100.0) as u8;
 
-    info!("📈 Chunk upload progress: {}/{} bytes ({}%) - {} chunks",
+    debug!("📈 Chunk upload progress: {}/{} bytes ({}%) - {} chunks",
           total_received, upload_length, progress_percent, chunk_upload.chunks.len());
 
     if total_received >= upload_length {
@@ -527,7 +527,7 @@ pub async fn patch_upload(
     } else {
         // Upload not complete
         let remaining = upload_length - total_received;
-        info!("⏳ Chunk accepted: {} bytes remaining - {} chunks received",
+        debug!("⏳ Chunk accepted: {} bytes remaining - {} chunks received",
               remaining, chunk_upload.chunks.len());
 
         Response::builder()
@@ -616,7 +616,7 @@ async fn reconstruct_blob(
         total_written += chunk_data.len() as u64;
 
         if i % 10 == 0 || i == sorted_chunks.len() - 1 {
-            info!("📊 Reconstruction progress: {}/{} chunks ({} bytes)", i + 1, sorted_chunks.len(), total_written);
+            debug!("📊 Reconstruction progress: {}/{} chunks ({} bytes)", i + 1, sorted_chunks.len(), total_written);
         }
     }
 
@@ -655,7 +655,7 @@ async fn reconstruct_blob(
     .await?;
 
     // Clean up chunk files
-    info!("🧹 Cleaning up {} chunk files", sorted_chunks.len());
+    debug!("🧹 Cleaning up {} chunk files", sorted_chunks.len());
     for chunk in &sorted_chunks {
         if let Err(e) = tokio::fs::remove_file(&chunk.chunk_path).await {
             error!("Failed to clean up chunk file {}: {}", chunk.chunk_path.display(), e);

@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::net::lookup_host;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::constants::*;
 use crate::error::{AppError, AppResult};
@@ -72,7 +72,7 @@ pub async fn validate_url_for_ssrf(url: &str) -> AppResult<()> {
         .host_str()
         .ok_or_else(|| AppError::BadRequest("URL has no hostname".to_string()))?;
 
-    info!(
+    debug!(
         "🔍 Resolving DNS for hostname: {} (timeout: {}s)",
         host, DNS_LOOKUP_TIMEOUT_SECS
     );
@@ -110,13 +110,13 @@ pub async fn validate_url_for_ssrf(url: &str) -> AppResult<()> {
             )));
         }
         if is_allowed_private_upstream_ip(host, ip) {
-            info!(
+            debug!(
                 "✅ Resolved {} -> {} (allowed FIPS overlay address)",
                 host, ip
             );
         }
         has_valid_ip = true;
-        info!("✅ Resolved {} -> {} (allowed)", host, ip);
+        debug!("✅ Resolved {} -> {} (allowed)", host, ip);
     }
 
     if !has_valid_ip {
@@ -126,7 +126,7 @@ pub async fn validate_url_for_ssrf(url: &str) -> AppResult<()> {
         )));
     }
 
-    info!(
+    debug!(
         "✅ DNS validation passed for {} ({} IP(s) resolved)",
         host,
         resolved_ips.len()
@@ -180,7 +180,7 @@ pub async fn stream_to_temp_file(
         }
 
         if last_log_time.elapsed() >= LOG_INTERVAL {
-            info!(
+            debug!(
                 "Upload progress {}: {} MB received",
                 temp_path.display(),
                 total_bytes / 1_048_576
@@ -256,11 +256,11 @@ pub async fn stream_response_to_temp_file(
         body_size += chunk.len() as u64;
 
         if body_size.is_multiple_of(1024 * 1024) {
-            info!(
-                "📊 Download progress: {} MB / {} MB",
-                body_size / (1024 * 1024),
-                max_size_bytes / (1024 * 1024)
-            );
+debug!(
+            "📊 Download progress: {} MB / {} MB",
+            body_size / (1024 * 1024),
+            max_size_bytes / (1024 * 1024)
+        );
         }
     }
 
@@ -309,7 +309,7 @@ pub async fn fetch_from_url(url: &str) -> AppResult<reqwest::Response> {
 
     let client = create_hardened_http_client()?;
 
-    info!("📡 Sending HTTP GET request to: {}", url);
+    debug!("📡 Sending HTTP GET request to: {}", url);
     let response = client.get(url).send().await.map_err(|e| {
         let error_msg = e.to_string();
         if error_msg.contains("timeout") || error_msg.contains("timed out") {
@@ -325,7 +325,7 @@ pub async fn fetch_from_url(url: &str) -> AppResult<reqwest::Response> {
     })?;
 
     let status = response.status();
-    info!("📥 Received HTTP response: {} for URL: {}", status, url);
+    debug!("📥 Received HTTP response: {} for URL: {}", status, url);
 
     if !status.is_success() {
         warn!(

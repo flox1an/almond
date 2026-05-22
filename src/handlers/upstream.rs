@@ -55,7 +55,7 @@ pub async fn try_upstream_servers(
 ) -> Result<Response, StatusCode> {
     // Forward range requests to upstream servers
     if headers.get(header::RANGE).is_some() {
-        info!("Range request detected, forwarding to upstream server");
+        debug!("Range request detected, forwarding to upstream server");
     }
 
     // Extract hash from filename for internal tracking (ongoing downloads, file index, etc.)
@@ -65,7 +65,7 @@ pub async fn try_upstream_servers(
 
     // Check if this file is already being downloaded (use hash for tracking)
     if state.ongoing_downloads.read().await.contains_key(&file_hash) {
-        info!(
+        debug!(
             "File {} is already being downloaded, proxying request to upstream",
             file_hash
         );
@@ -93,11 +93,11 @@ pub async fn try_upstream_servers(
         };
 
         if normalized_origin.is_empty() {
-            info!("Custom origin failed validation, trying xs servers or configured upstream servers");
+            debug!("Custom origin failed validation, trying xs servers or configured upstream servers");
         } else {
-            info!("Trying custom origin server first: {}", normalized_origin);
+            debug!("Trying custom origin server first: {}", normalized_origin);
             let file_url = format!("{}/{}", normalized_origin.trim_end_matches('/'), filename);
-            info!("Trying upstream server: {}", file_url);
+            debug!("Trying upstream server: {}", file_url);
             tried_servers.insert(normalized_origin.clone());
 
         // Create request with all relevant headers for upstream servers
@@ -106,14 +106,14 @@ pub async fn try_upstream_servers(
 
         match request.send().await {
             Ok(response) if response.status().is_success() => {
-                info!("Found file on custom origin server: {}", file_url);
+                debug!("Found file on custom origin server: {}", file_url);
                 // Get content type from upstream response
                 let content_type = extract_content_type_from_response(response.headers());
                 // Check if this is a range request
                 let has_range_header = headers.get(header::RANGE).is_some();
 
                 if has_range_header {
-                    info!("Range request detected for non-existent file {}, starting download from byte 0", file_hash);
+                    debug!("Range request detected for non-existent file {}, starting download from byte 0", file_hash);
                     // For range requests, we need to start a full download in the background
                     // while proxying the range request for immediate response
                     let full_request = client.get(&file_url);
@@ -121,7 +121,7 @@ pub async fn try_upstream_servers(
 
                     match full_request.send().await {
                         Ok(full_response) if full_response.status().is_success() => {
-                            info!("Starting full download from byte 0 for range request: {}", file_hash);
+                            debug!("Starting full download from byte 0 for range request: {}", file_hash);
                             // Prepare download state (use hash for tracking)
                             let (temp_path, _written_len, _notify) = prepare_download_state(state, &file_hash, &content_type).await?;
                             // Start the download in the background
@@ -142,7 +142,7 @@ pub async fn try_upstream_servers(
                                 .await;
                             });
                             // Proxy the range request to upstream for immediate response
-                            info!("Proxying range request to upstream while download starts in background: {}", file_hash);
+                            debug!("Proxying range request to upstream while download starts in background: {}", file_hash);
                             return proxy_upstream_response(response, &content_type, filename).await;
                         }
                         Ok(_) | Err(_) => {
@@ -152,7 +152,7 @@ pub async fn try_upstream_servers(
                     }
                 } else {
                     // For non-range requests, stream and save from upstream
-                    info!("Non-range request, starting download and streaming to client: {}", file_hash);
+                    debug!("Non-range request, starting download and streaming to client: {}", file_hash);
                     // Prepare download state (use hash for tracking)
                     let (temp_path, written_len, notify) = prepare_download_state(state, &file_hash, &content_type).await?;
                     return stream_and_save_from_upstream(
@@ -168,20 +168,20 @@ pub async fn try_upstream_servers(
                 }
             }
             Ok(response) => {
-                info!("Custom origin server {} returned status: {}", file_url, response.status());
+                debug!("Custom origin server {} returned status: {}", file_url, response.status());
             }
             Err(e) => {
                 warn!("Failed to fetch from custom origin {}: {}", file_url, e);
             }
         }
         // If custom origin failed, continue to xs_servers or configured upstream servers
-        info!("Custom origin failed, trying xs servers or configured upstream servers");
+        debug!("Custom origin failed, trying xs servers or configured upstream servers");
         }
     }
 
     // Priority 1: Try xs servers if provided
     if let Some(servers) = xs_servers {
-        info!("Priority 1: Trying xs servers ({} servers)", servers.len());
+        debug!("Priority 1: Trying xs servers ({} servers)", servers.len());
         for server in servers {
             // Validate URL against SSRF before making request
             let normalized_server = match validate_upstream_url(server).await {
@@ -200,7 +200,7 @@ pub async fn try_upstream_servers(
 
             tried_servers.insert(normalized_server.clone());
             let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-            info!("Trying xs server: {}", file_url);
+            debug!("Trying xs server: {}", file_url);
 
             // Create request with all relevant headers for upstream servers
             let request = client.get(&file_url);
@@ -208,7 +208,7 @@ pub async fn try_upstream_servers(
 
             match request.send().await {
                 Ok(response) if response.status().is_success() => {
-                    info!("Found file on xs server: {}", file_url);
+                    debug!("Found file on xs server: {}", file_url);
                     return handle_successful_upstream_response(
                         state, &client, response, &file_url, &file_hash, filename, headers
                     ).await;
@@ -221,12 +221,12 @@ pub async fn try_upstream_servers(
                 }
             }
         }
-        info!("All xs servers failed or returned non-success, trying local UPSTREAM_SERVERS");
+        debug!("All xs servers failed or returned non-success, trying local UPSTREAM_SERVERS");
     }
 
     // Priority 2: Try local UPSTREAM_SERVERS
     if !state.upstream_servers.is_empty() {
-        info!("Priority 2: Trying local UPSTREAM_SERVERS ({} servers)", state.upstream_servers.len());
+        debug!("Priority 2: Trying local UPSTREAM_SERVERS ({} servers)", state.upstream_servers.len());
         for server in &state.upstream_servers {
             // Validate URL against SSRF before making request
             let normalized_server = match validate_upstream_url(server).await {
@@ -245,7 +245,7 @@ pub async fn try_upstream_servers(
 
             tried_servers.insert(normalized_server.clone());
             let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-            info!("Trying local UPSTREAM_SERVER: {}", file_url);
+            debug!("Trying local UPSTREAM_SERVER: {}", file_url);
 
             // Create request with all relevant headers for upstream servers
             let request = client.get(&file_url);
@@ -253,7 +253,7 @@ pub async fn try_upstream_servers(
 
             match request.send().await {
                 Ok(response) if response.status().is_success() => {
-                    info!("Found file on local UPSTREAM_SERVER: {}", file_url);
+                    debug!("Found file on local UPSTREAM_SERVER: {}", file_url);
                     return handle_successful_upstream_response(
                         state, &client, response, &file_url, &file_hash, filename, headers
                     ).await;
@@ -266,15 +266,15 @@ pub async fn try_upstream_servers(
                 }
             }
         }
-        info!("All local UPSTREAM_SERVERS failed or returned non-success");
+        debug!("All local UPSTREAM_SERVERS failed or returned non-success");
     }
 
     // Priority 3: Fetch and try user servers (lazy fetch) if author pubkey is provided
     if let Some(pubkey) = author_pubkey {
-        info!("Priority 3: Fetching user server list for pubkey: {} (lazy fetch)", pubkey.to_hex());
+        debug!("Priority 3: Fetching user server list for pubkey: {} (lazy fetch)", pubkey.to_hex());
         match crate::services::blossom_servers::fetch_user_server_list(state, pubkey).await {
             Ok(user_servers) if !user_servers.is_empty() => {
-                info!("Fetched {} servers from user's server list (BUD-03)", user_servers.len());
+                debug!("Fetched {} servers from user's server list (BUD-03)", user_servers.len());
                 for server in &user_servers {
                     // Validate URL against SSRF before making request
                     let normalized_server = match validate_upstream_url(server).await {
@@ -293,7 +293,7 @@ pub async fn try_upstream_servers(
 
                     tried_servers.insert(normalized_server.clone());
                     let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-                    info!("Trying user server: {}", file_url);
+                    debug!("Trying user server: {}", file_url);
 
                     // Create request with all relevant headers for upstream servers
                     let request = client.get(&file_url);
@@ -301,7 +301,7 @@ pub async fn try_upstream_servers(
 
                     match request.send().await {
                         Ok(response) if response.status().is_success() => {
-                            info!("Found file on user server: {}", file_url);
+                            debug!("Found file on user server: {}", file_url);
                             return handle_successful_upstream_response(
                                 state, &client, response, &file_url, &file_hash, filename, headers
                             ).await;
@@ -314,10 +314,10 @@ pub async fn try_upstream_servers(
                         }
                     }
                 }
-                info!("All user servers failed or returned non-success");
+                debug!("All user servers failed or returned non-success");
             }
             Ok(_) => {
-                info!("User server list is empty for pubkey: {}", pubkey.to_hex());
+                debug!("User server list is empty for pubkey: {}", pubkey.to_hex());
             }
             Err(e) => {
                 warn!("Failed to fetch user server list for pubkey {}: {}", pubkey.to_hex(), e);
@@ -345,7 +345,7 @@ pub async fn try_upstream_redirect(
 
     // Check if this file is already being downloaded
     if state.ongoing_downloads.read().await.contains_key(&file_hash) {
-        info!(
+        debug!(
             "File {} is already being downloaded in background, redirecting to upstream",
             file_hash
         );
@@ -366,7 +366,7 @@ pub async fn try_upstream_redirect(
         };
 
         if !normalized_origin.is_empty() {
-            info!("Trying custom origin server first (HEAD): {}", normalized_origin);
+            debug!("Trying custom origin server first (HEAD): {}", normalized_origin);
             tried_servers.insert(normalized_origin.clone());
             let file_url = format!("{}/{}", normalized_origin.trim_end_matches('/'), filename);
 
@@ -380,7 +380,7 @@ pub async fn try_upstream_redirect(
 
     // Priority 1: Try xs servers if provided
     if let Some(servers) = xs_servers {
-        info!("Priority 1: Trying xs servers (HEAD) ({} servers)", servers.len());
+        debug!("Priority 1: Trying xs servers (HEAD) ({} servers)", servers.len());
         for server in servers {
             let normalized_server = match validate_upstream_url(server).await {
                 Ok(url) => url,
@@ -397,7 +397,7 @@ pub async fn try_upstream_redirect(
 
             tried_servers.insert(normalized_server.clone());
             let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-            info!("Trying xs server (HEAD): {}", file_url);
+            debug!("Trying xs server (HEAD): {}", file_url);
 
             if let Some(response) = try_head_and_redirect(
                 state, &client, &file_url, &file_hash, filename, cache_in_background
@@ -405,12 +405,12 @@ pub async fn try_upstream_redirect(
                 return Ok(response);
             }
         }
-        info!("All xs servers failed HEAD check, trying local UPSTREAM_SERVERS");
+        debug!("All xs servers failed HEAD check, trying local UPSTREAM_SERVERS");
     }
 
     // Priority 2: Try local UPSTREAM_SERVERS
     if !state.upstream_servers.is_empty() {
-        info!("Priority 2: Trying local UPSTREAM_SERVERS (HEAD) ({} servers)", state.upstream_servers.len());
+        debug!("Priority 2: Trying local UPSTREAM_SERVERS (HEAD) ({} servers)", state.upstream_servers.len());
         for server in &state.upstream_servers {
             let normalized_server = match validate_upstream_url(server).await {
                 Ok(url) => url,
@@ -427,7 +427,7 @@ pub async fn try_upstream_redirect(
 
             tried_servers.insert(normalized_server.clone());
             let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-            info!("Trying local UPSTREAM_SERVER (HEAD): {}", file_url);
+            debug!("Trying local UPSTREAM_SERVER (HEAD): {}", file_url);
 
             if let Some(response) = try_head_and_redirect(
                 state, &client, &file_url, &file_hash, filename, cache_in_background
@@ -435,15 +435,15 @@ pub async fn try_upstream_redirect(
                 return Ok(response);
             }
         }
-        info!("All local UPSTREAM_SERVERS failed HEAD check");
+        debug!("All local UPSTREAM_SERVERS failed HEAD check");
     }
 
     // Priority 3: Fetch and try user servers (lazy fetch) if author pubkey is provided
     if let Some(pubkey) = author_pubkey {
-        info!("Priority 3: Fetching user server list for pubkey: {} (lazy fetch)", pubkey.to_hex());
+        debug!("Priority 3: Fetching user server list for pubkey: {} (lazy fetch)", pubkey.to_hex());
         match crate::services::blossom_servers::fetch_user_server_list(state, pubkey).await {
             Ok(user_servers) if !user_servers.is_empty() => {
-                info!("Fetched {} servers from user's server list (BUD-03)", user_servers.len());
+                debug!("Fetched {} servers from user's server list (BUD-03)", user_servers.len());
                 for server in &user_servers {
                     let normalized_server = match validate_upstream_url(server).await {
                         Ok(url) => url,
@@ -460,7 +460,7 @@ pub async fn try_upstream_redirect(
 
                     tried_servers.insert(normalized_server.clone());
                     let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-                    info!("Trying user server (HEAD): {}", file_url);
+                    debug!("Trying user server (HEAD): {}", file_url);
 
                     if let Some(response) = try_head_and_redirect(
                         state, &client, &file_url, &file_hash, filename, cache_in_background
@@ -468,10 +468,10 @@ pub async fn try_upstream_redirect(
                         return Ok(response);
                     }
                 }
-                info!("All user servers failed HEAD check");
+                debug!("All user servers failed HEAD check");
             }
             Ok(_) => {
-                info!("User server list is empty for pubkey: {}", pubkey.to_hex());
+                debug!("User server list is empty for pubkey: {}", pubkey.to_hex());
             }
             Err(e) => {
                 warn!("Failed to fetch user server list for pubkey {}: {}", pubkey.to_hex(), e);
@@ -493,7 +493,7 @@ async fn try_head_and_redirect(
 ) -> Option<Response<Body>> {
     match client.head(file_url).send().await {
         Ok(response) if response.status().is_success() => {
-            info!("HEAD check succeeded for: {}", file_url);
+            debug!("HEAD check succeeded for: {}", file_url);
 
             // Get content type and size from HEAD response for background download
             let content_type = extract_content_type_from_response(response.headers());
@@ -508,7 +508,7 @@ async fn try_head_and_redirect(
                     let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
                     let should_cache = match content_length {
                         Some(len) if len > max_size_bytes => {
-                            info!(
+                            debug!(
                                 "File {} too large for background cache: {} bytes (max: {} MB)",
                                 file_hash, len, state.max_upstream_download_size_mb
                             );
@@ -518,7 +518,7 @@ async fn try_head_and_redirect(
                     };
 
                     if should_cache {
-                        info!("Starting background download for caching: {}", file_hash);
+                        debug!("Starting background download for caching: {}", file_hash);
                         let state_clone = state.clone();
                         let file_url_clone = file_url.to_string();
                         let file_hash_clone = file_hash.to_string();
@@ -534,7 +534,7 @@ async fn try_head_and_redirect(
                         });
                     }
                 } else {
-                    info!("File {} already being downloaded, skipping duplicate background download", file_hash);
+                    debug!("File {} already being downloaded, skipping duplicate background download", file_hash);
                 }
             }
 
@@ -560,7 +560,7 @@ async fn try_head_and_redirect(
 
 /// Build a 302 redirect response to the upstream URL
 fn build_redirect_response(upstream_url: &str, filename: &str) -> Result<Response<Body>, StatusCode> {
-    info!("Redirecting to upstream: {}", upstream_url);
+    debug!("Redirecting to upstream: {}", upstream_url);
 
     // Extract clean filename for logging
     let clean_filename = std::path::Path::new(filename)
@@ -595,7 +595,7 @@ async fn start_background_download_for_redirect(
     // Make GET request to download the file
     match client.get(file_url).send().await {
         Ok(response) if response.status().is_success() => {
-            info!("Starting background download from: {}", file_url);
+            debug!("Starting background download from: {}", file_url);
 
             // Prepare download state
             match prepare_download_state(state, file_hash, content_type).await {
@@ -641,7 +641,7 @@ async fn handle_successful_upstream_response(
     let has_range_header = headers.get(header::RANGE).is_some();
 
     if has_range_header {
-        info!("Range request detected for non-existent file {}, starting download from byte 0", file_hash);
+        debug!("Range request detected for non-existent file {}, starting download from byte 0", file_hash);
 
         // For range requests, we need to start a full download in the background
         // while proxying the range request for immediate response
@@ -650,7 +650,7 @@ async fn handle_successful_upstream_response(
 
         match full_request.send().await {
             Ok(full_response) if full_response.status().is_success() => {
-                info!("Starting full download from byte 0 for range request: {}", file_hash);
+                debug!("Starting full download from byte 0 for range request: {}", file_hash);
 
                 // Prepare download state (use hash for tracking)
                 let (temp_path, _written_len, _notify) = prepare_download_state(state, file_hash, &content_type).await?;
@@ -674,7 +674,7 @@ async fn handle_successful_upstream_response(
                 });
 
                 // Proxy the range request to upstream for immediate response
-                info!("Proxying range request to upstream while download starts in background: {}", file_hash);
+                debug!("Proxying range request to upstream while download starts in background: {}", file_hash);
                 return proxy_upstream_response(response, &content_type, filename).await;
             }
             Ok(_) | Err(_) => {
@@ -685,7 +685,7 @@ async fn handle_successful_upstream_response(
         }
     } else {
         // For non-range requests, stream and save from upstream
-        info!("Non-range request, starting download and streaming to client: {}", file_hash);
+        debug!("Non-range request, starting download and streaming to client: {}", file_hash);
 
         // Prepare download state (use hash for tracking)
         let (temp_path, written_len, notify) = prepare_download_state(state, file_hash, &content_type).await?;
@@ -713,7 +713,7 @@ async fn proxy_request_to_upstream(
     xs_servers: Option<&[String]>,
     author_pubkey: Option<&nostr_relay_pool::prelude::PublicKey>,
 ) -> Result<Response<Body>, StatusCode> {
-    info!("Proxying request to upstream for ongoing download: {}", filename);
+    debug!("Proxying request to upstream for ongoing download: {}", filename);
 
     let client = Client::new();
 
@@ -733,7 +733,7 @@ async fn proxy_request_to_upstream(
 
         if !normalized_origin.is_empty() {
             let file_url = format!("{}/{}", normalized_origin.trim_end_matches('/'), filename);
-            info!("Proxying to custom origin server: {}", file_url);
+            debug!("Proxying to custom origin server: {}", file_url);
             tried_servers.insert(normalized_origin.clone());
 
             // Create request with all relevant headers
@@ -742,12 +742,12 @@ async fn proxy_request_to_upstream(
 
             match request.send().await {
                 Ok(response) if response.status().is_success() => {
-                    info!("Successfully proxied request to custom origin: {}", file_url);
+                    debug!("Successfully proxied request to custom origin: {}", file_url);
                     let content_type = extract_content_type_from_response(response.headers());
                     return proxy_upstream_response(response, &content_type, filename).await;
                 }
                 Ok(response) => {
-                    info!("Custom origin server {} returned status: {}", file_url, response.status());
+                    debug!("Custom origin server {} returned status: {}", file_url, response.status());
                 }
                 Err(e) => {
                     warn!("Failed to proxy to custom origin {}: {}", file_url, e);
@@ -774,14 +774,14 @@ async fn proxy_request_to_upstream(
             tried_servers.insert(normalized_server.clone());
 
             let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-            info!("Proxying to xs server: {}", file_url);
+            debug!("Proxying to xs server: {}", file_url);
 
             let request = client.get(&file_url);
             let request = copy_headers_to_reqwest(headers, request);
 
             match request.send().await {
                 Ok(response) if response.status().is_success() => {
-                    info!("Successfully proxied request to xs server: {}", file_url);
+                    debug!("Successfully proxied request to xs server: {}", file_url);
                     let content_type = extract_content_type_from_response(response.headers());
                     return proxy_upstream_response(response, &content_type, filename).await;
                 }
@@ -812,14 +812,14 @@ async fn proxy_request_to_upstream(
         tried_servers.insert(normalized_server.clone());
 
         let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-        info!("Proxying to local UPSTREAM_SERVER: {}", file_url);
+        debug!("Proxying to local UPSTREAM_SERVER: {}", file_url);
 
         let request = client.get(&file_url);
         let request = copy_headers_to_reqwest(headers, request);
 
         match request.send().await {
             Ok(response) if response.status().is_success() => {
-                info!("Successfully proxied request to UPSTREAM_SERVER: {}", file_url);
+                debug!("Successfully proxied request to UPSTREAM_SERVER: {}", file_url);
                 let content_type = extract_content_type_from_response(response.headers());
                 return proxy_upstream_response(response, &content_type, filename).await;
             }
@@ -834,7 +834,7 @@ async fn proxy_request_to_upstream(
 
     // Priority 3: Fetch and try user servers (lazy fetch)
     if let Some(pubkey) = author_pubkey {
-        info!("Fetching user server list for proxying: {}", pubkey.to_hex());
+        debug!("Fetching user server list for proxying: {}", pubkey.to_hex());
         if let Ok(user_servers) = crate::services::blossom_servers::fetch_user_server_list(state, pubkey).await {
             for server in &user_servers {
                 // Validate URL against SSRF before making request
@@ -852,14 +852,14 @@ async fn proxy_request_to_upstream(
                 tried_servers.insert(normalized_server.clone());
 
                 let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-                info!("Proxying to user server: {}", file_url);
+                debug!("Proxying to user server: {}", file_url);
 
                 let request = client.get(&file_url);
                 let request = copy_headers_to_reqwest(headers, request);
 
                 match request.send().await {
                     Ok(response) if response.status().is_success() => {
-                        info!("Successfully proxied request to user server: {}", file_url);
+                        debug!("Successfully proxied request to user server: {}", file_url);
                         let content_type = extract_content_type_from_response(response.headers());
                         return proxy_upstream_response(response, &content_type, filename).await;
                     }
@@ -889,7 +889,7 @@ async fn proxy_upstream_response(
         .map(|s| s.to_string())
         .unwrap_or_else(|| "none".to_string());
     
-    info!("Proxying upstream response for: {} (content-type: {}, range: {})", 
+    debug!("Proxying upstream response for: {} (content-type: {}, range: {})", 
           filename, content_type, content_range);
     
     let status = if response.status().is_success() {
@@ -1001,7 +1001,7 @@ async fn prepare_download_state(
                 content_type.to_string(),
             ),
         );
-        info!("Marked {} as being downloaded with shared state at {} (content-type: {}, extension: {})", 
+        debug!("Marked {} as being downloaded with shared state at {} (content-type: {}, extension: {})", 
               filename, temp_path.display(), content_type, file_extension);
     }
 
@@ -1038,7 +1038,7 @@ async fn stream_and_save_from_upstream(
             );
             return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
-        info!(
+        debug!(
             "Upstream file size check passed: {} bytes (limit: {} MB)",
             content_length, state.max_upstream_download_size_mb
         );
@@ -1052,7 +1052,7 @@ async fn stream_and_save_from_upstream(
     // Derive extension from content type
     let extension = get_extension_from_mime(&content_type);
 
-    info!(
+    debug!(
         "Starting download from upstream: {} to temp file: {}",
         file_url,
         temp_path.display()
@@ -1067,29 +1067,29 @@ async fn stream_and_save_from_upstream(
     }
 
     // two independent handles
-    info!("Creating writer file handle...");
+    debug!("Creating writer file handle...");
     let mut writer = File::create(&temp_path).await.map_err(|e| {
         error!("create temp file: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    info!("✅ Writer file handle created successfully");
+    debug!("✅ Writer file handle created successfully");
 
     // Check if file was actually created
     if !temp_path.exists() {
         error!("Temp file was not created: {}", temp_path.display());
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
-    info!(
+    debug!(
         "✅ Temp file exists after creation: {}",
         temp_path.display()
     );
 
-    info!("Creating reader file handle...");
+    debug!("Creating reader file handle...");
     let reader = File::open(&temp_path).await.map_err(|e| {
         error!("open temp file for read: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    info!("✅ Reader file handle created successfully");
+    debug!("✅ Reader file handle created successfully");
 
     // ---- Shared progress + Notify (passed as parameters)
 
@@ -1104,7 +1104,7 @@ async fn stream_and_save_from_upstream(
 
     let max_size_bytes_clone = max_size_bytes;
     let download_task = tokio::spawn(async move {
-        info!("Download task started, beginning to read from upstream stream");
+        debug!("Download task started, beginning to read from upstream stream");
 
         while let Some(next) = chunks.next().await {
             let chunk =
@@ -1136,7 +1136,7 @@ async fn stream_and_save_from_upstream(
 
             // Log progress every 1MB
             if body_size.is_multiple_of(1024 * 1024) {
-                info!(
+                debug!(
                     "Download progress: {} bytes written to temp file (limit: {} MB)",
                     body_size,
                     max_size_bytes_clone / (1024 * 1024)
@@ -1144,10 +1144,10 @@ async fn stream_and_save_from_upstream(
             }
         }
 
-        info!("Upstream stream finished, flushing temp file");
+        debug!("Upstream stream finished, flushing temp file");
         // Important: flush so readers can safely see all bytes
         writer.flush().await?;
-        info!(
+        debug!(
             "Download completed: {} total bytes, temp file flushed",
             body_size
         );
@@ -1159,7 +1159,7 @@ async fn stream_and_save_from_upstream(
     let stream = create_tailing_stream(reader, written_len.clone(), notify.clone()).await;
 
     // ---- Build response (streaming starts immediately)
-    info!("🚀 Starting immediate streaming to client (download runs in background)");
+    debug!("🚀 Starting immediate streaming to client (download runs in background)");
     let body = Body::from_stream(stream);
     let mut response = Response::builder()
         .status(StatusCode::OK)
@@ -1183,17 +1183,17 @@ async fn stream_and_save_from_upstream(
     let file_url_clone = file_url.to_string();
     let filename_clone = filename.to_string();
     tokio::spawn(async move {
-        info!("Waiting for download task to complete...");
+        debug!("Waiting for download task to complete...");
         match download_task.await {
             Ok(Ok((sha256, total))) => {
-                info!("Download task completed successfully, finalizing file");
-                info!("SHA256: {}", sha256);
-                info!("Total bytes: {}", total);
+                debug!("Download task completed successfully, finalizing file");
+                debug!("SHA256: {}", sha256);
+                debug!("Total bytes: {}", total);
 
                 // calculate final path
                 let final_path =
                     crate::utils::get_nested_path(&state_clone.upload_dir, &sha256, extension_clone.as_deref(), None);
-                info!(
+                debug!(
                     "Moving temp file {} to final location: {}",
                     temp_path.display(),
                     final_path.display()
@@ -1208,11 +1208,11 @@ async fn stream_and_save_from_upstream(
                     let _ = std::fs::remove_file(&temp_path);
                     return;
                 }
-                info!("Successfully moved temp file to final location");
+                debug!("Successfully moved temp file to final location");
 
                 // Index & Stats
                 let key = sha256[..sha256.len().min(64)].to_string();
-                info!("Adding file to index with key: {}", key);
+                debug!("Adding file to index with key: {}", key);
                 state_clone.file_index.write().await.insert(
                     key.clone(),
                     crate::models::FileMetadata {
@@ -1228,7 +1228,7 @@ async fn stream_and_save_from_upstream(
                         expiration: None,
                     },
                 );
-                info!("Successfully added file to index");
+                debug!("Successfully added file to index");
 
                 // Mark that changes are pending for storage limit enforcement
                 let mut changes_pending = state_clone.changes_pending.write().await;
@@ -1252,7 +1252,7 @@ async fn stream_and_save_from_upstream(
                 {
                     let mut ongoing_downloads = state_clone.ongoing_downloads.write().await;
                     ongoing_downloads.remove(&filename_clone);
-                    info!("Removed {} from ongoing downloads", filename_clone);
+                    debug!("Removed {} from ongoing downloads", filename_clone);
                 }
             }
             Ok(Err(e)) => {
@@ -1261,7 +1261,7 @@ async fn stream_and_save_from_upstream(
                 {
                     let mut ongoing_downloads = state_clone.ongoing_downloads.write().await;
                     ongoing_downloads.remove(&filename_clone);
-                    info!(
+                    debug!(
                         "Removed {} from ongoing downloads due to error",
                         filename_clone
                     );
@@ -1273,7 +1273,7 @@ async fn stream_and_save_from_upstream(
                 {
                     let mut ongoing_downloads = state_clone.ongoing_downloads.write().await;
                     ongoing_downloads.remove(&filename_clone);
-                    info!(
+                    debug!(
                         "Removed {} from ongoing downloads due to join error",
                         filename_clone
                     );
@@ -1314,7 +1314,7 @@ async fn download_file_from_upstream_background(
     // Derive extension from content type
     let extension = get_extension_from_mime(&content_type);
 
-    info!(
+    debug!(
         "Starting background download from upstream: {} to temp file: {}",
         file_url,
         temp_path.display()
@@ -1391,7 +1391,7 @@ async fn download_file_from_upstream_background(
     }
 
     let sha256 = hex::encode(hasher.finalize());
-    info!("Background download completed: {} bytes, SHA256: {}", body_size, sha256);
+    debug!("Background download completed: {} bytes, SHA256: {}", body_size, sha256);
 
     // Move to final location
     let final_path = crate::utils::get_nested_path(&state.upload_dir, &sha256, extension.as_deref(), None);
@@ -1529,7 +1529,7 @@ fn apply_streaming_headers(
         headers.insert(header::CONTENT_DISPOSITION, header_value);
     }
 
-    info!(
+    debug!(
         "Applied streaming headers: Content-Type={}, Content-Disposition=inline; filename=\"{}\"",
         mime_type, filename_display
     );

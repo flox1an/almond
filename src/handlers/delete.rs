@@ -5,7 +5,7 @@ use axum::{
     response::Response,
 };
 use tokio::fs;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::models::AppState;
 use crate::services::auth;
@@ -32,7 +32,7 @@ pub async fn delete_blob(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    info!("🗑️  Delete request for blob: {}", sha256);
+    debug!("🗑️  Delete request for blob: {}", sha256);
 
     // Validate Nostr authorization (strict mode - no WOT)
     let auth_header = headers
@@ -47,7 +47,7 @@ pub async fn delete_blob(
         .await
         .map_err(StatusCode::from)?;
 
-    info!(
+    debug!(
         "✅ Authorization validated for pubkey: {}",
         auth_event.pubkey
     );
@@ -55,7 +55,7 @@ pub async fn delete_blob(
     // Validate delete-specific authorization (t=delete tag + x tag)
     auth::validate_delete_auth(&auth_event, &sha256).map_err(StatusCode::from)?;
 
-    info!("✅ Delete authorization tags validated");
+    debug!("✅ Delete authorization tags validated");
 
     // Check if blob exists in file index
     let file_index = state.file_index.read().await;
@@ -67,7 +67,7 @@ pub async fn delete_blob(
     let file_path = file_metadata.path.clone();
     drop(file_index); // Release read lock before modifying
 
-    info!("📁 Found blob at: {}", file_path.display());
+    debug!("📁 Found blob at: {}", file_path.display());
 
     // Delete the physical file
     fs::remove_file(&file_path).await.map_err(|e| {
@@ -75,14 +75,14 @@ pub async fn delete_blob(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    info!("✅ Deleted file from disk: {}", file_path.display());
+    debug!("✅ Deleted file from disk: {}", file_path.display());
 
     // Remove from file index
     let mut file_index = state.file_index.write().await;
     file_index.remove(&sha256);
     drop(file_index);
 
-    info!("✅ Removed blob from index: {}", sha256);
+    debug!("✅ Removed blob from index: {}", sha256);
 
     // Mark changes pending for cleanup (empty directory cleanup)
     let mut changes_pending = state.changes_pending.write().await;

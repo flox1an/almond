@@ -40,7 +40,7 @@ pub async fn handle_file_request(
         match find_file(&state.file_index, &file_hash).await {
             Some(file_metadata) => {
                 // File is available locally - serve it immediately, skip all upstream logic
-                info!("File {} found locally, serving immediately (skipping upstream lookup)", file_hash);
+                debug!("File {} found locally, serving immediately (skipping upstream lookup)", file_hash);
                 
                 if req.method() == Method::HEAD {
                     Response::builder()
@@ -88,7 +88,7 @@ pub async fn handle_file_request(
             }
             None => {
                 // File not found locally - now do upstream server lookup
-                info!("File {} not found locally, checking upstream servers", file_hash);
+                debug!("File {} not found locally, checking upstream servers", file_hash);
 
                 // Check if custom upstream origin feature is enabled
                 let upstream_feature_enabled = state.feature_custom_upstream_origin_enabled.is_enabled();
@@ -197,7 +197,7 @@ pub async fn handle_file_request(
                 // Branch based on upstream mode: proxy vs redirect
                 let upstream_result = if state.upstream_mode.is_redirect() {
                     // Redirect mode: HEAD check then 302 redirect
-                    info!("Using upstream redirect mode (cache_in_background: {})", state.upstream_mode.caches_in_background());
+                    debug!("Using upstream redirect mode (cache_in_background: {})", state.upstream_mode.caches_in_background());
                     crate::handlers::upstream::try_upstream_redirect(
                         &state,
                         &filename,

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
-use tracing::{error, info};
+use tracing::{error, debug};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{AppState, FileMetadata};
@@ -43,7 +43,7 @@ pub async fn move_file(from: &Path, to: &Path) -> AppResult<()> {
         AppError::IoError(format!("Failed to move file: {}", e))
     })?;
     
-    info!("Successfully moved file from {} to {}", from.display(), to.display());
+    debug!("Successfully moved file from {} to {}", from.display(), to.display());
     Ok(())
 }
 
@@ -76,9 +76,9 @@ pub async fn add_to_index(
     );
 
     if let Some(exp) = expiration {
-        info!("Added file to index: {} (expires: {})", key, exp);
+        debug!("Added file to index: {} (expires: {})", key, exp);
     } else {
-        info!("Added file to index: {}", key);
+        debug!("Added file to index: {}", key);
     }
 
     Ok(())
@@ -88,7 +88,7 @@ pub async fn add_to_index(
 pub async fn remove_from_index(state: &AppState, sha256: &str) -> AppResult<()> {
     let mut file_index = state.file_index.write().await;
     file_index.remove(sha256);
-    info!("Removed file from index: {}", sha256);
+    debug!("Removed file from index: {}", sha256);
     Ok(())
 }
 
@@ -114,7 +114,7 @@ pub async fn delete_file(state: &AppState, sha256: &str) -> AppResult<()> {
         AppError::IoError(format!("Failed to delete file: {}", e))
     })?;
 
-    info!("Deleted file from disk: {}", file_metadata.path.display());
+    debug!("Deleted file from disk: {}", file_metadata.path.display());
 
     // Remove from index
     remove_from_index(state, sha256).await?;
