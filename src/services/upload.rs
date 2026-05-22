@@ -55,11 +55,17 @@ pub async fn validate_url_for_ssrf(url: &str) -> AppResult<()> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| AppError::BadRequest(format!("Invalid URL format: {}", e)))?;
 
+    // Allow HTTP for .fips hostnames (FIPS mesh provides transport encryption)
     if parsed.scheme() != "https" {
-        return Err(AppError::BadRequest(format!(
-            "Only HTTPS URLs are allowed, got: {}",
-            parsed.scheme()
-        )));
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| AppError::BadRequest("URL has no hostname".to_string()))?;
+        if parsed.scheme() != "http" || !is_fips_hostname(host) {
+            return Err(AppError::BadRequest(format!(
+                "Only HTTPS URLs are allowed, got: {}",
+                parsed.scheme()
+            )));
+        }
     }
 
     let host = parsed
