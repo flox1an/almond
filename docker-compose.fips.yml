@@ -1,6 +1,8 @@
 services:
-  almond-fips:
-    image: ghcr.io/flox1an/almond-fips:main
+  almond:
+    build:
+      context: .
+      dockerfile: Dockerfile.fips
     cap_add:
       - NET_ADMIN
     devices:
@@ -11,26 +13,34 @@ services:
       - "3000:3000"
       - "2121:2121/udp"
     environment:
-      RUST_LOG: ${RUST_LOG:-info}
-      BIND_ADDR: 0.0.0.0:3000
-      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3000}
-      STORAGE_PATH: /app/files
-      UPSTREAM_SERVERS: ${UPSTREAM_SERVERS:-}
-      UPSTREAM_MODE: ${UPSTREAM_MODE:-proxy}
-      FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED: ${FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED:-public}
-      FIPS_NSEC: ${FIPS_NSEC:?set FIPS_NSEC to a hex or nsec1 FIPS node secret}
-      FIPS_PEER_NPUB: ${FIPS_PEER_NPUB:-}
-      FIPS_PEER_ADDR: ${FIPS_PEER_ADDR:-}
-      FIPS_PEER_ALIAS: ${FIPS_PEER_ALIAS:-peer}
-      FIPS_PEER_TRANSPORT: ${FIPS_PEER_TRANSPORT:-udp}
-      FIPS_PEERS: ${FIPS_PEERS:-}
-      FIPS_UDP_BIND: ${FIPS_UDP_BIND:-0.0.0.0:2121}
-      FIPS_TUN_MTU: ${FIPS_TUN_MTU:-1280}
-      FIPS_REWRITE_DNS: ${FIPS_REWRITE_DNS:-true}
-      FIPS_ISOLATE: ${FIPS_ISOLATE:-false}
-      FIPS_HOSTS: ${FIPS_HOSTS:-}
-    volumes:
-      - almond-fips-files:/app/files
+      # FIPS identity (replace with your own nsec)
+      FIPS_NSEC: nsec1...
 
-volumes:
-  almond-fips-files:
+      # FIPS peers
+      FIPS_PEERS: |-
+        npub1260n42s06vzc7796w0fh3ny7zcpw6tlk4gq3940gmfrzl5c9pv2s3657q8,217.160.76.169:2121,test-de01,udp
+        npub1u0z26dc4qeneu5rvwvmpfhtwh3522ed6rlgxr9jarrfnjrc6ew4qxjysrs,88.208.241.33:2121,test-uk01,udp
+        npub10yffd020a4ag8zcy75f9pruq3rnghvvhd5hphl9s62zgp35s560qrksp9u,23.182.128.74:2121,test-us02,udp
+
+      # .fips hostname aliases (so http://test-de01.fips resolves for upstream)
+      FIPS_HOSTS: |-
+        test-de01 npub1260n42s06vzc7796w0fh3ny7zcpw6tlk4gq3940gmfrzl5c9pv2s3657q8
+        test-es01 npub1...
+        test-uk01 npub1u0z26dc4qeneu5rvwvmpfhtwh3522ed6rlgxr9jarrfnjrc6ew4qxjysrs
+        test-us01 npub1...
+        test-us02 npub10yffd020a4ag8zcy75f9pruq3rnghvvhd5hphl9s62zgp35s560qrksp9u
+        test-us03 npub1...
+        test-us04 npub1...
+
+      # Almond
+      RUST_LOG: info
+      BIND_ADDR: 0.0.0.0:3000
+      PUBLIC_URL: https://almond.apps2.slidestr.net
+      ALLOWED_NPUBS: npub1klr0dy2ul2dx9llk58czvpx73rprcmrvd5dc7ck8esg8f8es06qs427gxc,npub106nla9les99krufcx2r2ylzycvqqhpj25mgpv0l9hf8ew99hwlpqlq7ze5
+      FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED: wot
+      MAX_CHUNK_SIZE_MB: 200
+      MAX_TOTAL_FILES: 999999999
+      MAX_TOTAL_SIZE: 150000
+      MAX_UPSTREAM_DOWNLOAD_SIZE_MB: 5000
+      UPSTREAM_MODE: proxy
+      UPSTREAM_SERVERS: https://blossom.primal.net,https://blossom.yakihonne.com/,https://haven.sovereignengineering.io,https://cdn.satellite.earth/,https://24242.io/,https://blossom.band/,https://nostr.download/,http://test-de01.fips:3000
