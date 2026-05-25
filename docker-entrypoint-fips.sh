@@ -194,6 +194,15 @@ if [ "${FIPS_GENERATE_CONFIG:-true}" = "true" ] || [ ! -f "$FIPS_CONFIG_PATH" ];
     generate_fips_config
 fi
 
+# Write TLS cert/key from environment variables if provided
+if [ -n "${TLS_CERT:-}" ] && [ -n "${TLS_KEY:-}" ]; then
+    TLS_CERT_PATH="${TLS_CERT_PATH:-/app/cert.pem}"
+    TLS_KEY_PATH="${TLS_KEY_PATH:-/app/key.pem}"
+    printf '%s' "$TLS_CERT" > "$TLS_CERT_PATH"
+    printf '%s' "$TLS_KEY" > "$TLS_KEY_PATH"
+    chmod 600 "$TLS_KEY_PATH"
+fi
+
 configure_fips_hosts
 configure_dns
 configure_isolation
