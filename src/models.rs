@@ -39,7 +39,10 @@ impl FeatureMode {
 
     /// Check if feature is enabled (wot, dvm, or public)
     pub fn is_enabled(&self) -> bool {
-        matches!(self, FeatureMode::Wot | FeatureMode::Dvm | FeatureMode::Public)
+        matches!(
+            self,
+            FeatureMode::Wot | FeatureMode::Dvm | FeatureMode::Public
+        )
     }
 
     /// Check if feature requires WOT validation
@@ -89,7 +92,10 @@ impl UpstreamMode {
 
     /// Check if this mode uses redirect (vs proxy)
     pub fn is_redirect(&self) -> bool {
-        matches!(self, UpstreamMode::Redirect | UpstreamMode::RedirectAndCache)
+        matches!(
+            self,
+            UpstreamMode::Redirect | UpstreamMode::RedirectAndCache
+        )
     }
 
     /// Check if this mode caches in background after redirect
@@ -135,7 +141,8 @@ impl ReportAction {
     }
 }
 
-type OngoingDownloadsMap = Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>;
+type OngoingDownloadsMap =
+    Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FileMetadata {
@@ -283,6 +290,8 @@ pub struct BlobDescriptor {
 pub struct ListQuery {
     pub since: Option<u64>,
     pub until: Option<u64>,
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
     #[serde(rename = "as")]
     pub author: Option<String>,
 }
@@ -329,7 +338,11 @@ mod tests {
         // Test with serde_html_form which is what axum_extra::Query uses
         let query_string = "xs=blossom.primal.net";
         let result: Result<FileRequestQuery, _> = serde_html_form::from_str(query_string);
-        assert!(result.is_ok(), "Single xs parameter should deserialize successfully: {:?}", result.as_ref().err());
+        assert!(
+            result.is_ok(),
+            "Single xs parameter should deserialize successfully: {:?}",
+            result.as_ref().err()
+        );
         let query = result.unwrap();
         assert_eq!(query.xs.len(), 1);
         assert_eq!(query.xs[0], "blossom.primal.net");
@@ -339,7 +352,11 @@ mod tests {
     fn test_file_request_query_multiple_xs() {
         let query_string = "xs=blossom.primal.net&xs=video.nostr.build";
         let result: Result<FileRequestQuery, _> = serde_html_form::from_str(query_string);
-        assert!(result.is_ok(), "Multiple xs parameters should deserialize successfully: {:?}", result.as_ref().err());
+        assert!(
+            result.is_ok(),
+            "Multiple xs parameters should deserialize successfully: {:?}",
+            result.as_ref().err()
+        );
         let query = result.unwrap();
         assert_eq!(query.xs.len(), 2);
         assert_eq!(query.xs[0], "blossom.primal.net");
@@ -350,7 +367,10 @@ mod tests {
     fn test_file_request_query_no_xs() {
         let query_string = "origin=example.com";
         let result: Result<FileRequestQuery, _> = serde_html_form::from_str(query_string);
-        assert!(result.is_ok(), "Query without xs should deserialize successfully");
+        assert!(
+            result.is_ok(),
+            "Query without xs should deserialize successfully"
+        );
         let query = result.unwrap();
         assert_eq!(query.xs.len(), 0);
     }
@@ -359,31 +379,62 @@ mod tests {
     fn test_file_request_query_combined() {
         let query_string = "xs=blossom.primal.net&xs=video.nostr.build&as=08039bc2786f9f58c94146c6666fac9a7d7ceb40d0798a8f49140763cc715053";
         let result: Result<FileRequestQuery, _> = serde_html_form::from_str(query_string);
-        assert!(result.is_ok(), "Query with multiple xs and as parameters should deserialize successfully: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Query with multiple xs and as parameters should deserialize successfully: {:?}",
+            result.err()
+        );
         let query = result.unwrap();
         assert_eq!(query.xs.len(), 2);
         assert_eq!(query.xs[0], "blossom.primal.net");
         assert_eq!(query.xs[1], "video.nostr.build");
-        assert_eq!(query.author_pubkey, Some("08039bc2786f9f58c94146c6666fac9a7d7ceb40d0798a8f49140763cc715053".to_string()));
+        assert_eq!(
+            query.author_pubkey,
+            Some("08039bc2786f9f58c94146c6666fac9a7d7ceb40d0798a8f49140763cc715053".to_string())
+        );
     }
 
     #[test]
     fn test_upstream_mode_parsing() {
         // Test all valid values
-        assert_eq!(UpstreamMode::from_str_with_default("proxy"), UpstreamMode::Proxy);
-        assert_eq!(UpstreamMode::from_str_with_default("redirect"), UpstreamMode::Redirect);
-        assert_eq!(UpstreamMode::from_str_with_default("redirect_and_cache"), UpstreamMode::RedirectAndCache);
+        assert_eq!(
+            UpstreamMode::from_str_with_default("proxy"),
+            UpstreamMode::Proxy
+        );
+        assert_eq!(
+            UpstreamMode::from_str_with_default("redirect"),
+            UpstreamMode::Redirect
+        );
+        assert_eq!(
+            UpstreamMode::from_str_with_default("redirect_and_cache"),
+            UpstreamMode::RedirectAndCache
+        );
 
         // Test case insensitivity
-        assert_eq!(UpstreamMode::from_str_with_default("PROXY"), UpstreamMode::Proxy);
-        assert_eq!(UpstreamMode::from_str_with_default("REDIRECT"), UpstreamMode::Redirect);
-        assert_eq!(UpstreamMode::from_str_with_default("REDIRECT_AND_CACHE"), UpstreamMode::RedirectAndCache);
+        assert_eq!(
+            UpstreamMode::from_str_with_default("PROXY"),
+            UpstreamMode::Proxy
+        );
+        assert_eq!(
+            UpstreamMode::from_str_with_default("REDIRECT"),
+            UpstreamMode::Redirect
+        );
+        assert_eq!(
+            UpstreamMode::from_str_with_default("REDIRECT_AND_CACHE"),
+            UpstreamMode::RedirectAndCache
+        );
 
         // Test hyphen variant
-        assert_eq!(UpstreamMode::from_str_with_default("redirect-and-cache"), UpstreamMode::RedirectAndCache);
+        assert_eq!(
+            UpstreamMode::from_str_with_default("redirect-and-cache"),
+            UpstreamMode::RedirectAndCache
+        );
 
         // Test default fallback for invalid values
-        assert_eq!(UpstreamMode::from_str_with_default("invalid"), UpstreamMode::Proxy);
+        assert_eq!(
+            UpstreamMode::from_str_with_default("invalid"),
+            UpstreamMode::Proxy
+        );
         assert_eq!(UpstreamMode::from_str_with_default(""), UpstreamMode::Proxy);
     }
 
@@ -402,6 +453,9 @@ mod tests {
         // Test as_str
         assert_eq!(UpstreamMode::Proxy.as_str(), "proxy");
         assert_eq!(UpstreamMode::Redirect.as_str(), "redirect");
-        assert_eq!(UpstreamMode::RedirectAndCache.as_str(), "redirect_and_cache");
+        assert_eq!(
+            UpstreamMode::RedirectAndCache.as_str(),
+            "redirect_and_cache"
+        );
     }
 }

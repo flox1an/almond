@@ -15,13 +15,16 @@ use tokio::signal;
 
 use crate::models::AppState;
 use crate::trust_network::{refresh_dvm_pubkeys, refresh_trust_network};
-use crate::utils::{build_file_index, enforce_storage_limits, cleanup_abandoned_chunks, cleanup_expired_failed_lookups, cleanup_expired_blossom_server_lists};
+use crate::utils::{
+    build_file_index, cleanup_abandoned_chunks, cleanup_expired_blossom_server_lists,
+    cleanup_expired_failed_lookups, enforce_storage_limits,
+};
 use axum::Router;
 use dotenvy::dotenv;
 use nostr_relay_pool::prelude::*;
 use tokio::fs;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use axum::{
     extract::{DefaultBodyLimit, State},
@@ -61,11 +64,10 @@ async fn options_upload() -> &'static str {
     "Method not allowed"
 }
 
-async fn serve_index(State(state): State<AppState>) -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
-    use axum::{
-        http::header,
-        response::Response,
-    };
+async fn serve_index(
+    State(state): State<AppState>,
+) -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
+    use axum::{http::header, response::Response};
 
     // Check if homepage feature is enabled
     if !state.feature_homepage_enabled {
@@ -80,10 +82,7 @@ async fn serve_index(State(state): State<AppState>) -> Result<axum::response::Re
 }
 
 async fn serve_filter_test() -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
-    use axum::{
-        http::header,
-        response::Response,
-    };
+    use axum::{http::header, response::Response};
 
     Response::builder()
         .status(StatusCode::OK)
@@ -92,13 +91,18 @@ async fn serve_filter_test() -> Result<axum::response::Response<axum::body::Body
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-
 pub async fn create_app(state: AppState) -> Router {
     // Calculate max chunk size in bytes
     let max_chunk_size_bytes = (state.max_chunk_size_mb * 1024 * 1024) as usize;
-    
+
     Router::new()
-        .route("/upload", put(upload_file).head(head_upload).options(options_upload).patch(patch_upload))
+        .route(
+            "/upload",
+            put(upload_file)
+                .head(head_upload)
+                .options(options_upload)
+                .patch(patch_upload),
+        )
         .route("/list", get(list_blobs))
         .route("/list/{id}", get(list_blobs))
         .route("/mirror", put(mirror_blob))
@@ -129,10 +133,10 @@ async fn clear_temp_directory(temp_dir: &PathBuf) -> Result<(), std::io::Error> 
 
     let mut entries = fs::read_dir(temp_dir).await?;
     let mut removed_count = 0;
-    
+
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        
+
         if path.is_dir() {
             // Recursively remove directory
             fs::remove_dir_all(&path).await?;
@@ -145,11 +149,11 @@ async fn clear_temp_directory(temp_dir: &PathBuf) -> Result<(), std::io::Error> 
             info!("🗑️  Removed temp file: {}", path.display());
         }
     }
-    
+
     if removed_count > 0 {
         info!("✅ Cleared {} items from temp directory", removed_count);
     }
-    
+
     Ok(())
 }
 
@@ -175,15 +179,13 @@ async fn load_app_state() -> AppState {
         .unwrap_or_else(|_| "false".to_string())
         .parse::<bool>()
         .unwrap_or(false);
-    
-    let tls_cert_path = PathBuf::from(
-        env::var("TLS_CERT_PATH").unwrap_or_else(|_| "./cert.pem".to_string())
-    );
-    
-    let tls_key_path = PathBuf::from(
-        env::var("TLS_KEY_PATH").unwrap_or_else(|_| "./key.pem".to_string())
-    );
-    
+
+    let tls_cert_path =
+        PathBuf::from(env::var("TLS_CERT_PATH").unwrap_or_else(|_| "./cert.pem".to_string()));
+
+    let tls_key_path =
+        PathBuf::from(env::var("TLS_KEY_PATH").unwrap_or_else(|_| "./key.pem".to_string()));
+
     let tls_auto_generate = env::var("TLS_AUTO_GENERATE")
         .unwrap_or_else(|_| "true".to_string())
         .parse::<bool>()
@@ -208,9 +210,16 @@ async fn load_app_state() -> AppState {
     // Clear temp directory on startup
     let temp_dir = upload_dir.join("temp");
     if temp_dir.exists() {
-        info!("🧹 Clearing temp directory on startup: {}", temp_dir.display());
+        info!(
+            "🧹 Clearing temp directory on startup: {}",
+            temp_dir.display()
+        );
         if let Err(e) = clear_temp_directory(&temp_dir).await {
-            error!("⚠️  Failed to clear temp directory {}: {}", temp_dir.display(), e);
+            error!(
+                "⚠️  Failed to clear temp directory {}: {}",
+                temp_dir.display(),
+                e
+            );
             warn!("⚠️  Continuing startup with existing temp files (they may be orphaned)");
         } else {
             info!("✅ Temp directory cleared successfully");
@@ -394,7 +403,9 @@ async fn load_app_state() -> AppState {
             }
             Err(e) => {
                 error!("💰 Failed to initialize Cashu wallet: {}", e);
-                error!("💰 Cannot start with paid features enabled but wallet initialization failed");
+                error!(
+                    "💰 Cannot start with paid features enabled but wallet initialization failed"
+                );
                 std::process::exit(1);
             }
         }
@@ -407,8 +418,11 @@ async fn load_app_state() -> AppState {
         .unwrap_or_else(|_| "24".to_string())
         .parse()
         .expect("Invalid value for BLOSSOM_SERVER_LIST_CACHE_TTL_HOURS");
-    
-    info!("⚙️ Blossom server list cache TTL: {} hours", blossom_server_list_cache_ttl_hours);
+
+    info!(
+        "⚙️ Blossom server list cache TTL: {} hours",
+        blossom_server_list_cache_ttl_hours
+    );
 
     // Parse filter algorithm from environment variable (default: binary-fuse-16)
     let filter_algorithm = env::var("FILTER_ALGORITHM")
@@ -419,7 +433,10 @@ async fn load_app_state() -> AppState {
     let filter_algorithm = match filter_algorithm.as_str() {
         "bloom" | "binary-fuse-8" | "binary-fuse-16" | "binary-fuse-32" => filter_algorithm,
         _ => {
-            warn!("⚠️ Invalid FILTER_ALGORITHM '{}', defaulting to 'binary-fuse-16'", filter_algorithm);
+            warn!(
+                "⚠️ Invalid FILTER_ALGORITHM '{}', defaulting to 'binary-fuse-16'",
+                filter_algorithm
+            );
             "binary-fuse-16".to_string()
         }
     };
@@ -446,8 +463,7 @@ async fn load_app_state() -> AppState {
         .collect();
 
     // Validate: if any feature uses DVM mode, kinds must be configured
-    let needs_dvm = feature_upload_enabled.requires_dvm()
-        || feature_mirror_enabled.requires_dvm();
+    let needs_dvm = feature_upload_enabled.requires_dvm() || feature_mirror_enabled.requires_dvm();
     if needs_dvm && dvm_allowed_kinds.is_empty() {
         panic!("DVM_ALLOWED_KINDS must be set when any feature uses 'dvm' mode");
     }
@@ -496,7 +512,9 @@ async fn load_app_state() -> AppState {
     // Handle HTTPS/TLS setup if enabled
     if enable_https {
         info!("🔐 HTTPS enabled");
-        if let Err(e) = crate::tls::ensure_tls_certificates(&tls_cert_path, &tls_key_path, tls_auto_generate) {
+        if let Err(e) =
+            crate::tls::ensure_tls_certificates(&tls_cert_path, &tls_key_path, tls_auto_generate)
+        {
             error!("❌ Failed to setup TLS certificates: {}", e);
             std::process::exit(1);
         }
@@ -558,15 +576,29 @@ fn start_cleanup_job(state: AppState) {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
             state.cleanup_interval_secs,
         ));
+        let full_scan_interval =
+            tokio::time::Duration::from_secs((state.cleanup_interval_secs * 120).max(60 * 60));
+        let mut last_full_scan = tokio::time::Instant::now() - full_scan_interval;
         loop {
             interval.tick().await;
 
-            // Always run cleanup to check for expired files
-            enforce_storage_limits(&state).await;
+            let changes_pending = {
+                let changes = state.changes_pending.read().await;
+                *changes
+            };
+            let full_scan_due = last_full_scan.elapsed() >= full_scan_interval;
 
-            // Mark changes as processed
-            let mut changes = state.changes_pending.write().await;
-            *changes = false;
+            if changes_pending || full_scan_due {
+                enforce_storage_limits(&state).await;
+
+                let mut changes = state.changes_pending.write().await;
+                *changes = false;
+                if full_scan_due {
+                    last_full_scan = tokio::time::Instant::now();
+                }
+            } else {
+                debug!("Skipping storage cleanup: no pending changes");
+            }
 
             // Clean up expired failed upstream lookups
             cleanup_expired_failed_lookups(&state).await;
@@ -714,12 +746,10 @@ async fn main() {
 
     // Start server with HTTPS or HTTP
     if enable_https {
-        let tls_cert_path = PathBuf::from(
-            env::var("TLS_CERT_PATH").unwrap_or_else(|_| "./cert.pem".to_string())
-        );
-        let tls_key_path = PathBuf::from(
-            env::var("TLS_KEY_PATH").unwrap_or_else(|_| "./key.pem".to_string())
-        );
+        let tls_cert_path =
+            PathBuf::from(env::var("TLS_CERT_PATH").unwrap_or_else(|_| "./cert.pem".to_string()));
+        let tls_key_path =
+            PathBuf::from(env::var("TLS_KEY_PATH").unwrap_or_else(|_| "./key.pem".to_string()));
 
         info!("🎧 blossom server listening on https://{}", addr);
 

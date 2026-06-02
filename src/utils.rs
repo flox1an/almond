@@ -17,7 +17,12 @@ static SHA256_FILENAME_REGEX: Lazy<Regex> = Lazy::new(|| {
         .expect("Failed to compile SHA256 filename regex")
 });
 
-pub fn get_nested_path(upload_dir: &Path, hash: &str, extension: Option<&str>, expiration: Option<u64>) -> PathBuf {
+pub fn get_nested_path(
+    upload_dir: &Path,
+    hash: &str,
+    extension: Option<&str>,
+    expiration: Option<u64>,
+) -> PathBuf {
     let first_level = &hash[..1];
     let second_level = &hash[1..2];
     let path = upload_dir.join(first_level).join(second_level);
@@ -161,10 +166,11 @@ async fn cleanup_empty_dirs(root_dir: &Path) {
 }
 
 pub async fn enforce_storage_limits(state: &AppState) {
-    let mut index = state.file_index.write().await;
     let mut total_size = 0;
-    let mut files: Vec<(String, FileMetadata)> =
-        index.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut files: Vec<(String, FileMetadata)> = {
+        let index = state.file_index.read().await;
+        index.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    };
 
     // Sort files by creation date (oldest first)
     files.sort_by(|a, b| a.1.created_at.cmp(&b.1.created_at));
@@ -178,47 +184,69 @@ pub async fn enforce_storage_limits(state: &AppState) {
     let mut deleted_by_expiration = 0;
     let mut deleted_by_age = 0;
     let mut deleted_by_limits = 0;
+    let mut retained_files = 0usize;
+    let mut deletion_candidates = Vec::new();
 
-    for (sha256, metadata) in files {
+    for (sha256, metadata) in files.into_iter() {
         // Check file expiration if expiration is set
         if let Some(expiration) = metadata.expiration {
             if now >= expiration {
-                info!("🗑 Deleting expired file (X-Expiration): {} (expired at {}, now {})",
-                      sha256, expiration, now);
-                if let Err(e) = fs::remove_file(&metadata.path).await {
-                    error!("❌ Failed to delete expired file {}: {}", sha256, e);
-                } else {
-                    deleted_by_expiration += 1;
-                }
-                index.remove(&sha256);
+                deletion_candidates.push((sha256, metadata, "expiration"));
                 continue;
             }
         }
 
         // Check file age if max_age_days is set
         if state.max_file_age_days > 0 && now - metadata.created_at > max_age_secs {
-            info!("🗑 Deleting expired file (MAX_FILE_AGE_DAYS): {}", sha256);
-            if let Err(e) = fs::remove_file(&metadata.path).await {
-                error!("❌ Failed to delete expired file {}: {}", sha256, e);
-            } else {
-                deleted_by_age += 1;
-            }
-            index.remove(&sha256);
+            deletion_candidates.push((sha256, metadata, "age"));
             continue;
         }
 
         // Check storage limits
-        if total_size + metadata.size > state.max_total_size || index.len() >= state.max_total_files
+        if total_size + metadata.size > state.max_total_size
+            || retained_files >= state.max_total_files
         {
-            info!("🗑 Deleting file to enforce limits: {}", sha256);
-            if let Err(e) = fs::remove_file(&metadata.path).await {
-                error!("❌ Failed to delete file {}: {}", sha256, e);
-            } else {
-                deleted_by_limits += 1;
-            }
-            index.remove(&sha256);
+            deletion_candidates.push((sha256, metadata, "limits"));
         } else {
             total_size += metadata.size;
+            retained_files += 1;
+        }
+    }
+
+    let mut deleted_files = Vec::new();
+    for (sha256, metadata, reason) in deletion_candidates {
+        match reason {
+            "expiration" => info!(
+                "🗑 Deleting expired file (X-Expiration): {} (expired at {:?}, now {})",
+                sha256, metadata.expiration, now
+            ),
+            "age" => info!("🗑 Deleting expired file (MAX_FILE_AGE_DAYS): {}", sha256),
+            _ => info!("🗑 Deleting file to enforce limits: {}", sha256),
+        }
+
+        if let Err(e) = fs::remove_file(&metadata.path).await {
+            error!("❌ Failed to delete file {}: {}", sha256, e);
+            continue;
+        }
+
+        match reason {
+            "expiration" => deleted_by_expiration += 1,
+            "age" => deleted_by_age += 1,
+            _ => deleted_by_limits += 1,
+        }
+        deleted_files.push((sha256, metadata.path));
+    }
+
+    if !deleted_files.is_empty() {
+        let mut index = state.file_index.write().await;
+        for (sha256, deleted_path) in deleted_files {
+            let should_remove = index
+                .get(&sha256)
+                .map(|metadata| metadata.path == deleted_path)
+                .unwrap_or(false);
+            if should_remove {
+                index.remove(&sha256);
+            }
         }
     }
 
@@ -228,11 +256,10 @@ pub async fn enforce_storage_limits(state: &AppState) {
               deleted_by_expiration, deleted_by_age, deleted_by_limits);
     }
 
-    // Release the lock
-    drop(index);
-
     // Clean up empty directories
-    cleanup_empty_dirs(&state.upload_dir).await;
+    if deleted_by_expiration > 0 || deleted_by_age > 0 || deleted_by_limits > 0 {
+        cleanup_empty_dirs(&state.upload_dir).await;
+    }
 }
 
 pub fn get_sha256_hash_from_filename(filename: &str) -> Option<String> {
@@ -274,18 +301,18 @@ pub fn parse_range_header(header_value: &str, total_size: u64) -> Option<(u64, u
 pub async fn cleanup_abandoned_chunks(state: &AppState) {
     let timeout_duration = std::time::Duration::from_secs(state.chunk_cleanup_timeout_minutes * 60);
     let cutoff_time = std::time::Instant::now() - timeout_duration;
-    
+
     // Get chunk uploads that are older than the timeout
     let mut chunk_uploads = state.chunk_uploads.write().await;
     let mut to_remove = Vec::new();
-    
+
     for (sha256, chunk_upload) in chunk_uploads.iter() {
         if chunk_upload.created_at < cutoff_time {
             info!("Cleaning up abandoned chunked upload: {}", sha256);
             to_remove.push(sha256.clone());
         }
     }
-    
+
     // Remove abandoned uploads and clean up their files
     for sha256 in to_remove {
         if let Some(chunk_upload) = chunk_uploads.remove(&sha256) {
@@ -293,13 +320,20 @@ pub async fn cleanup_abandoned_chunks(state: &AppState) {
             // Clean up all chunk files for this upload
             for chunk in chunk_upload.chunks {
                 if let Err(e) = fs::remove_file(&chunk.chunk_path).await {
-                    warn!("Failed to clean up chunk file {}: {}", chunk.chunk_path.display(), e);
+                    warn!(
+                        "Failed to clean up chunk file {}: {}",
+                        chunk.chunk_path.display(),
+                        e
+                    );
                 }
             }
-            info!("🗑 Cleaned up {} chunk files for abandoned upload: {}", chunk_count, sha256);
+            info!(
+                "🗑 Cleaned up {} chunk files for abandoned upload: {}",
+                chunk_count, sha256
+            );
         }
     }
-    
+
     // Also clean up orphaned chunk files in the temp/chunks directory
     cleanup_orphaned_chunk_files(state).await;
 }
@@ -307,14 +341,14 @@ pub async fn cleanup_abandoned_chunks(state: &AppState) {
 /// Clean up orphaned chunk files that don't belong to any active upload
 async fn cleanup_orphaned_chunk_files(state: &AppState) {
     let chunks_dir = state.upload_dir.join("temp").join("chunks");
-    
+
     if !chunks_dir.exists() {
         return;
     }
-    
+
     let timeout_duration = std::time::Duration::from_secs(state.chunk_cleanup_timeout_minutes * 60);
     let cutoff_time = std::time::SystemTime::now() - timeout_duration;
-    
+
     let mut entries = match fs::read_dir(&chunks_dir).await {
         Ok(entries) => entries,
         Err(e) => {
@@ -322,7 +356,7 @@ async fn cleanup_orphaned_chunk_files(state: &AppState) {
             return;
         }
     };
-    
+
     let mut cleaned_count = 0;
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
@@ -332,7 +366,11 @@ async fn cleanup_orphaned_chunk_files(state: &AppState) {
                 if let Ok(modified) = metadata.modified() {
                     if modified < cutoff_time {
                         if let Err(e) = fs::remove_file(&path).await {
-                            warn!("❌ Failed to clean up orphaned chunk file {}: {}", path.display(), e);
+                            warn!(
+                                "❌ Failed to clean up orphaned chunk file {}: {}",
+                                path.display(),
+                                e
+                            );
                         } else {
                             cleaned_count += 1;
                         }
@@ -341,7 +379,7 @@ async fn cleanup_orphaned_chunk_files(state: &AppState) {
             }
         }
     }
-    
+
     if cleaned_count > 0 {
         info!("Cleaned up {} orphaned chunk files", cleaned_count);
     }
@@ -352,27 +390,34 @@ pub async fn cleanup_expired_failed_lookups(state: &AppState) {
     let one_hour_ago = std::time::Instant::now() - std::time::Duration::from_secs(3600);
     let mut failed_lookups = state.failed_upstream_lookups.write().await;
     let initial_count = failed_lookups.len();
-    
+
     failed_lookups.retain(|_, &mut timestamp| timestamp > one_hour_ago);
-    
+
     let cleaned_count = initial_count - failed_lookups.len();
     if cleaned_count > 0 {
-        info!("Cleaned up {} expired failed upstream lookups", cleaned_count);
+        info!(
+            "Cleaned up {} expired failed upstream lookups",
+            cleaned_count
+        );
     }
 }
 
 /// Clean up expired blossom server list cache entries
 pub async fn cleanup_expired_blossom_server_lists(state: &AppState) {
-    let cache_ttl_duration = std::time::Duration::from_secs(state.blossom_server_list_cache_ttl_hours * 3600);
+    let cache_ttl_duration =
+        std::time::Duration::from_secs(state.blossom_server_list_cache_ttl_hours * 3600);
     let cutoff_time = std::time::Instant::now() - cache_ttl_duration;
-    
+
     let mut cache = state.blossom_server_lists.write().await;
     let initial_count = cache.len();
-    
+
     cache.retain(|_, (_, cached_at)| *cached_at > cutoff_time);
-    
+
     let cleaned_count = initial_count - cache.len();
     if cleaned_count > 0 {
-        info!("Cleaned up {} expired blossom server list cache entries", cleaned_count);
+        info!(
+            "Cleaned up {} expired blossom server list cache entries",
+            cleaned_count
+        );
     }
 }

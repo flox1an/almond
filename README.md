@@ -32,7 +32,7 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 - `PATCH /upload` - Chunked upload (BUD-2) 
 - `GET /:filename` - Download a file by SHA256 hash (supports `?origin=` parameter when `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=true`)
 - `HEAD /:filename` - Get file metadata
-- `GET /list` - List all stored files (supports `?since=` and `?until=` unix timestamp parameters for filtering by upload date, BUD-2)
+- `GET /list` / `GET /list/<pubkey>` - List stored files with BUD-12 cursor pagination (`?limit=100&cursor=<last_sha256>`). Optional `?since=` and `?until=` filters are supported but should not be used for pagination.
 - `PUT /mirror` - Mirror a file from another server (BUD-4)
 
 ### System Information
@@ -87,7 +87,7 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 - `STORAGE_PATH`: Path where files are stored (default: "./files")
 - `MAX_TOTAL_SIZE`: Maximum total storage size in MB (default: 99999)
 - `MAX_TOTAL_FILES`: Maximum number of files (default: 99999999)
-- `CLEANUP_INTERVAL_SECS`: Interval for cleanup checks in seconds (default: 30)
+- `CLEANUP_INTERVAL_SECS`: Interval for lightweight cleanup checks in seconds (default: 30). Full storage cleanup runs when changes are pending, plus an occasional full scan.
 - `MAX_FILE_AGE_DAYS`: Maximum age of files in days, 0 for no limit (default: 0)
 
 ### Upstream Configuration
