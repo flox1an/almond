@@ -38,6 +38,7 @@ chrono = "0.4.44"
 tokio-stream = "0.1"
 bytes = "1"
 async-stream = "0.3"
+async-trait = "0.1"
 bloomfilter = "3.0"
 xorf = { version = "0.12", features = ["serde"] }
 rmp-serde = "1.3"
@@ -53,6 +54,11 @@ cdk = { version = "0.16", default-features = false, features = ["wallet"] }
 cdk-sqlite = { version = "0.16", features = ["wallet"] }
 cashu = "0.16"
 rand = "0.10"
+
+# Hashtree P2P serving support
+hashtree-core = "0.2.15"
+hashtree-webrtc = "0.2.15"
+nostr-sdk = "0.35"
 
 # HTTPS/TLS support
 axum-server = { version = "0.8", features = ["tls-rustls"] }

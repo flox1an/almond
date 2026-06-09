@@ -66,6 +66,37 @@ impl FeatureMode {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct FeatureConfig {
+    pub upload_enabled: FeatureMode,
+    pub mirror_enabled: FeatureMode,
+    pub list_enabled: bool,
+    pub homepage_enabled: bool,
+    pub paid_upload: bool,
+    pub paid_mirror: bool,
+    pub paid_download: bool,
+}
+
+impl Default for FeatureConfig {
+    fn default() -> Self {
+        Self {
+            upload_enabled: FeatureMode::Public,
+            mirror_enabled: FeatureMode::Public,
+            list_enabled: true,
+            homepage_enabled: true,
+            paid_upload: false,
+            paid_mirror: false,
+            paid_download: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AuthConfig {
+    pub allowed_pubkeys: Vec<PublicKey>,
+    pub dvm_allowed_kinds: Vec<u16>,
+}
+
 /// Upstream mode controlling how files are fetched from upstream servers
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum UpstreamMode {
@@ -190,6 +221,13 @@ pub struct AppState {
     pub feature_list_enabled: bool,
     pub feature_custom_upstream_origin_enabled: FeatureMode,
     pub feature_homepage_enabled: bool,
+    pub feature_p2p_serve_enabled: bool,
+    pub p2p_nsec: Option<String>,
+    pub p2p_relays: Vec<String>,
+    pub p2p_stun_servers: Vec<String>,
+    pub p2p_request_timeout_ms: u64,
+    pub p2p_hello_interval_ms: u64,
+    pub p2p_debug: bool,
     pub ongoing_downloads: OngoingDownloadsMap,
     pub chunk_uploads: Arc<RwLock<HashMap<String, ChunkUpload>>>,
     pub failed_upstream_lookups: Arc<RwLock<HashMap<String, Instant>>>,
@@ -332,6 +370,32 @@ pub struct ChunkInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Phase 1 RED: config sub-struct tests ─────────────────────────────────
+
+    #[test]
+    fn feature_config_default_enables_uploads_and_mirror_for_everyone() {
+        let cfg = FeatureConfig::default();
+        assert_eq!(cfg.upload_enabled, FeatureMode::Public);
+        assert_eq!(cfg.mirror_enabled, FeatureMode::Public);
+        assert!(cfg.list_enabled);
+        assert!(cfg.homepage_enabled);
+    }
+
+    #[test]
+    fn feature_config_default_disables_paid_features() {
+        let cfg = FeatureConfig::default();
+        assert!(!cfg.paid_upload);
+        assert!(!cfg.paid_mirror);
+        assert!(!cfg.paid_download);
+    }
+
+    #[test]
+    fn auth_config_default_has_no_allowed_pubkeys() {
+        let cfg = AuthConfig::default();
+        assert!(cfg.allowed_pubkeys.is_empty());
+        assert!(cfg.dvm_allowed_kinds.is_empty());
+    }
 
     #[test]
     fn test_file_request_query_single_xs() {

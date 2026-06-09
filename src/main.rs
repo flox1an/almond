@@ -317,6 +317,73 @@ async fn load_app_state() -> AppState {
         .parse::<bool>()
         .unwrap_or(true);
 
+    let feature_p2p_serve_enabled = env::var("FEATURE_P2P_SERVE_ENABLED")
+        .unwrap_or_else(|_| "false".to_string())
+        .parse::<bool>()
+        .unwrap_or(false);
+
+    let p2p_nsec = env::var("P2P_NSEC")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let p2p_relays: Vec<String> = env::var("P2P_RELAYS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|relay| {
+            let relay = relay.trim();
+            if relay.is_empty() {
+                None
+            } else {
+                Some(relay.to_string())
+            }
+        })
+        .collect();
+
+    let p2p_stun_servers: Vec<String> = env::var("P2P_STUN_SERVERS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|server| {
+            let server = server.trim();
+            if server.is_empty() {
+                None
+            } else {
+                Some(server.to_string())
+            }
+        })
+        .collect();
+
+    let p2p_request_timeout_ms = env::var("P2P_REQUEST_TIMEOUT_MS")
+        .unwrap_or_else(|_| "10000".to_string())
+        .parse()
+        .expect("Invalid value for P2P_REQUEST_TIMEOUT_MS");
+
+    let p2p_hello_interval_ms = env::var("P2P_HELLO_INTERVAL_MS")
+        .unwrap_or_else(|_| "30000".to_string())
+        .parse()
+        .expect("Invalid value for P2P_HELLO_INTERVAL_MS");
+
+    let p2p_debug = env::var("P2P_DEBUG")
+        .unwrap_or_else(|_| "false".to_string())
+        .parse::<bool>()
+        .unwrap_or(false);
+
+    if feature_p2p_serve_enabled {
+        info!(
+            "⚙️ Hashtree P2P serving enabled - relays: {}, STUN servers: {}",
+            if p2p_relays.is_empty() {
+                "default".to_string()
+            } else {
+                format!("{:?}", p2p_relays)
+            },
+            if p2p_stun_servers.is_empty() {
+                "default".to_string()
+            } else {
+                format!("{:?}", p2p_stun_servers)
+            }
+        );
+    }
+
     // Report feature: default to "off" (disabled)
     let feature_report_enabled = models::FeatureMode::from_str_with_default(
         &env::var("FEATURE_REPORT_ENABLED").unwrap_or_else(|_| "off".to_string()),
@@ -551,6 +618,13 @@ async fn load_app_state() -> AppState {
         feature_list_enabled,
         feature_custom_upstream_origin_enabled,
         feature_homepage_enabled,
+        feature_p2p_serve_enabled,
+        p2p_nsec,
+        p2p_relays,
+        p2p_stun_servers,
+        p2p_request_timeout_ms,
+        p2p_hello_interval_ms,
+        p2p_debug,
         ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
         chunk_uploads: Arc::new(RwLock::new(HashMap::new())),
         failed_upstream_lookups: Arc::new(RwLock::new(HashMap::new())),
@@ -710,6 +784,7 @@ async fn main() {
     start_chunk_cleanup_job(state.clone());
     start_trust_network_refresh_job(state.clone());
     start_dvm_refresh_job(state.clone());
+    services::p2p::start_p2p_serve_job(state.clone());
 
     let app = create_app(state.clone()).await;
 
