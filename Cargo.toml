@@ -56,9 +56,10 @@ cashu = "0.16"
 rand = "0.10"
 
 # Hashtree P2P serving support
-hashtree-core = "0.2.15"
-hashtree-webrtc = "0.2.15"
-nostr-sdk = "0.35"
+hashtree-core = "0.2.67"
+hashtree-network = "0.2.67"
+nostr-sdk = "0.44"
+webrtc = "0.11"
 
 # HTTPS/TLS support
 axum-server = { version = "0.8", features = ["tls-rustls"] }

@@ -359,7 +359,7 @@ async fn load_app_state() -> AppState {
         .expect("Invalid value for P2P_REQUEST_TIMEOUT_MS");
 
     let p2p_hello_interval_ms = env::var("P2P_HELLO_INTERVAL_MS")
-        .unwrap_or_else(|_| "30000".to_string())
+        .unwrap_or_else(|_| "3000".to_string())
         .parse()
         .expect("Invalid value for P2P_HELLO_INTERVAL_MS");
 
