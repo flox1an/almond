@@ -6,4 +6,5 @@ pub mod file_storage;
 pub mod hls;
 pub mod p2p;
 pub mod p2p_webrtc;
+pub mod serve_files;
 pub mod upload;

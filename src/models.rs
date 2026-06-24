@@ -175,6 +175,14 @@ impl ReportAction {
 type OngoingDownloadsMap =
     Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>;
 
+#[derive(Clone)]
+pub struct ServeFileMetadata {
+    pub path: PathBuf,
+    pub extension: Option<String>,
+    pub mime_type: Option<String>,
+    pub size: u64,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FileMetadata {
     pub path: PathBuf,
@@ -191,6 +199,10 @@ pub struct FileMetadata {
 pub struct AppState {
     pub upload_dir: PathBuf,
     pub file_index: Arc<RwLock<HashMap<String, FileMetadata>>>,
+    pub serve_file_index: Arc<RwLock<HashMap<String, ServeFileMetadata>>>,
+    pub serve_files_path: Option<PathBuf>,
+    pub serve_files_manifest_name: String,
+    pub serve_files_refresh_interval_secs: u64,
     pub max_total_size: u64,
     pub max_total_files: usize,
     pub bind_addr: String,

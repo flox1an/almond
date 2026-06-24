@@ -231,6 +231,45 @@ async fn load_app_state() -> AppState {
     let file_index = Arc::new(RwLock::new(HashMap::new()));
     build_file_index(&upload_dir, &file_index).await;
 
+    let serve_file_index = Arc::new(RwLock::new(HashMap::new()));
+    let serve_files_path = env::var("SERVE_FILES_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let serve_files_manifest_name = env::var("SERVE_FILES_MANIFEST_NAME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "manifest-sha256.txt".to_string());
+    let serve_files_refresh_interval_secs = env::var("SERVE_FILES_REFRESH_INTERVAL_SECS")
+        .unwrap_or_else(|_| "3600".to_string())
+        .parse()
+        .expect("Invalid value for SERVE_FILES_REFRESH_INTERVAL_SECS");
+
+    if let Some(path) = &serve_files_path {
+        info!(
+            "📁 Serve files enabled: {} (manifest: {}, refresh: {}s)",
+            path.display(),
+            serve_files_manifest_name,
+            serve_files_refresh_interval_secs
+        );
+
+        if let Err(e) = crate::services::serve_files::refresh_serve_file_index(
+            path,
+            &serve_files_manifest_name,
+            &serve_file_index,
+        )
+        .await
+        {
+            warn!(
+                "⚠️ Failed to build serve files index for {}: {}",
+                path.display(),
+                e
+            );
+        }
+    }
+
     let cleanup_interval_secs = env::var("CLEANUP_INTERVAL_SECS")
         .unwrap_or_else(|_| "30".to_string())
         .parse()
@@ -592,6 +631,10 @@ async fn load_app_state() -> AppState {
     AppState {
         upload_dir,
         file_index,
+        serve_file_index,
+        serve_files_path,
+        serve_files_manifest_name,
+        serve_files_refresh_interval_secs,
         max_total_size,
         max_total_files,
         bind_addr,
@@ -784,6 +827,14 @@ async fn main() {
     start_chunk_cleanup_job(state.clone());
     start_trust_network_refresh_job(state.clone());
     start_dvm_refresh_job(state.clone());
+    if let Some(path) = state.serve_files_path.clone() {
+        services::serve_files::start_refresh_job(
+            path,
+            state.serve_files_manifest_name.clone(),
+            state.serve_files_refresh_interval_secs,
+            state.serve_file_index.clone(),
+        );
+    }
     services::p2p::start_p2p_serve_job(state.clone());
 
     let app = create_app(state.clone()).await;

@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 use crate::constants::*;
 use crate::helpers::{get_mime_type, track_download_stats};
-use crate::models::{AppState, FileRequestQuery};
+use crate::models::{AppState, FileRequestQuery, ServeFileMetadata};
 use crate::utils::{find_file, parse_range_header};
 use crate::services::blossom_servers;
 use crate::services::cashu;
@@ -87,6 +87,42 @@ pub async fn handle_file_request(
                 }
             }
             None => {
+                if let Some(serve_file_metadata) =
+                    crate::services::serve_files::get_serve_file(&state.serve_file_index, &file_hash).await
+                {
+                    debug!("File {} found in serve files index, serving read-only", file_hash);
+
+                    if req.method() == Method::HEAD {
+                        return build_serve_file_head_response(serve_file_metadata);
+                    }
+
+                    if state.feature_paid_download {
+                        let required_sats = cashu::calculate_price(serve_file_metadata.size, state.cashu_price_per_mb);
+                        let cashu_header = cashu::extract_cashu_header(req.headers());
+
+                        match cashu_header {
+                            None => {
+                                return Err(AppError::PaymentRequired {
+                                    amount_sats: required_sats,
+                                    unit: "sat".to_string(),
+                                    mints: state.cashu_accepted_mints.clone(),
+                                });
+                            }
+                            Some(token_str) => {
+                                let token = cashu::parse_token(&token_str)?;
+                                cashu::verify_token_basics(&token, required_sats, &state.cashu_accepted_mints)?;
+
+                                if let Some(wallet) = &state.cashu_wallet {
+                                    cashu::receive_token(wallet, &token).await?;
+                                }
+                            }
+                        }
+                    }
+
+                    track_download_stats(&state, serve_file_metadata.size).await;
+                    return serve_file_with_range(serve_file_metadata.path, req.headers().clone()).await;
+                }
+
                 // File not found locally - now do upstream server lookup
                 debug!("File {} not found locally, checking upstream servers", file_hash);
 
@@ -239,6 +275,21 @@ pub async fn handle_file_request(
         // Invalid filename format (no hash found)
         Err(AppError::NotFound("Invalid filename format".to_string()))
     }
+}
+
+fn build_serve_file_head_response(file_metadata: ServeFileMetadata) -> Result<Response, AppError> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            header::CONTENT_TYPE,
+            file_metadata
+                .mime_type
+                .unwrap_or_else(|| DEFAULT_MIME_TYPE.into()),
+        )
+        .header(header::CONTENT_LENGTH, file_metadata.size)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .body(Body::empty())
+        .map_err(|e| AppError::InternalError(format!("Failed to build HEAD response: {}", e)))
 }
 
 /// Serve file with range support
