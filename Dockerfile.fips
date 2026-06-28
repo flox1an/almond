@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Download upstream FIPS release binaries instead of rebuilding FIPS from source.
 FROM debian:bullseye-slim AS fips-downloader
 
-ARG FIPS_VERSION=0.3.0
+ARG FIPS_VERSION=0.4.0
 ARG TARGETARCH
 
 RUN apt-get update && \
