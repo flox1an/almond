@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{watch, RwLock};
@@ -192,6 +192,7 @@ pub struct DownloadHandle {
     pub content_type: String,
     pub total_len: Option<u64>,
     pub progress: watch::Sender<DownloadProgress>,
+    pub final_path: OnceLock<PathBuf>,
 }
 
 type OngoingDownloadsMap = Arc<RwLock<HashMap<String, Arc<DownloadHandle>>>>;

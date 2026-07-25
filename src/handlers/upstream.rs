@@ -20,7 +20,7 @@ use crate::services::upload::validate_upstream_url;
 
 use crate::constants::*;
 use crate::helpers::*;
-use crate::models::{AppState, DownloadPhase, DownloadProgress};
+use crate::models::{AppState, DownloadHandle, DownloadPhase, DownloadProgress};
 use crate::services::download::{DownloadGuard, PreparedDownload};
 
 /// Handle upstream servers requests
@@ -58,15 +58,16 @@ pub async fn try_upstream_servers(
     // But use the full filename (with extension) for upstream URL construction
     let file_hash = crate::utils::get_sha256_hash_from_filename(filename).unwrap_or(filename);
 
-    // Check if this file is already being downloaded (use hash for tracking)
-    if state.ongoing_downloads.read().await.contains_key(file_hash) {
+    if let Some(handle) = state.ongoing_downloads.read().await.get(file_hash).cloned() {
+        if headers.get(header::RANGE).is_none() {
+            debug!("Attaching request to in-flight download {}", file_hash);
+            return serve_non_range_download(&handle, filename).await;
+        }
+
         debug!(
-            "File {} is already being downloaded, proxying request to upstream",
+            "Range request for in-flight download {}, proxying until phase 2",
             file_hash
         );
-
-        // Proxy the request to upstream while download is in progress
-        // Pass the full filename (with extension) for URL construction
         return proxy_request_to_upstream(
             state,
             filename,
@@ -841,6 +842,55 @@ async fn handle_successful_upstream_response(
     }
 }
 
+async fn open_download_file(handle: &DownloadHandle) -> std::io::Result<File> {
+    match File::open(&handle.temp_path).await {
+        Ok(file) => Ok(file),
+        Err(temp_error) => {
+            if let Some(final_path) = handle.final_path.get() {
+                File::open(final_path).await
+            } else {
+                Err(temp_error)
+            }
+        }
+    }
+}
+
+async fn serve_non_range_download(
+    handle: &DownloadHandle,
+    filename: &str,
+) -> Result<Response<Body>, StatusCode> {
+    let reader = open_download_file(handle).await.map_err(|error| {
+        error!(
+            "Failed to open in-flight download {}: {}",
+            handle.temp_path.display(),
+            error
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let stream = create_tailing_stream(reader, handle.progress.subscribe(), 0, handle.total_len)
+        .await
+        .map_err(|error| {
+            error!("Failed to attach to in-flight download: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let body = Body::from_stream(stream);
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .body(body)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    response = apply_streaming_headers(response, &handle.content_type, filename);
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("private, no-store"),
+    );
+    if let Some(length) = handle.total_len {
+        if let Ok(value) = length.to_string().parse() {
+            response.headers_mut().insert(header::CONTENT_LENGTH, value);
+        }
+    }
+    Ok(response)
+}
+
 /// Proxy request to upstream server while download is in progress
 /// Uses the same prioritization as try_upstream_servers
 async fn proxy_request_to_upstream(
@@ -1344,6 +1394,7 @@ async fn run_download(
         tokio::fs::rename(&temp_path, &final_path)
             .await
             .map_err(|error| error.to_string())?;
+        let _ = handle.final_path.set(final_path.clone());
 
         let key = sha256[..sha256.len().min(64)].to_string();
         state
@@ -1615,6 +1666,48 @@ mod tests {
         );
         let error = stream.next().await.unwrap().unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+    #[tokio::test]
+    async fn non_range_follower_streams_from_existing_download() {
+        let (path, mut writer, _) = temp_download_file().await;
+        let (progress, _) = watch::channel(DownloadProgress {
+            written: 0,
+            phase: DownloadPhase::Running,
+        });
+        let handle = DownloadHandle {
+            started: std::time::Instant::now(),
+            temp_path: path.clone(),
+            content_type: "application/octet-stream".to_string(),
+            total_len: Some(11),
+            progress: progress.clone(),
+            final_path: std::sync::OnceLock::new(),
+        };
+
+        let response = serve_non_range_download(&handle, "blob.bin").await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "11");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-store"
+        );
+
+        let download = tokio::spawn(async move {
+            writer.write_all(b"hello").await.unwrap();
+            writer.flush().await.unwrap();
+            progress.send_modify(|state| state.written = 5);
+            writer.write_all(b" world").await.unwrap();
+            writer.flush().await.unwrap();
+            progress.send_modify(|state| {
+                state.written = 11;
+                state.phase = DownloadPhase::Complete;
+            });
+        });
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        download.await.unwrap();
+        assert_eq!(body, bytes::Bytes::from_static(b"hello world"));
         tokio::fs::remove_file(path).await.unwrap();
     }
 }

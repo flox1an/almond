@@ -46,6 +46,7 @@ pub async fn prepare_download_state(
         content_type: content_type.to_string(),
         total_len,
         progress,
+        final_path: std::sync::OnceLock::new(),
     });
 
     state
