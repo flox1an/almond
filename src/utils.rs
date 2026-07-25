@@ -1,21 +1,15 @@
 use mime_guess::from_path;
-use once_cell::sync::Lazy;
-use regex::Regex;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::{fs, sync::RwLock};
+use tokio::fs;
 use tracing::{error, info, warn};
 
 use crate::models::{AppState, FileMetadata};
-
-// Pre-compiled regex for SHA256 hash extraction - compiled once at startup
-static SHA256_FILENAME_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^([a-fA-F0-9]{64})(\.[a-zA-Z0-9]+)?$")
-        .expect("Failed to compile SHA256 filename regex")
-});
+use crate::services::blob_index::BlobIndex;
 
 pub fn get_nested_path(
     upload_dir: &Path,
@@ -38,7 +32,7 @@ pub fn get_nested_path(
     path.join(filename)
 }
 
-pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, FileMetadata>>) {
+pub async fn build_file_index(upload_dir: &Path, index: &BlobIndex) {
     let mut map = HashMap::new();
     let mut dirs_to_process = vec![upload_dir.to_path_buf()];
 
@@ -88,7 +82,7 @@ pub async fn build_file_index(upload_dir: &Path, index: &RwLock<HashMap<String, 
         }
     }
 
-    *index.write().await = map;
+    index.replace(map).await;
 }
 
 /// Parse filename to extract SHA256 hash and optional expiration
@@ -167,13 +161,10 @@ async fn cleanup_empty_dirs(root_dir: &Path) {
 
 pub async fn enforce_storage_limits(state: &AppState) {
     let mut total_size = 0;
-    let mut files: Vec<(String, FileMetadata)> = {
-        let index = state.file_index.read().await;
-        index.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-    };
+    let mut files = state.file_index.snapshot().await;
 
     // Sort files by creation date (oldest first)
-    files.sort_by(|a, b| a.1.created_at.cmp(&b.1.created_at));
+    files.sort_by_key(|a| a.1.created_at);
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -234,20 +225,14 @@ pub async fn enforce_storage_limits(state: &AppState) {
             "age" => deleted_by_age += 1,
             _ => deleted_by_limits += 1,
         }
-        deleted_files.push((sha256, metadata.path));
+        deleted_files.push((sha256, metadata.path.clone()));
     }
 
-    if !deleted_files.is_empty() {
-        let mut index = state.file_index.write().await;
-        for (sha256, deleted_path) in deleted_files {
-            let should_remove = index
-                .get(&sha256)
-                .map(|metadata| metadata.path == deleted_path)
-                .unwrap_or(false);
-            if should_remove {
-                index.remove(&sha256);
-            }
-        }
+    for (sha256, deleted_path) in deleted_files {
+        state
+            .file_index
+            .remove_if_path_matches(&sha256, &deleted_path)
+            .await;
     }
 
     // Log cleanup summary
@@ -262,18 +247,30 @@ pub async fn enforce_storage_limits(state: &AppState) {
     }
 }
 
-pub fn get_sha256_hash_from_filename(filename: &str) -> Option<String> {
-    SHA256_FILENAME_REGEX
-        .captures(filename)
-        .map(|captures| captures[1].to_string())
+/// Extract the SHA-256 hash from `<hash>` or `<hash>.<ext>`.
+///
+/// Hand-rolled rather than regex-backed: this runs on every blob request, and
+/// the borrowed return keeps the hot path allocation-free.
+pub fn get_sha256_hash_from_filename(filename: &str) -> Option<&str> {
+    let (hash, extension) = match filename.split_once('.') {
+        Some((hash, extension)) => (hash, Some(extension)),
+        None => (filename, None),
+    };
+
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    if let Some(extension) = extension {
+        if extension.is_empty() || !extension.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return None;
+        }
+    }
+
+    Some(hash)
 }
 
-pub async fn find_file(
-    index: &RwLock<HashMap<String, FileMetadata>>,
-    base_name: &str,
-) -> Option<FileMetadata> {
-    let index = index.read().await;
-    index.get(base_name).cloned()
+pub async fn find_file(index: &BlobIndex, base_name: &str) -> Option<Arc<FileMetadata>> {
+    index.get(base_name).await
 }
 
 /// Outcome of parsing a `Range` request header.

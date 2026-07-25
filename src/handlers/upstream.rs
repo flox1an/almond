@@ -60,15 +60,15 @@ pub async fn try_upstream_servers(
 
     // Extract hash from filename for internal tracking (ongoing downloads, file index, etc.)
     // But use the full filename (with extension) for upstream URL construction
-    let file_hash = crate::utils::get_sha256_hash_from_filename(filename)
-        .unwrap_or_else(|| filename.to_string());
+    let file_hash =
+        crate::utils::get_sha256_hash_from_filename(filename).unwrap_or(filename);
 
     // Check if this file is already being downloaded (use hash for tracking)
     if state
         .ongoing_downloads
         .read()
         .await
-        .contains_key(&file_hash)
+        .contains_key(file_hash)
     {
         debug!(
             "File {} is already being downloaded, proxying request to upstream",
@@ -145,12 +145,12 @@ pub async fn try_upstream_servers(
                                 );
                                 // Prepare download state (use hash for tracking)
                                 let (temp_path, _written_len, _notify) =
-                                    prepare_download_state(state, &file_hash, &content_type)
+                                    prepare_download_state(state, file_hash, &content_type)
                                         .await?;
                                 // Start the download in the background
                                 let state_clone = state.clone();
                                 let file_url_clone = file_url.clone();
-                                let file_hash_clone = file_hash.clone();
+                                let file_hash_clone = file_hash.to_string();
                                 let content_type_clone = content_type.clone();
                                 let temp_path_clone = temp_path.clone();
                                 tokio::spawn(async move {
@@ -183,12 +183,12 @@ pub async fn try_upstream_servers(
                         );
                         // Prepare download state (use hash for tracking)
                         let (temp_path, written_len, notify) =
-                            prepare_download_state(state, &file_hash, &content_type).await?;
+                            prepare_download_state(state, file_hash, &content_type).await?;
                         return stream_and_save_from_upstream(
                             state,
                             &file_url,
                             response,
-                            &file_hash,
+                            file_hash,
                             written_len,
                             notify,
                             temp_path,
@@ -243,7 +243,7 @@ pub async fn try_upstream_servers(
                     Ok(response) if response.status().is_success() => {
                         debug!("Found file on xs server: {}", file_url);
                         return handle_successful_upstream_response(
-                            state, &client, response, &file_url, &file_hash, filename, headers,
+                            state, &client, response, &file_url, file_hash, filename, headers,
                         )
                         .await;
                     }
@@ -300,7 +300,7 @@ pub async fn try_upstream_servers(
                 Ok(response) if response.status().is_success() => {
                     debug!("Found file on local UPSTREAM_SERVER: {}", file_url);
                     return handle_successful_upstream_response(
-                        state, &client, response, &file_url, &file_hash, filename, headers,
+                        state, &client, response, &file_url, file_hash, filename, headers,
                     )
                     .await;
                 }
@@ -363,7 +363,7 @@ pub async fn try_upstream_servers(
                         Ok(response) if response.status().is_success() => {
                             debug!("Found file on user server: {}", file_url);
                             return handle_successful_upstream_response(
-                                state, &client, response, &file_url, &file_hash, filename, headers,
+                                state, &client, response, &file_url, file_hash, filename, headers,
                             )
                             .await;
                         }
@@ -409,15 +409,15 @@ pub async fn try_upstream_redirect(
     cache_in_background: bool,
 ) -> Result<Response, StatusCode> {
     // Extract hash from filename for internal tracking
-    let file_hash = crate::utils::get_sha256_hash_from_filename(filename)
-        .unwrap_or_else(|| filename.to_string());
+    let file_hash =
+        crate::utils::get_sha256_hash_from_filename(filename).unwrap_or(filename);
 
     // Check if this file is already being downloaded
     if state
         .ongoing_downloads
         .read()
         .await
-        .contains_key(&file_hash)
+        .contains_key(file_hash)
     {
         debug!(
             "File {} is already being downloaded in background, redirecting to upstream",
@@ -454,7 +454,7 @@ pub async fn try_upstream_redirect(
                 state,
                 &client,
                 &file_url,
-                &file_hash,
+                file_hash,
                 filename,
                 cache_in_background,
             )
@@ -496,7 +496,7 @@ pub async fn try_upstream_redirect(
                     state,
                     &client,
                     &file_url,
-                    &file_hash,
+                    file_hash,
                     filename,
                     cache_in_background,
                 )
@@ -540,7 +540,7 @@ pub async fn try_upstream_redirect(
                 state,
                 &client,
                 &file_url,
-                &file_hash,
+                file_hash,
                 filename,
                 cache_in_background,
             )
@@ -590,7 +590,7 @@ pub async fn try_upstream_redirect(
                         state,
                         &client,
                         &file_url,
-                        &file_hash,
+                        file_hash,
                         filename,
                         cache_in_background,
                     )
@@ -1220,7 +1220,7 @@ async fn prepare_download_state(
 ) -> Result<(std::path::PathBuf, Arc<AtomicU64>, Arc<Notify>), StatusCode> {
     // Strip codecs and other parameters from content type before extracting extension
     // Derive extension from content type
-    let file_extension = get_extension_from_mime(&content_type)
+    let file_extension = get_extension_from_mime(content_type)
         .map(|ext| format!(".{}", ext))
         .unwrap_or_default();
 
@@ -1461,32 +1461,32 @@ async fn stream_and_save_from_upstream(
                 // Index & Stats
                 let key = sha256[..sha256.len().min(64)].to_string();
                 debug!("Adding file to index with key: {}", key);
-                state_clone.file_index.write().await.insert(
-                    key.clone(),
-                    crate::models::FileMetadata {
-                        path: final_path,
-                        extension: extension_clone,
-                        mime_type: Some(content_type_clone),
-                        size: total,
-                        created_at: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                        pubkey: None,
-                        expiration: None,
-                    },
-                );
+                state_clone
+                    .file_index
+                    .insert(
+                        key.clone(),
+                        crate::models::FileMetadata {
+                            path: final_path,
+                            extension: extension_clone,
+                            mime_type: Some(content_type_clone),
+                            size: total,
+                            created_at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                            pubkey: None,
+                            expiration: None,
+                        },
+                    )
+                    .await;
                 debug!("Successfully added file to index");
 
                 // Mark that changes are pending for storage limit enforcement
                 let mut changes_pending = state_clone.changes_pending.write().await;
                 *changes_pending = true;
 
-                let mut n = state_clone.files_downloaded.write().await;
-                *n += 1;
-
-                // Track bytes served to users (streamed to client)
-                state_clone.metrics.track_served_bytes(total);
+                // Count the download and the bytes streamed to the client
+                state_clone.metrics.track_download(total);
 
                 // Track bytes downloaded from upstream server
                 state_clone
@@ -1562,7 +1562,7 @@ async fn download_file_from_upstream_background(
     }
 
     // Derive extension from content type
-    let extension = get_extension_from_mime(&content_type);
+    let extension = get_extension_from_mime(content_type);
 
     debug!(
         "Starting background download from upstream: {} to temp file: {}",
@@ -1663,29 +1663,32 @@ async fn download_file_from_upstream_background(
 
     // Update index
     let key = sha256[..sha256.len().min(64)].to_string();
-    state.file_index.write().await.insert(
-        key.clone(),
-        crate::models::FileMetadata {
-            path: final_path,
-            extension,
-            mime_type: Some(content_type.to_string()),
-            size: body_size,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            pubkey: None,
-            expiration: None,
-        },
-    );
+    state
+        .file_index
+        .insert(
+            key.clone(),
+            crate::models::FileMetadata {
+                path: final_path,
+                extension,
+                mime_type: Some(content_type.to_string()),
+                size: body_size,
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                pubkey: None,
+                expiration: None,
+            },
+        )
+        .await;
 
     // Mark that changes are pending for storage limit enforcement
     let mut changes_pending = state.changes_pending.write().await;
     *changes_pending = true;
 
-    // Update stats
-    let mut n = state.files_downloaded.write().await;
-    *n += 1;
+    // Count the download. Bytes are not counted as served: this is a background
+    // fetch, the client's range request was proxied straight from upstream.
+    state.metrics.files_downloaded.inc();
 
     // Track bytes downloaded from upstream server
     // Note: We don't track served_bytes here because this is a background download

@@ -231,7 +231,7 @@ async fn load_app_state() -> AppState {
         info!("📁 Temp directory does not exist, no cleanup needed");
     }
 
-    let file_index = Arc::new(RwLock::new(HashMap::new()));
+    let file_index = Arc::new(crate::services::blob_index::BlobIndex::new());
     build_file_index(&upload_dir, &file_index).await;
 
     let serve_file_index = Arc::new(RwLock::new(HashMap::new()));
@@ -651,9 +651,7 @@ async fn load_app_state() -> AppState {
         dvm_relays,
         dvm_refresh_interval_mins,
         max_file_age_days,
-        files_uploaded: Arc::new(RwLock::new(0)),
-        files_downloaded: Arc::new(RwLock::new(0)),
-        upload_throughput_data: Arc::new(RwLock::new(Vec::new())),
+        filter_cache: Arc::new(RwLock::new(None)),
         upstream_servers,
         upstream_mode,
         max_upstream_download_size_mb,

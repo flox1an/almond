@@ -3,8 +3,6 @@ use std::time::Duration;
 // File processing constants
 pub const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
 pub const LOG_INTERVAL: Duration = Duration::from_secs(5);
-pub const MAX_THROUGHPUT_ENTRIES: usize = 1000;
-pub const THROUGHPUT_CLEANUP_THRESHOLD: usize = 100;
 
 /// Read-buffer size for streaming blobs off disk.
 ///

@@ -58,14 +58,11 @@ pub async fn delete_blob(
     debug!("✅ Delete authorization tags validated");
 
     // Check if blob exists in file index
-    let file_index = state.file_index.read().await;
-    let file_metadata = file_index.get(&sha256).ok_or_else(|| {
+    let file_metadata = state.file_index.get(&sha256).await.ok_or_else(|| {
         warn!("Blob not found in index: {}", sha256);
         StatusCode::NOT_FOUND
     })?;
-
     let file_path = file_metadata.path.clone();
-    drop(file_index); // Release read lock before modifying
 
     debug!("📁 Found blob at: {}", file_path.display());
 
@@ -78,9 +75,7 @@ pub async fn delete_blob(
     debug!("✅ Deleted file from disk: {}", file_path.display());
 
     // Remove from file index
-    let mut file_index = state.file_index.write().await;
-    file_index.remove(&sha256);
-    drop(file_index);
+    state.file_index.remove(&sha256).await;
 
     debug!("✅ Removed blob from index: {}", sha256);
 

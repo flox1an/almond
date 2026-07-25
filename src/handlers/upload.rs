@@ -120,7 +120,7 @@ pub async fn upload_file(
     .await?;
 
     // Track statistics
-    track_upload_stats(&state, total_bytes).await;
+    track_upload_stats(&state);
 
     // Create response
     let descriptor =
@@ -241,7 +241,7 @@ pub async fn mirror_blob(
     .await?;
 
     // Track statistics
-    track_upload_stats(&state, body_size).await;
+    track_upload_stats(&state);
 
     // HLS recursive mirror: if this is a playlist, mirror referenced segments in background
     if hls::is_hls_playlist(&content_type) {
@@ -567,7 +567,7 @@ pub async fn patch_upload(
                 state.chunk_uploads.write().await.remove(sha256);
 
                 // Track statistics
-                track_upload_stats(&state, upload_length).await;
+                track_upload_stats(&state);
 
                 // Mark changes pending
                 file_storage::mark_changes_pending(&state).await;

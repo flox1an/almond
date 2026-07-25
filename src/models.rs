@@ -1,5 +1,6 @@
 use crate::helpers::{build_public_blob_url, get_extension_from_mime};
 use crate::metrics::Metrics;
+use crate::services::blob_index::BlobIndex;
 use cdk::wallet::Wallet as CdkWallet;
 use nostr_relay_pool::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -195,11 +196,25 @@ pub struct FileMetadata {
     pub expiration: Option<u64>,
 }
 
+/// A rendered BUD-11 filter response, valid for one index generation.
+///
+/// Building a filter walks every hash and allocates proportionally to the
+/// index, so it is rebuilt on mutation rather than per request.
+pub struct CachedFilter {
+    /// `BlobIndex` generation this was built from.
+    pub generation: u64,
+    /// Bloom's false-positive rate is request-controlled, so it is part of the
+    /// cache key. Stored as raw bits because `f64` is not `Eq`.
+    pub fp_rate_bits: u64,
+    pub body: bytes::Bytes,
+    pub etag: String,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub upload_dir: PathBuf,
-    pub file_index: Arc<RwLock<HashMap<String, FileMetadata>>>,
-    pub serve_file_index: Arc<RwLock<HashMap<String, ServeFileMetadata>>>,
+    pub file_index: Arc<BlobIndex>,
+    pub serve_file_index: Arc<RwLock<HashMap<String, Arc<ServeFileMetadata>>>>,
     pub serve_files_path: Option<PathBuf>,
     pub serve_files_manifest_name: String,
     pub serve_files_refresh_interval_secs: u64,
@@ -220,9 +235,8 @@ pub struct AppState {
     /// How often to refresh DVM pubkeys (in minutes)
     pub dvm_refresh_interval_mins: u64,
     pub max_file_age_days: u64,
-    pub files_uploaded: Arc<RwLock<u64>>,
-    pub files_downloaded: Arc<RwLock<u64>>,
-    pub upload_throughput_data: Arc<RwLock<Vec<(Instant, u64)>>>,
+    /// Cached BUD-11 filter, rebuilt only when the index generation moves.
+    pub filter_cache: Arc<RwLock<Option<CachedFilter>>>,
     pub upstream_servers: Vec<String>,
     pub upstream_mode: UpstreamMode,
     pub max_upstream_download_size_mb: u64,
@@ -296,19 +310,12 @@ impl AppState {
     }
 
     pub async fn get_stats(&self) {
-        let index = self.file_index.read().await;
-        let total_files = index.len();
-        let total_size_bytes: u64 = index.values().map(|m| m.size).sum();
-
-        let files_uploaded = *self.files_uploaded.read().await;
-        let files_downloaded = *self.files_downloaded.read().await;
+        let index = self.file_index.stats().await;
 
         // Update Prometheus metrics
         self.metrics.update(
-            files_uploaded,
-            files_downloaded,
-            total_size_bytes,
-            total_files,
+            index.total_bytes,
+            index.count,
             self.max_total_files,
             self.max_total_size,
             self.max_file_age_days,

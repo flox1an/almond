@@ -70,10 +70,7 @@ async fn mirror_single_reference(
     reference: &HlsReference,
 ) -> Result<bool, String> {
     // Check if already in index
-    let exists = {
-        let index = state.file_index.read().await;
-        index.contains_key(&reference.sha256)
-    };
+    let exists = state.file_index.contains(&reference.sha256).await;
 
     if exists {
         return Ok(false);

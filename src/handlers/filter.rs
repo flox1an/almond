@@ -5,12 +5,14 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bloomfilter::Bloom;
+use bytes::Bytes;
 use chrono::Utc;
 use rmp::encode;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use xorf::{BinaryFuse16, BinaryFuse32, BinaryFuse8};
 
-use crate::models::AppState;
+use crate::models::{AppState, CachedFilter};
 
 #[derive(Deserialize)]
 pub struct FilterQuery {
@@ -213,107 +215,121 @@ pub async fn get_filter(
     Query(q): Query<FilterQuery>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let algorithm = &state.filter_algorithm;
     let fp_rate = q.fp.unwrap_or(0.01).clamp(1e-6, 0.2);
+    let fp_rate_bits = fp_rate.to_bits();
+    let generation = state.file_index.generation().await;
 
-    // Collect all SHA-256 hashes from index
-    let index = state.file_index.read().await;
-    let count = index.len();
-
-    // Collect keys for bloom filter and fingerprints for binary fuse filters
-    let keys: Vec<String> = index
-        .keys()
-        .filter(|key| key.len() >= 64 && key.chars().take(64).all(|c| c.is_ascii_hexdigit()))
-        .map(|key| key[..64].to_string())
-        .collect();
-
-    let fingerprints: Vec<u64> = keys.iter().map(|key| sha256_to_u64(key)).collect();
-
-    // Generate ETag from count and a simple hash of keys
-    let etag = format!(
-        "\"{}-{}-{}\"",
-        algorithm,
-        count,
-        fingerprints.iter().take(10).map(|f| f % 1000).sum::<u64>()
-    );
-
-    // Check If-None-Match for conditional request
-    if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH) {
-        if let Ok(value) = if_none_match.to_str() {
-            if value == etag {
-                return Ok(Response::builder()
-                    .status(StatusCode::NOT_MODIFIED)
-                    .header(header::ETAG, &etag)
-                    .body(axum::body::Body::empty())
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
-            }
+    // Fast path: the index has not moved since the last render, so the cached
+    // body is still exactly what we would produce.
+    if let Some(cached) = state.filter_cache.read().await.as_ref() {
+        if cached.generation == generation && cached.fp_rate_bits == fp_rate_bits {
+            return filter_response(&headers, &cached.etag, cached.body.clone());
         }
     }
 
-    // Build the filter
-    let timestamp = Utc::now().timestamp();
-
-    // Handle empty index
-    if keys.is_empty() && !algorithm.starts_with("bloom") {
-        let payload = serde_json::json!({
-            "type": algorithm,
-            "timestamp": timestamp,
-            "count": 0,
-            "filter": "",
-        });
-
-        let body = serde_json::to_vec(&payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::ETAG, &etag)
-            .header(header::CACHE_CONTROL, "max-age=60")
-            .body(axum::body::Body::from(body))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
-    }
-
-    let filter = match build_filter(algorithm, &keys, &fingerprints, fp_rate) {
-        Ok(f) => f,
+    let rendered = match render_filter(&state, fp_rate).await {
+        Ok(rendered) => rendered,
         Err(msg) => {
             let payload = serde_json::json!({
                 "error": format!("failed to construct filter: {}", msg),
             });
             let body =
                 serde_json::to_vec(&payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            return Ok(Response::builder()
+            return Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(axum::body::Body::from(body))
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
 
-    let filter_b64 = BASE64.encode(filter.serialize());
-    let filter_type = filter.type_name();
+    let response = filter_response(&headers, &rendered.etag, rendered.body.clone());
+    *state.filter_cache.write().await = Some(rendered);
+    response
+}
 
-    // Build response per BUD-11 spec
-    let mut payload = serde_json::json!({
-        "type": filter_type,
-        "timestamp": timestamp,
-        "count": keys.len(),
-        "filter": filter_b64,
-    });
+/// Build the BUD-11 payload for the current index contents.
+///
+/// Walks every hash and allocates proportionally to the index, so callers must
+/// go through the generation-keyed cache rather than calling this per request.
+async fn render_filter(state: &AppState, fp_rate: f64) -> Result<CachedFilter, String> {
+    let algorithm = &state.filter_algorithm;
+    let (keys, generation) = state.file_index.hash_keys().await;
+    let timestamp = Utc::now().timestamp();
 
-    // Add bloom-specific fields
-    if let FilterType::Bloom(ref bloom) = filter {
-        payload["fp"] = serde_json::json!(fp_rate);
-        payload["k"] = serde_json::json!(bloom.number_of_hash_functions());
-        payload["m"] = serde_json::json!(bloom.as_slice().len() * 8);
+    let payload = if keys.is_empty() && !algorithm.starts_with("bloom") {
+        serde_json::json!({
+            "type": algorithm,
+            "timestamp": timestamp,
+            "count": 0,
+            "filter": "",
+        })
+    } else {
+        let fingerprints: Vec<u64> = keys.iter().map(|key| sha256_to_u64(key)).collect();
+        let filter = build_filter(algorithm, &keys, &fingerprints, fp_rate)?;
+
+        let mut payload = serde_json::json!({
+            "type": filter.type_name(),
+            "timestamp": timestamp,
+            "count": keys.len(),
+            "filter": BASE64.encode(filter.serialize()),
+        });
+
+        // Bloom-specific fields
+        if let FilterType::Bloom(bloom) = &filter {
+            payload["fp"] = serde_json::json!(fp_rate);
+            payload["k"] = serde_json::json!(bloom.number_of_hash_functions());
+            payload["m"] = serde_json::json!(bloom.as_slice().len() * 8);
+        }
+        payload
+    };
+
+    let body = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+
+    // Content-derived validator. The previous ETag summed an arbitrary ten
+    // entries of a `HashMap` iteration, so it churned without the content
+    // changing and collided when it did.
+    let etag = format!("\"{}\"", hex::encode(&Sha256::digest(&body)[..16]));
+
+    Ok(CachedFilter {
+        generation,
+        fp_rate_bits: fp_rate.to_bits(),
+        body: Bytes::from(body),
+        etag,
+    })
+}
+
+fn filter_response(
+    headers: &HeaderMap,
+    etag: &str,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    let matched = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|candidate| {
+                let candidate = candidate.trim();
+                candidate == "*" || candidate.trim_start_matches("W/") == etag
+            })
+        });
+
+    if matched {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, etag)
+            .header(header::CACHE_CONTROL, "max-age=60")
+            .body(axum::body::Body::empty())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    let body = serde_json::to_vec(&payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
-        .header(header::ETAG, &etag)
+        .header(header::ETAG, etag)
         .header(header::CACHE_CONTROL, "max-age=60")
         .body(axum::body::Body::from(body))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 #[cfg(test)]

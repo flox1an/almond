@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use sha2::{Digest, Sha256};
@@ -18,7 +19,7 @@ const HASH_READ_BUFFER_SIZE: usize = 64 * 1024;
 pub async fn refresh_serve_file_index(
     root: &Path,
     manifest_name: &str,
-    index: &RwLock<HashMap<String, ServeFileMetadata>>,
+    index: &RwLock<HashMap<String, Arc<ServeFileMetadata>>>,
 ) -> std::io::Result<()> {
     let root = root.to_path_buf();
     let files = collect_files(&root, manifest_name).await?;
@@ -40,12 +41,12 @@ pub async fn refresh_serve_file_index(
         entries.push((sha256.clone(), manifest_path));
         next_index.insert(
             sha256,
-            ServeFileMetadata {
+            Arc::new(ServeFileMetadata {
                 path,
                 extension,
                 mime_type,
                 size: metadata.len(),
-            },
+            }),
         );
     }
 
@@ -70,9 +71,9 @@ pub async fn refresh_serve_file_index(
 }
 
 pub async fn get_serve_file(
-    index: &RwLock<HashMap<String, ServeFileMetadata>>,
+    index: &RwLock<HashMap<String, Arc<ServeFileMetadata>>>,
     sha256: &str,
-) -> Option<ServeFileMetadata> {
+) -> Option<Arc<ServeFileMetadata>> {
     index.read().await.get(sha256).cloned()
 }
 
@@ -145,7 +146,7 @@ pub fn start_refresh_job(
     root: PathBuf,
     manifest_name: String,
     refresh_interval_secs: u64,
-    index: std::sync::Arc<RwLock<HashMap<String, ServeFileMetadata>>>,
+    index: std::sync::Arc<RwLock<HashMap<String, Arc<ServeFileMetadata>>>>,
 ) {
     if refresh_interval_secs == 0 {
         info!("📁 Serve files periodic refresh disabled");

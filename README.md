@@ -54,6 +54,11 @@ with aggressive, safe caching:
 - Multi-range requests (`bytes=0-9,20-29`) are answered with the full `200`
   representation; `multipart/byteranges` is not implemented.
 
+`GET /filter` (BUD-11) is rendered once per index change and served from cache,
+so it also carries an `ETag` and answers `If-None-Match` with `304`. The
+`timestamp` field is the render time rather than the request time — that is what
+makes the body byte-stable and the validator meaningful.
+
 ### System Information
 - `GET /_stats` - Get server statistics and performance metrics
 - `GET /_upstream` - Get configured upstream servers information

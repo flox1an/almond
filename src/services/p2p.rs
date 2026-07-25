@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use hashtree_core::{store::StoreStats, Hash, Store, StoreError};
@@ -6,17 +6,17 @@ use hashtree_network::{
     MeshRouter, MeshStoreCore, NostrRelayTransport, PoolSettings, SignalingTransport,
 };
 use nostr_sdk::prelude::Keys;
-use tokio::{fs, sync::RwLock};
+use tokio::fs;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    models::{AppState, FileMetadata},
-    services::p2p_webrtc::RealPeerConnectionFactory,
+    models::AppState,
+    services::{blob_index::BlobIndex, p2p_webrtc::RealPeerConnectionFactory},
 };
 
 #[derive(Clone)]
 struct AlmondLocalBlobStore {
-    file_index: Arc<RwLock<HashMap<String, FileMetadata>>>,
+    file_index: Arc<BlobIndex>,
 }
 
 impl AlmondLocalBlobStore {
@@ -28,9 +28,9 @@ impl AlmondLocalBlobStore {
 
     async fn local_path_for_hash(&self, hash: &Hash) -> Option<PathBuf> {
         let hash_hex = hex::encode(hash);
-        let file_index = self.file_index.read().await;
-        file_index
+        self.file_index
             .get(&hash_hex)
+            .await
             .map(|metadata| metadata.path.clone())
     }
 }
@@ -59,10 +59,10 @@ impl Store for AlmondLocalBlobStore {
     }
 
     async fn stats(&self) -> StoreStats {
-        let file_index = self.file_index.read().await;
+        let index = self.file_index.stats().await;
         StoreStats {
-            count: file_index.len() as u64,
-            bytes: file_index.values().map(|metadata| metadata.size).sum(),
+            count: index.count as u64,
+            bytes: index.total_bytes,
             pinned_count: 0,
             pinned_bytes: 0,
         }

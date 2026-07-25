@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tracing::{debug, error};
@@ -73,21 +74,24 @@ pub async fn add_to_index(
 ) -> AppResult<()> {
     let key = sha256[..64.min(sha256.len())].to_string();
 
-    state.file_index.write().await.insert(
-        key.clone(),
-        FileMetadata {
-            path,
-            extension,
-            mime_type,
-            size,
-            created_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            pubkey: None,
-            expiration,
-        },
-    );
+    state
+        .file_index
+        .insert(
+            key.clone(),
+            FileMetadata {
+                path,
+                extension,
+                mime_type,
+                size,
+                created_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                pubkey: None,
+                expiration,
+            },
+        )
+        .await;
 
     if let Some(exp) = expiration {
         debug!("Added file to index: {} (expires: {})", key, exp);
@@ -100,28 +104,24 @@ pub async fn add_to_index(
 
 /// Remove file from index
 pub async fn remove_from_index(state: &AppState, sha256: &str) -> AppResult<()> {
-    let mut file_index = state.file_index.write().await;
-    file_index.remove(sha256);
+    state.file_index.remove(sha256).await;
     debug!("Removed file from index: {}", sha256);
     Ok(())
 }
 
 /// Get file metadata from index
-pub async fn get_file_metadata(state: &AppState, sha256: &str) -> Option<FileMetadata> {
-    let file_index = state.file_index.read().await;
-    file_index.get(sha256).cloned()
+pub async fn get_file_metadata(state: &AppState, sha256: &str) -> Option<Arc<FileMetadata>> {
+    state.file_index.get(sha256).await
 }
 
 /// Delete file from disk and index
 pub async fn delete_file(state: &AppState, sha256: &str) -> AppResult<()> {
     // Get file metadata
-    let file_metadata = {
-        let file_index = state.file_index.read().await;
-        file_index
-            .get(sha256)
-            .cloned()
-            .ok_or_else(|| AppError::NotFound(format!("File not found: {}", sha256)))?
-    };
+    let file_metadata = state
+        .file_index
+        .get(sha256)
+        .await
+        .ok_or_else(|| AppError::NotFound(format!("File not found: {}", sha256)))?;
 
     // Delete physical file
     fs::remove_file(&file_metadata.path).await.map_err(|e| {

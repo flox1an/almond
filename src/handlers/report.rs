@@ -115,11 +115,7 @@ pub async fn report_blob(
         // Check trusted pubkeys for WOT mode
         let trusted = state.trusted_pubkeys.read().await;
         trusted.contains_key(&reporter_pubkey)
-    } else if state.feature_report_enabled == FeatureMode::Public {
-        true
-    } else {
-        false
-    };
+    } else { state.feature_report_enabled == FeatureMode::Public };
 
     if !is_allowed {
         error!(
@@ -182,15 +178,13 @@ pub async fn report_blob(
     // Process each reported blob
     for sha256 in &blob_hashes {
         // Check if blob exists
-        let file_index = state.file_index.read().await;
-        let file_metadata = match file_index.get(sha256) {
-            Some(metadata) => metadata.clone(),
+        let file_metadata = match state.file_index.get(sha256).await {
+            Some(metadata) => metadata,
             None => {
                 warn!("Reported blob not found: {}", sha256);
                 continue;
             }
         };
-        drop(file_index);
 
         let file_path = file_metadata.path.clone();
         info!(
@@ -211,9 +205,7 @@ pub async fn report_blob(
                         );
 
                         // Remove from file index
-                        let mut file_index = state.file_index.write().await;
-                        file_index.remove(sha256);
-                        drop(file_index);
+                        state.file_index.remove(sha256).await;
 
                         processed_hashes.push(sha256.clone());
                     }
@@ -229,9 +221,7 @@ pub async fn report_blob(
                         info!("🗑️  Deleted reported blob: {}", sha256);
 
                         // Remove from file index
-                        let mut file_index = state.file_index.write().await;
-                        file_index.remove(sha256);
-                        drop(file_index);
+                        state.file_index.remove(sha256).await;
 
                         processed_hashes.push(sha256.clone());
                     }

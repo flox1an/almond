@@ -39,7 +39,7 @@ pub async fn handle_file_request(
     if let Some(file_hash) = crate::utils::get_sha256_hash_from_filename(&filename) {
         debug!("Found file hash: {}", file_hash);
 
-        match find_file(&state.file_index, &file_hash).await {
+        match find_file(&state.file_index, file_hash).await {
             Some(file_metadata) => {
                 // File is available locally - serve it immediately, skip all upstream logic
                 debug!(
@@ -47,7 +47,7 @@ pub async fn handle_file_request(
                     file_hash
                 );
 
-                let etag = blob_etag(&file_hash);
+                let etag = blob_etag(file_hash);
                 if let Some(response) = check_not_modified(req.headers(), &etag)? {
                     return Ok(response);
                 }
@@ -91,13 +91,19 @@ pub async fn handle_file_request(
                 }
 
                 // Track download statistics
-                track_download_stats(&state, file_metadata.size).await;
-                serve_file_with_range(file_metadata.path, req.headers(), &etag).await
+                track_download_stats(&state, file_metadata.size);
+                serve_file_with_range(
+                    &file_metadata.path,
+                    file_metadata.mime_type.as_deref(),
+                    req.headers(),
+                    &etag,
+                )
+                .await
             }
             None => {
                 if let Some(serve_file_metadata) = crate::services::serve_files::get_serve_file(
                     &state.serve_file_index,
-                    &file_hash,
+                    file_hash,
                 )
                 .await
                 {
@@ -106,7 +112,7 @@ pub async fn handle_file_request(
                         file_hash
                     );
 
-                    let etag = blob_etag(&file_hash);
+                    let etag = blob_etag(file_hash);
                     if let Some(response) = check_not_modified(req.headers(), &etag)? {
                         return Ok(response);
                     }
@@ -149,9 +155,10 @@ pub async fn handle_file_request(
                         }
                     }
 
-                    track_download_stats(&state, serve_file_metadata.size).await;
+                    track_download_stats(&state, serve_file_metadata.size);
                     return serve_file_with_range(
-                        serve_file_metadata.path,
+                        &serve_file_metadata.path,
+                        serve_file_metadata.mime_type.as_deref(),
                         req.headers(),
                         &etag,
                     )
@@ -270,7 +277,7 @@ pub async fn handle_file_request(
                 let should_check_cache = custom_origin.is_none() && xs_servers_to_use.is_none();
                 if should_check_cache {
                     let failed_lookups = state.failed_upstream_lookups.read().await;
-                    if let Some(failed_time) = failed_lookups.get(&file_hash) {
+                    if let Some(failed_time) = failed_lookups.get(file_hash) {
                         let one_hour_ago =
                             std::time::Instant::now() - std::time::Duration::from_secs(3600);
                         if *failed_time > one_hour_ago {
@@ -324,7 +331,7 @@ pub async fn handle_file_request(
                         // (since custom servers may have different success/failure patterns)
                         if custom_origin.is_none() && xs_servers_to_use.is_none() {
                             let mut failed_lookups = state.failed_upstream_lookups.write().await;
-                            failed_lookups.insert(file_hash.clone(), std::time::Instant::now());
+                            failed_lookups.insert(file_hash.to_string(), std::time::Instant::now());
                             debug!("Added {} to failed upstream lookups cache", file_hash);
                         } else {
                             debug!("Skipping failed lookups cache because custom origin or xs servers were used");
@@ -402,9 +409,13 @@ fn stream_buffer_size(len: u64) -> usize {
     (len.min(FILE_STREAM_BUFFER_SIZE as u64) as usize).max(FILE_STREAM_MIN_BUFFER_SIZE)
 }
 
-/// Serve file with range support
+/// Serve file with range support.
+///
+/// `mime_type` comes from the index when known; deriving it from the path is
+/// only a fallback, since `mime_guess` allocates on every call.
 async fn serve_file_with_range(
-    path: std::path::PathBuf,
+    path: &std::path::Path,
+    mime_type: Option<&str>,
     headers: &axum::http::HeaderMap,
     etag: &str,
 ) -> Result<Response, AppError> {
@@ -416,15 +427,16 @@ async fn serve_file_with_range(
         range_header.unwrap_or("none")
     );
 
-    let expires_dt = chrono::Utc::now() + chrono::Duration::days(365);
-    let expires_str = expires_dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
-    let expires_header = hyper::http::HeaderValue::from_str(&expires_str)
-        .map_err(|e| AppError::InternalError(format!("Failed to create expires header: {}", e)))?;
+    let expires_header = crate::helpers::immutable_expires_header();
+    let content_type = match mime_type {
+        Some(mime) => mime.to_string(),
+        None => get_mime_type(path),
+    };
 
     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let content_disposition = format!("inline; filename=\"{}\"", filename);
 
-    let mut file = File::open(&path)
+    let mut file = File::open(path)
         .await
         .map_err(|e| AppError::IoError(format!("Failed to open file: {}", e)))?;
     let metadata = file
@@ -463,7 +475,7 @@ async fn serve_file_with_range(
 
             Response::builder()
                 .status(StatusCode::PARTIAL_CONTENT)
-                .header(header::CONTENT_TYPE, get_mime_type(&path))
+                .header(header::CONTENT_TYPE, content_type)
                 .header(
                     header::CONTENT_RANGE,
                     format!("bytes {}-{}/{}", start, end, total_size),
@@ -507,7 +519,7 @@ async fn serve_file_with_range(
 
             Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, get_mime_type(&path))
+                .header(header::CONTENT_TYPE, content_type)
                 .header(header::CONTENT_LENGTH, total_size)
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, etag)

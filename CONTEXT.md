@@ -327,6 +327,52 @@ fresh TCP + TLS handshake. The client sets `read_timeout` (inactivity) rather
 than a total request `timeout`, because upstream blobs can legitimately stream
 for minutes.
 
+### The blob index
+
+`services/blob_index.rs` owns the catalogue rather than exposing a bare
+`RwLock<HashMap<..>>`. Two invariants are maintained on mutation instead of
+being recomputed by scanning:
+
+- **`total_bytes`** — `/metrics` and the P2P store used to sum every entry on
+  each scrape.
+- **`generation`** — a monotonic mutation counter that makes derived artefacts
+  cacheable in O(1).
+
+Values are `Arc<FileMetadata>`, so a lookup on the serve path is a refcount
+bump rather than a clone of a `PathBuf` and two `String`s. The serve-files
+index (`SERVE_FILES_PATH`) is `Arc`-valued for the same reason.
+
+### Filter caching
+
+`/filter` used to rebuild a Bloom or BinaryFuse filter over every hash, base64
+it and JSON-encode it *on every request*, while holding the index read lock. It
+is now rendered once per index generation and served from `AppState::filter_cache`.
+Measured at 2002 blobs: a rebuild costs ~5.4 ms of CPU, a cache hit is
+indistinguishable from a trivial endpoint (~0.10 ms vs a 0.11 ms harness
+baseline). Two consequences worth knowing:
+
+- The `timestamp` field is the *render* time, not the request time. That is what
+  makes the body byte-stable, which is what makes the `ETag` meaningful.
+- The `ETag` is now a SHA-256 of the rendered body. The previous one summed an
+  arbitrary ten entries of a `HashMap` iteration, so it churned without the
+  content changing and collided when it did.
+
+### Per-request allocations on the serve path
+
+Removed, in rough order of cost: the `HeaderMap` clone, the `PathBuf` clone out
+of the index, `mime_guess` re-deriving a MIME type the index already holds, a
+`chrono` format + `HeaderValue` allocation for `Expires` (now cached for a
+minute — the value is a year out), and a regex capture allocating a `String` for
+the SHA-256 in every request path.
+
+### Counters
+
+`files_uploaded` / `files_downloaded` were kept twice: as `Arc<RwLock<u64>>` in
+`AppState` and as Prometheus `IntCounter`s, with the former copied into the
+latter on each scrape. The locks are gone; the counters are incremented at the
+point of the event. `upload_throughput_data` was write-only — a locked 1000-entry
+ring nothing ever read — and was deleted.
+
 ### Build profile
 
 `[profile.release]` uses `lto = "fat"` and `codegen-units = 1`; the hot path

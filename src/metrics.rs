@@ -153,11 +153,14 @@ impl Metrics {
         }
     }
 
-    /// Update metrics from current state
+    /// Update gauge-style metrics from current state.
+    ///
+    /// `files_uploaded` / `files_downloaded` are counters incremented at the
+    /// point of the event (see `track_upload_stats` / `track_download_stats`),
+    /// not mirrored from a separate tally.
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &self,
-        files_uploaded: u64,
-        files_downloaded: u64,
         total_size_bytes: u64,
         total_files: usize,
         max_total_files: usize,
@@ -165,11 +168,6 @@ impl Metrics {
         max_file_age_days: u64,
         upload_dir: &Path,
     ) {
-        // Update file and storage metrics
-        self.files_uploaded
-            .inc_by(files_uploaded.saturating_sub(self.files_uploaded.get()));
-        self.files_downloaded
-            .inc_by(files_downloaded.saturating_sub(self.files_downloaded.get()));
         self.storage_bytes.set(total_size_bytes as i64);
         self.total_files.set(total_files as i64);
 
@@ -197,9 +195,15 @@ impl Metrics {
         self.storage_usage_percent.set(storage_usage_percent);
     }
 
-    /// Track bytes served to a user
-    pub fn track_served_bytes(&self, bytes: u64) {
+    /// Record a completed download.
+    pub fn track_download(&self, bytes: u64) {
+        self.files_downloaded.inc();
         self.served_bytes.inc_by(bytes);
+    }
+
+    /// Record a completed upload.
+    pub fn track_upload(&self) {
+        self.files_uploaded.inc();
     }
 
     /// Track bytes downloaded from an upstream server

@@ -261,29 +261,22 @@ pub async fn list_blobs(
     };
 
     let files = {
-        let file_index = state.file_index.read().await;
-        let total_files = file_index.len();
-        info!("📋 Total files in index: {}", total_files);
+        let snapshot = state.file_index.snapshot().await;
+        debug!("📋 Total files in index: {}", snapshot.len());
 
-        file_index
-            .iter()
-            .filter_map(|(sha256, metadata)| {
+        snapshot
+            .into_iter()
+            .filter(|(_, metadata)| {
                 // Filter by uploaded timestamp (created_at)
-                if metadata.created_at >= since && metadata.created_at <= until {
-                    // Filter by author if specified
-                    if let Some(ref filter_pk) = filter_author {
-                        if let Some(ref metadata_pk) = metadata.pubkey {
-                            if metadata_pk != filter_pk {
-                                return None;
-                            }
-                        } else {
-                            // No pubkey in metadata, skip if filtering by author
-                            return None;
-                        }
-                    }
-                    Some((sha256.clone(), metadata.clone()))
-                } else {
-                    None
+                if metadata.created_at < since || metadata.created_at > until {
+                    return false;
+                }
+                // Filter by author if specified
+                match (&filter_author, &metadata.pubkey) {
+                    (Some(filter_pk), Some(metadata_pk)) => metadata_pk == filter_pk,
+                    // No pubkey in metadata, skip if filtering by author
+                    (Some(_), None) => false,
+                    (None, _) => true,
                 }
             })
             .collect::<Vec<_>>()

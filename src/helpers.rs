@@ -1,10 +1,12 @@
 use axum::{
     body::Body,
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::Response,
 };
 use reqwest::header as reqwest_header;
 use std::path::Path;
+use std::sync::{LazyLock, RwLock};
+use std::time::{Duration, Instant};
 use tracing::info;
 
 use crate::constants::*;
@@ -91,27 +93,47 @@ pub fn extract_expiration(headers: &HeaderMap) -> Option<u64> {
         .and_then(|s| s.parse::<u64>().ok())
 }
 
-/// Track download statistics
-pub async fn track_download_stats(state: &AppState, size: u64) {
-    let mut files_downloaded = state.files_downloaded.write().await;
-    *files_downloaded += 1;
+/// How often the cached `Expires` value is re-rendered.
+const EXPIRES_REFRESH: Duration = Duration::from_secs(60);
 
-    // Track bytes served to users
-    state.metrics.track_served_bytes(size);
+static EXPIRES_CACHE: LazyLock<RwLock<(Instant, HeaderValue)>> =
+    LazyLock::new(|| RwLock::new((Instant::now(), render_immutable_expires())));
+
+fn render_immutable_expires() -> HeaderValue {
+    let expires = chrono::Utc::now() + chrono::Duration::days(365);
+    HeaderValue::from_str(&expires.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+        .expect("an RFC 7231 date is always a valid header value")
+}
+
+/// One-year `Expires` value for immutable blobs.
+///
+/// Recomputed at most once a minute. Formatting a date and allocating a
+/// `HeaderValue` on every response is pure overhead when the timestamp is a
+/// year out and the content is content-addressed. `HeaderValue` is
+/// `Bytes`-backed, so the returned clone is a refcount bump.
+pub fn immutable_expires_header() -> HeaderValue {
+    {
+        let cached = EXPIRES_CACHE.read().unwrap_or_else(|e| e.into_inner());
+        if cached.0.elapsed() < EXPIRES_REFRESH {
+            return cached.1.clone();
+        }
+    }
+
+    let mut cached = EXPIRES_CACHE.write().unwrap_or_else(|e| e.into_inner());
+    if cached.0.elapsed() >= EXPIRES_REFRESH {
+        *cached = (Instant::now(), render_immutable_expires());
+    }
+    cached.1.clone()
+}
+
+/// Track download statistics
+pub fn track_download_stats(state: &AppState, size: u64) {
+    state.metrics.track_download(size);
 }
 
 /// Track upload statistics
-pub async fn track_upload_stats(state: &AppState, size: u64) {
-    let mut files_uploaded = state.files_uploaded.write().await;
-    *files_uploaded += 1;
-
-    let mut upload_throughput_data = state.upload_throughput_data.write().await;
-    upload_throughput_data.push((std::time::Instant::now(), size));
-
-    // Keep only last entries to prevent memory bloat
-    if upload_throughput_data.len() > MAX_THROUGHPUT_ENTRIES {
-        upload_throughput_data.drain(0..THROUGHPUT_CLEANUP_THRESHOLD);
-    }
+pub fn track_upload_stats(state: &AppState) {
+    state.metrics.track_upload();
 }
 
 /// Create a simple error response
