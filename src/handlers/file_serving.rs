@@ -15,10 +15,10 @@ use tracing::{debug, info, warn};
 use crate::constants::*;
 use crate::error::AppError;
 use crate::helpers::{get_mime_type, track_download_stats};
-use crate::models::{AppState, FileRequestQuery, ServeFileMetadata};
+use crate::models::{AppState, FileRequestQuery};
 use crate::services::blossom_servers;
 use crate::services::cashu;
-use crate::utils::{find_file, parse_range_header};
+use crate::utils::{find_file, parse_range_header, RangeSpec};
 
 /// Handle file requests (GET/HEAD)
 pub async fn handle_file_request(
@@ -47,56 +47,52 @@ pub async fn handle_file_request(
                     file_hash
                 );
 
+                let etag = blob_etag(&file_hash);
+                if let Some(response) = check_not_modified(req.headers(), &etag)? {
+                    return Ok(response);
+                }
+
                 if req.method() == Method::HEAD {
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .header(
-                            header::CONTENT_TYPE,
-                            file_metadata
-                                .mime_type
-                                .unwrap_or_else(|| DEFAULT_MIME_TYPE.into()),
-                        )
-                        .header(header::CONTENT_LENGTH, file_metadata.size)
-                        .header(header::ACCEPT_RANGES, "bytes")
-                        .body(Body::empty())
-                        .map_err(|e| {
-                            AppError::InternalError(format!("Failed to build HEAD response: {}", e))
-                        })
-                } else {
-                    // Check payment for download if required
-                    if state.feature_paid_download {
-                        let required_sats =
-                            cashu::calculate_price(file_metadata.size, state.cashu_price_per_mb);
-                        let headers = req.headers();
-                        let cashu_header = cashu::extract_cashu_header(headers);
+                    return build_blob_head_response(
+                        file_metadata.mime_type.as_deref(),
+                        file_metadata.size,
+                        &etag,
+                    );
+                }
 
-                        match cashu_header {
-                            None => {
-                                return Err(AppError::PaymentRequired {
-                                    amount_sats: required_sats,
-                                    unit: "sat".to_string(),
-                                    mints: state.cashu_accepted_mints.clone(),
-                                });
-                            }
-                            Some(token_str) => {
-                                let token = cashu::parse_token(&token_str)?;
-                                cashu::verify_token_basics(
-                                    &token,
-                                    required_sats,
-                                    &state.cashu_accepted_mints,
-                                )?;
+                // Check payment for download if required
+                if state.feature_paid_download {
+                    let required_sats =
+                        cashu::calculate_price(file_metadata.size, state.cashu_price_per_mb);
+                    let headers = req.headers();
+                    let cashu_header = cashu::extract_cashu_header(headers);
 
-                                if let Some(wallet) = &state.cashu_wallet {
-                                    cashu::receive_token(wallet, &token).await?;
-                                }
+                    match cashu_header {
+                        None => {
+                            return Err(AppError::PaymentRequired {
+                                amount_sats: required_sats,
+                                unit: "sat".to_string(),
+                                mints: state.cashu_accepted_mints.clone(),
+                            });
+                        }
+                        Some(token_str) => {
+                            let token = cashu::parse_token(&token_str)?;
+                            cashu::verify_token_basics(
+                                &token,
+                                required_sats,
+                                &state.cashu_accepted_mints,
+                            )?;
+
+                            if let Some(wallet) = &state.cashu_wallet {
+                                cashu::receive_token(wallet, &token).await?;
                             }
                         }
                     }
-
-                    // Track download statistics
-                    track_download_stats(&state, file_metadata.size).await;
-                    serve_file_with_range(file_metadata.path, req.headers().clone()).await
                 }
+
+                // Track download statistics
+                track_download_stats(&state, file_metadata.size).await;
+                serve_file_with_range(file_metadata.path, req.headers(), &etag).await
             }
             None => {
                 if let Some(serve_file_metadata) = crate::services::serve_files::get_serve_file(
@@ -110,8 +106,17 @@ pub async fn handle_file_request(
                         file_hash
                     );
 
+                    let etag = blob_etag(&file_hash);
+                    if let Some(response) = check_not_modified(req.headers(), &etag)? {
+                        return Ok(response);
+                    }
+
                     if req.method() == Method::HEAD {
-                        return build_serve_file_head_response(serve_file_metadata);
+                        return build_blob_head_response(
+                            serve_file_metadata.mime_type.as_deref(),
+                            serve_file_metadata.size,
+                            &etag,
+                        );
                     }
 
                     if state.feature_paid_download {
@@ -145,8 +150,12 @@ pub async fn handle_file_request(
                     }
 
                     track_download_stats(&state, serve_file_metadata.size).await;
-                    return serve_file_with_range(serve_file_metadata.path, req.headers().clone())
-                        .await;
+                    return serve_file_with_range(
+                        serve_file_metadata.path,
+                        req.headers(),
+                        &etag,
+                    )
+                    .await;
                 }
 
                 // File not found locally - now do upstream server lookup
@@ -331,28 +340,75 @@ pub async fn handle_file_request(
     }
 }
 
-fn build_serve_file_head_response(file_metadata: ServeFileMetadata) -> Result<Response, AppError> {
+/// `ETag` for a content-addressed blob. The SHA-256 *is* the strong validator,
+/// so revalidation never needs to touch the file.
+fn blob_etag(sha256: &str) -> String {
+    format!("\"{}\"", sha256)
+}
+
+/// RFC 9110 §8.8.3.2 weak comparison of an entity-tag list against our tag.
+fn etag_list_matches(list: &str, etag: &str) -> bool {
+    list.split(',').any(|candidate| {
+        let candidate = candidate.trim();
+        candidate == "*" || candidate.trim_start_matches("W/") == etag
+    })
+}
+
+/// Answer `If-None-Match` with `304` when the client already holds the blob.
+/// Blobs are immutable and hash-addressed, so a tag match is always current.
+fn check_not_modified(
+    headers: &axum::http::HeaderMap,
+    etag: &str,
+) -> Result<Option<Response>, AppError> {
+    let Some(if_none_match) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return Ok(None);
+    };
+    if !etag_list_matches(if_none_match, etag) {
+        return Ok(None);
+    }
+
+    Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, CACHE_CONTROL_IMMUTABLE)
+        .body(Body::empty())
+        .map(Some)
+        .map_err(|e| AppError::InternalError(format!("Failed to build 304 response: {}", e)))
+}
+
+fn build_blob_head_response(
+    mime_type: Option<&str>,
+    size: u64,
+    etag: &str,
+) -> Result<Response, AppError> {
     Response::builder()
         .status(StatusCode::OK)
-        .header(
-            header::CONTENT_TYPE,
-            file_metadata
-                .mime_type
-                .unwrap_or_else(|| DEFAULT_MIME_TYPE.into()),
-        )
-        .header(header::CONTENT_LENGTH, file_metadata.size)
+        .header(header::CONTENT_TYPE, mime_type.unwrap_or(DEFAULT_MIME_TYPE))
+        .header(header::CONTENT_LENGTH, size)
         .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, CACHE_CONTROL_IMMUTABLE)
         .body(Body::empty())
         .map_err(|e| AppError::InternalError(format!("Failed to build HEAD response: {}", e)))
+}
+
+/// Read-buffer size for a body of `len` bytes: large enough to amortise the
+/// blocking-pool dispatch behind every `tokio::fs` read, never larger than the
+/// response itself.
+fn stream_buffer_size(len: u64) -> usize {
+    (len.min(FILE_STREAM_BUFFER_SIZE as u64) as usize).max(FILE_STREAM_MIN_BUFFER_SIZE)
 }
 
 /// Serve file with range support
 async fn serve_file_with_range(
     path: std::path::PathBuf,
-    headers: axum::http::HeaderMap,
+    headers: &axum::http::HeaderMap,
+    etag: &str,
 ) -> Result<Response, AppError> {
-    use axum::http::header::RANGE;
-    let range_header = headers.get(RANGE).and_then(|r| r.to_str().ok());
+    let range_header = headers.get(header::RANGE).and_then(|r| r.to_str().ok());
 
     debug!(
         "Serving file: {} (range: {})",
@@ -377,9 +433,21 @@ async fn serve_file_with_range(
         .map_err(|e| AppError::IoError(format!("Failed to read file metadata: {}", e)))?;
     let total_size = metadata.len();
 
-    if let Some(range_header) = range_header {
-        if let Some(range) = parse_range_header(range_header, total_size) {
-            let (start, end) = range;
+    // A stale `If-Range` validator means the client's partial copy is not the
+    // blob we hold, so the range must be ignored and the full body sent.
+    let honor_range = headers
+        .get(header::IF_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| etag_list_matches(v, etag))
+        .unwrap_or(true);
+
+    let range = match (honor_range, range_header) {
+        (true, Some(value)) => parse_range_header(value, total_size),
+        _ => RangeSpec::Ignore,
+    };
+
+    match range {
+        RangeSpec::Satisfiable { start, end } => {
             let length = end - start + 1;
             debug!(
                 "Serving range: bytes {}-{}/{} (length: {})",
@@ -389,44 +457,67 @@ async fn serve_file_with_range(
             file.seek(SeekFrom::Start(start))
                 .await
                 .map_err(|e| AppError::IoError(format!("Failed to seek in file: {}", e)))?;
-            let stream = ReaderStream::new(file.take(length));
+            let stream =
+                ReaderStream::with_capacity(file.take(length), stream_buffer_size(length));
             let body = Body::from_stream(stream);
 
-            let mime = get_mime_type(&path);
-
-            return Response::builder()
+            Response::builder()
                 .status(StatusCode::PARTIAL_CONTENT)
-                .header(header::CONTENT_TYPE, mime)
+                .header(header::CONTENT_TYPE, get_mime_type(&path))
                 .header(
                     header::CONTENT_RANGE,
                     format!("bytes {}-{}/{}", start, end, total_size),
                 )
+                .header(header::CONTENT_LENGTH, length)
                 .header(header::ACCEPT_RANGES, "bytes")
-                .header(axum::http::header::CACHE_CONTROL, CACHE_CONTROL_IMMUTABLE)
-                .header(axum::http::header::EXPIRES, expires_header.clone())
-                .header(header::CONTENT_DISPOSITION, content_disposition.clone())
+                .header(header::ETAG, etag)
+                .header(header::CACHE_CONTROL, CACHE_CONTROL_IMMUTABLE)
+                .header(header::EXPIRES, expires_header)
+                .header(header::CONTENT_DISPOSITION, content_disposition)
                 .body(body)
                 .map_err(|e| {
                     AppError::InternalError(format!("Failed to build range response: {}", e))
-                });
+                })
+        }
+        RangeSpec::Unsatisfiable => {
+            debug!(
+                "Unsatisfiable range {:?} for {} ({} bytes)",
+                range_header,
+                path.display(),
+                total_size
+            );
+            Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{}", total_size))
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::ETAG, etag)
+                .body(Body::empty())
+                .map_err(|e| {
+                    AppError::InternalError(format!("Failed to build 416 response: {}", e))
+                })
+        }
+        RangeSpec::Ignore => {
+            debug!(
+                "Serving full file: {} (size: {} bytes)",
+                path.display(),
+                total_size
+            );
+            let stream = ReaderStream::with_capacity(file, stream_buffer_size(total_size));
+            let body = Body::from_stream(stream);
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, get_mime_type(&path))
+                .header(header::CONTENT_LENGTH, total_size)
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::ETAG, etag)
+                .header(header::CACHE_CONTROL, CACHE_CONTROL_IMMUTABLE)
+                .header(header::EXPIRES, expires_header)
+                .header(header::CONTENT_DISPOSITION, content_disposition)
+                .body(body)
+                .map_err(|e| {
+                    AppError::InternalError(format!("Failed to build file response: {}", e))
+                })
         }
     }
-
-    info!(
-        "Serving full file: {} (size: {} bytes)",
-        path.display(),
-        total_size
-    );
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, get_mime_type(&path))
-        .header(header::ACCEPT_RANGES, "bytes")
-        .header(axum::http::header::CACHE_CONTROL, CACHE_CONTROL_IMMUTABLE)
-        .header(axum::http::header::EXPIRES, expires_header.clone())
-        .header(header::CONTENT_DISPOSITION, content_disposition)
-        .body(body)
-        .map_err(|e| AppError::InternalError(format!("Failed to build file response: {}", e)))
 }

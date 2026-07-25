@@ -35,6 +35,25 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 - `GET /list` / `GET /list/<pubkey>` - List stored files with BUD-12 cursor pagination (`?limit=100&cursor=<last_sha256>`). Optional `?since=` and `?until=` filters are supported but should not be used for pagination.
 - `PUT /mirror` - Mirror a file from another server (BUD-4)
 
+### Blob Delivery Semantics
+
+Blobs are immutable and content-addressed, so `GET`/`HEAD /:filename` serve them
+with aggressive, safe caching:
+
+- **`ETag`** — the SHA-256 of the blob, quoted (`"a1b2..."`). A strong validator
+  that never needs to touch the file.
+- **`If-None-Match`** — a match returns `304 Not Modified` with no body. Handles
+  tag lists, weak (`W/"..."`) tags and `*`.
+- **`Cache-Control: public, max-age=31536000, immutable`** plus a one-year `Expires`.
+- **Range requests** — all three RFC 9110 forms: `bytes=START-END`, `bytes=START-`
+  and the suffix form `bytes=-N` (used by MP4 players probing the trailing `moov`
+  atom). An `END` past EOF is clamped rather than rejected.
+- **`416 Range Not Satisfiable`** with `Content-Range: bytes */SIZE` when the
+  requested range lies entirely outside the blob.
+- **`If-Range`** — a stale validator falls back to the full `200` body.
+- Multi-range requests (`bytes=0-9,20-29`) are answered with the full `200`
+  representation; `multipart/byteranges` is not implemented.
+
 ### System Information
 - `GET /_stats` - Get server statistics and performance metrics
 - `GET /_upstream` - Get configured upstream servers information

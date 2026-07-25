@@ -67,7 +67,14 @@ This document provides a comprehensive overview of the Almond project, compiled 
   - `?origin=<server>`: Custom upstream origin (requires `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=true`)
   - `?xs=<server1>&xs=<server2>`: Multiple upstream servers (BUD-01)
   - `?as=<pubkey>`: Author pubkey for logging
-- **Features**: Range request support, upstream fallback
+- **Caching**: `ETag` is the quoted SHA-256; `If-None-Match` (tag lists, `W/` weak
+  tags and `*`) yields `304 Not Modified`. `Cache-Control: public, max-age=31536000,
+  immutable` plus a one-year `Expires`.
+- **Ranges**: all RFC 9110 §14.1.1 forms including the suffix form `bytes=-N`;
+  an end past EOF is clamped. Ranges outside the blob return `416` with
+  `Content-Range: bytes */SIZE`. A stale `If-Range` falls back to `200`.
+  Multi-range requests are served as a full `200` (no `multipart/byteranges`).
+- **Features**: Upstream fallback
 
 #### `GET /list` and `GET /list/:id`
 - **Purpose**: List all stored files
@@ -297,6 +304,37 @@ Example:
 - ✅ Better testability (each layer can be tested independently)
 - ✅ Type-safe error handling with `AppError`
 - ✅ Consistent patterns throughout codebase
+
+## Performance Characteristics
+
+Tuning decisions on the hot serve path, and why they are what they are.
+
+### Disk streaming
+
+`ReaderStream`'s default read buffer is 4 KiB, and every read on a
+`tokio::fs::File` is a dispatch to the blocking pool — a 100 MB blob cost ~25.6k
+round trips and as many `BytesMut` allocations. Blobs are streamed with a
+128 KiB buffer (`FILE_STREAM_BUFFER_SIZE`), sized down to the response length for
+small ranges with an 8 KiB floor (`FILE_STREAM_MIN_BUFFER_SIZE`). Measured ~4x
+throughput on 3 MB blobs over loopback.
+
+### Upstream connections
+
+A single connection-pooled `reqwest::Client` (`create_upstream_client`) lives in
+`AppState.upstream_client` and is cloned per request; the handle is an `Arc`.
+Building a client per request discarded the pool, so every cache miss paid for a
+fresh TCP + TLS handshake. The client sets `read_timeout` (inactivity) rather
+than a total request `timeout`, because upstream blobs can legitimately stream
+for minutes.
+
+### Build profile
+
+`[profile.release]` uses `lto = "fat"` and `codegen-units = 1`; the hot path
+spans axum → hyper → tokio-util → tokio, so cross-crate inlining pays. `mimalloc`
+is the global allocator — glibc malloc degrades badly with one `BytesMut` per
+chunk per concurrent stream. `panic = "abort"` is deliberately *not* set:
+handlers are not wrapped in `CatchPanicLayer`, so aborting would turn a single
+bad request into a full node outage.
 
 ## Security Considerations
 

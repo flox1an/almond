@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod constants;
 pub mod error;
 pub mod handlers;
@@ -654,6 +657,8 @@ async fn load_app_state() -> AppState {
         upstream_servers,
         upstream_mode,
         max_upstream_download_size_mb,
+        upstream_client: crate::services::upload::create_upstream_client()
+            .expect("Failed to build upstream HTTP client"),
         max_chunk_size_mb,
         chunk_cleanup_timeout_minutes,
         feature_upload_enabled,

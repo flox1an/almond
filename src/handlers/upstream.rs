@@ -91,7 +91,7 @@ pub async fn try_upstream_servers(
     // Track which servers we've already tried to avoid duplicate HEAD requests
     let mut tried_servers = std::collections::HashSet::<String>::new();
 
-    let client = Client::new();
+    let client = state.upstream_client.clone();
 
     // Try custom origin first if provided (single server)
     if let Some(origin_url) = custom_origin {
@@ -427,7 +427,7 @@ pub async fn try_upstream_redirect(
 
     // Track which servers we've already tried to avoid duplicate HEAD requests
     let mut tried_servers = std::collections::HashSet::<String>::new();
-    let client = Client::new();
+    let client = state.upstream_client.clone();
 
     // Try custom origin first if provided (single server)
     if let Some(origin_url) = custom_origin {
@@ -737,7 +737,7 @@ async fn start_background_download_for_redirect(
     file_hash: &str,
     content_type: &str,
 ) {
-    let client = Client::new();
+    let client = state.upstream_client.clone();
 
     // Make GET request to download the file
     match client.get(file_url).send().await {
@@ -890,7 +890,7 @@ async fn proxy_request_to_upstream(
         filename
     );
 
-    let client = Client::new();
+    let client = state.upstream_client.clone();
 
     // Track which servers we've already tried to avoid duplicate requests
     let mut tried_servers = std::collections::HashSet::<String>::new();

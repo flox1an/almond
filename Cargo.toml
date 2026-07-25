@@ -49,6 +49,10 @@ prometheus = "0.14"
 fs2 = "0.4"
 rmp = "0.8.15"
 
+# Global allocator: glibc malloc degrades badly under many concurrent
+# streaming responses (one BytesMut per chunk per connection).
+mimalloc = { version = "0.1", default-features = false }
+
 # Cashu payment support (BUD-07)
 cdk = { version = "0.16", default-features = false, features = ["wallet"] }
 cdk-sqlite = { version = "0.16", features = ["wallet"] }
@@ -66,3 +70,12 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 rcgen = "0.14"
 rustls-pemfile = "2.2"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
+
+[profile.release]
+# Whole-program inlining across crate boundaries; the hot path spans
+# axum -> hyper -> tokio-util -> tokio and benefits directly.
+lto = "fat"
+codegen-units = 1
+# NOTE: deliberately NOT setting panic = "abort". Handlers are not wrapped in
+# CatchPanicLayer, so aborting would turn a single bad request into a full
+# node outage.

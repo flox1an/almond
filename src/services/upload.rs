@@ -150,6 +150,36 @@ pub fn create_hardened_http_client() -> AppResult<Client> {
         .map_err(|e| AppError::InternalError(format!("Failed to create HTTP client: {}", e)))
 }
 
+/// Build the single, process-wide client used for upstream blob fetches.
+///
+/// Constructing a `Client` per request throws away the connection pool, so
+/// every cache miss paid for a fresh TCP + TLS handshake. This one is built
+/// once and cloned (the handle is an `Arc` internally).
+///
+/// Note the absence of a total request timeout: upstream bodies are blobs that
+/// can legitimately stream for minutes. Stalls are caught by `read_timeout`,
+/// which fires on inactivity rather than on total elapsed time.
+pub fn create_upstream_client() -> AppResult<Client> {
+    let redirect_policy = if HTTP_REQUEST_MAX_REDIRECTS == 0 {
+        redirect::Policy::none()
+    } else {
+        redirect::Policy::limited(HTTP_REQUEST_MAX_REDIRECTS as usize)
+    };
+
+    Client::builder()
+        .redirect(redirect_policy)
+        .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
+        .read_timeout(Duration::from_secs(UPSTREAM_READ_TIMEOUT_SECS))
+        .pool_max_idle_per_host(UPSTREAM_POOL_MAX_IDLE_PER_HOST)
+        .pool_idle_timeout(Duration::from_secs(UPSTREAM_POOL_IDLE_TIMEOUT_SECS))
+        .tcp_keepalive(Duration::from_secs(UPSTREAM_TCP_KEEPALIVE_SECS))
+        .tcp_nodelay(true)
+        .build()
+        .map_err(|e| {
+            AppError::InternalError(format!("Failed to create upstream HTTP client: {}", e))
+        })
+}
+
 /// Stream data from Body to temp file while calculating hash
 pub async fn stream_to_temp_file(
     mut body_stream: impl futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Unpin,

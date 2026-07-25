@@ -226,6 +226,9 @@ pub struct AppState {
     pub upstream_servers: Vec<String>,
     pub upstream_mode: UpstreamMode,
     pub max_upstream_download_size_mb: u64,
+    /// Shared, connection-pooled client for all upstream blob fetches.
+    /// Cloning is cheap; the pool lives for the process lifetime.
+    pub upstream_client: reqwest::Client,
     pub max_chunk_size_mb: u64,
     pub chunk_cleanup_timeout_minutes: u64,
     pub feature_upload_enabled: FeatureMode,

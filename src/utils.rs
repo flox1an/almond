@@ -276,25 +276,77 @@ pub async fn find_file(
     index.get(base_name).cloned()
 }
 
-pub fn parse_range_header(header_value: &str, total_size: u64) -> Option<(u64, u64)> {
-    if !header_value.starts_with("bytes=") {
-        return None;
-    }
-    let range = &header_value[6..];
-    let parts: Vec<&str> = range.split('-').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let start = parts[0].parse::<u64>().ok()?;
-    let end = if parts[1].is_empty() {
-        total_size - 1
-    } else {
-        parts[1].parse::<u64>().ok()?
+/// Outcome of parsing a `Range` request header.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RangeSpec {
+    /// Inclusive byte range to serve as `206 Partial Content`.
+    Satisfiable { start: u64, end: u64 },
+    /// Well-formed range that lies entirely outside the resource -> `416`.
+    Unsatisfiable,
+    /// Nothing usable: malformed, or a multi-range request we do not build a
+    /// `multipart/byteranges` body for. RFC 9110 §14.2 permits ignoring the
+    /// header and serving the full `200` representation.
+    Ignore,
+}
+
+/// Parse a single-range `Range: bytes=...` header.
+///
+/// Handles all three RFC 9110 §14.1.1 forms: `bytes=START-END`,
+/// `bytes=START-` (open ended) and `bytes=-SUFFIX` (final N bytes). The suffix
+/// form matters in practice: MP4 players probe the trailing `moov` atom with
+/// it, and treating it as unparseable means shipping the entire blob instead.
+pub fn parse_range_header(header_value: &str, total_size: u64) -> RangeSpec {
+    let Some(spec) = header_value.trim().strip_prefix("bytes=") else {
+        return RangeSpec::Ignore;
     };
-    if start > end || end >= total_size {
-        return None;
+    let spec = spec.trim();
+
+    if spec.contains(',') {
+        return RangeSpec::Ignore;
     }
-    Some((start, end))
+
+    let Some((first, last)) = spec.split_once('-') else {
+        return RangeSpec::Ignore;
+    };
+    let (first, last) = (first.trim(), last.trim());
+
+    // A zero-length resource cannot satisfy any range.
+    if total_size == 0 {
+        return RangeSpec::Unsatisfiable;
+    }
+
+    let (start, end) = if first.is_empty() {
+        // Suffix form: `bytes=-N` selects the final N bytes.
+        let Ok(suffix) = last.parse::<u64>() else {
+            return RangeSpec::Ignore;
+        };
+        if suffix == 0 {
+            return RangeSpec::Unsatisfiable;
+        }
+        (total_size.saturating_sub(suffix), total_size - 1)
+    } else {
+        let Ok(start) = first.parse::<u64>() else {
+            return RangeSpec::Ignore;
+        };
+        if start >= total_size {
+            return RangeSpec::Unsatisfiable;
+        }
+        let end = if last.is_empty() {
+            total_size - 1
+        } else {
+            match last.parse::<u64>() {
+                // An end past EOF is clamped, not rejected (RFC 9110 §14.1.1).
+                Ok(end) => end.min(total_size - 1),
+                Err(_) => return RangeSpec::Ignore,
+            }
+        };
+        if start > end {
+            return RangeSpec::Unsatisfiable;
+        }
+        (start, end)
+    };
+
+    RangeSpec::Satisfiable { start, end }
 }
 
 /// Clean up abandoned chunked uploads and their associated files
@@ -419,5 +471,60 @@ pub async fn cleanup_expired_blossom_server_lists(state: &AppState) {
             "Cleaned up {} expired blossom server list cache entries",
             cleaned_count
         );
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::{parse_range_header as parse, RangeSpec};
+
+    fn sat(start: u64, end: u64) -> RangeSpec {
+        RangeSpec::Satisfiable { start, end }
+    }
+
+    #[test]
+    fn parses_closed_range() {
+        assert_eq!(parse("bytes=0-99", 1000), sat(0, 99));
+        assert_eq!(parse("bytes=500-999", 1000), sat(500, 999));
+    }
+
+    #[test]
+    fn parses_open_ended_range() {
+        assert_eq!(parse("bytes=500-", 1000), sat(500, 999));
+        assert_eq!(parse("bytes=0-", 1), sat(0, 0));
+    }
+
+    /// Regression: the suffix form used to fail to parse and silently fall back
+    /// to a full-body 200 response.
+    #[test]
+    fn parses_suffix_range() {
+        assert_eq!(parse("bytes=-500", 1000), sat(500, 999));
+        // A suffix longer than the resource clamps to the whole resource.
+        assert_eq!(parse("bytes=-5000", 1000), sat(0, 999));
+    }
+
+    #[test]
+    fn clamps_end_past_eof() {
+        assert_eq!(parse("bytes=900-5000", 1000), sat(900, 999));
+    }
+
+    #[test]
+    fn rejects_ranges_outside_resource() {
+        assert_eq!(parse("bytes=1000-1100", 1000), RangeSpec::Unsatisfiable);
+        assert_eq!(parse("bytes=-0", 1000), RangeSpec::Unsatisfiable);
+        assert_eq!(parse("bytes=0-0", 0), RangeSpec::Unsatisfiable);
+    }
+
+    #[test]
+    fn ignores_unusable_headers() {
+        assert_eq!(parse("items=0-99", 1000), RangeSpec::Ignore);
+        assert_eq!(parse("bytes=abc-def", 1000), RangeSpec::Ignore);
+        assert_eq!(parse("bytes=0-9,20-29", 1000), RangeSpec::Ignore);
+        assert_eq!(parse("bytes=", 1000), RangeSpec::Ignore);
+    }
+
+    #[test]
+    fn inverted_range_is_unsatisfiable() {
+        assert_eq!(parse("bytes=800-100", 1000), RangeSpec::Unsatisfiable);
     }
 }
