@@ -22,6 +22,31 @@ use crate::constants::*;
 use crate::helpers::*;
 use crate::models::{AppState, DownloadHandle, DownloadPhase, DownloadProgress};
 use crate::services::download::{DownloadGuard, PreparedDownload};
+use crate::utils::{parse_range_header, RangeSpec};
+
+const SEEK_AHEAD_LIMIT: u64 = 8 * 1024 * 1024;
+
+fn coalescible_range_start(headers: &HeaderMap) -> Option<u64> {
+    let value = headers.get(header::RANGE)?.to_str().ok()?;
+    let range = value.strip_prefix("bytes=")?;
+    if range.contains(',') {
+        return None;
+    }
+    let (start, _) = range.split_once('-')?;
+    let start = start.parse::<u64>().ok()?;
+    (start <= SEEK_AHEAD_LIMIT).then_some(start)
+}
+
+fn copy_headers_for_cold_fetch(
+    headers: &HeaderMap,
+    request: reqwest::RequestBuilder,
+) -> reqwest::RequestBuilder {
+    if coalescible_range_start(headers).is_some() {
+        copy_headers_without_range(headers, request).header(reqwest_header::RANGE, "bytes=0-")
+    } else {
+        copy_headers_to_reqwest(headers, request)
+    }
+}
 
 /// Handle upstream servers requests
 pub async fn get_upstream(
@@ -63,9 +88,16 @@ pub async fn try_upstream_servers(
             debug!("Attaching request to in-flight download {}", file_hash);
             return serve_non_range_download(&handle, filename).await;
         }
+        if let Some(response) = serve_range_download(&handle, filename, headers).await {
+            debug!(
+                "Attaching range request to in-flight download {}",
+                file_hash
+            );
+            return response;
+        }
 
         debug!(
-            "Range request for in-flight download {}, proxying until phase 2",
+            "Far range seek for {}, proxying to preserve latency",
             file_hash
         );
         return proxy_request_to_upstream(
@@ -111,78 +143,15 @@ pub async fn try_upstream_servers(
 
             // Create request with all relevant headers for upstream servers
             let request = client.get(&file_url);
-            let request = copy_headers_to_reqwest(headers, request);
+            let request = copy_headers_for_cold_fetch(headers, request);
 
             match request.send().await {
                 Ok(response) if response.status().is_success() => {
                     debug!("Found file on custom origin server: {}", file_url);
-                    // Get content type from upstream response
-                    let content_type = extract_content_type_from_response(response.headers());
-                    // Check if this is a range request
-                    let has_range_header = headers.get(header::RANGE).is_some();
-
-                    if has_range_header {
-                        debug!("Range request detected for non-existent file {}, starting download from byte 0", file_hash);
-                        // For range requests, we need to start a full download in the background
-                        // while proxying the range request for immediate response
-                        let full_request = client.get(&file_url);
-                        let full_request = copy_headers_without_range(headers, full_request);
-
-                        match full_request.send().await {
-                            Ok(full_response) if full_response.status().is_success() => {
-                                debug!(
-                                    "Starting full download from byte 0 for range request: {}",
-                                    file_hash
-                                );
-                                let prepared = prepare_download_state(
-                                    state,
-                                    file_hash,
-                                    &content_type,
-                                    full_response.content_length(),
-                                )
-                                .await?;
-                                let state_clone = state.clone();
-                                let file_url_clone = file_url.clone();
-                                let file_hash_clone = file_hash.to_string();
-                                tokio::spawn(async move {
-                                    download_file_from_upstream_background(
-                                        &state_clone,
-                                        &file_url_clone,
-                                        full_response,
-                                        &file_hash_clone,
-                                        prepared,
-                                    )
-                                    .await;
-                                });
-                                // Proxy the range request to upstream for immediate response
-                                debug!("Proxying range request to upstream while download starts in background: {}", file_hash);
-                                return proxy_upstream_response(response, &content_type, filename)
-                                    .await;
-                            }
-                            Ok(_) | Err(_) => {
-                                warn!("Failed to start full download for range request, proxying range request only: {}", file_hash);
-                                return proxy_upstream_response(response, &content_type, filename)
-                                    .await;
-                            }
-                        }
-                    } else {
-                        // For non-range requests, stream and save from upstream
-                        debug!(
-                            "Non-range request, starting download and streaming to client: {}",
-                            file_hash
-                        );
-                        let prepared = prepare_download_state(
-                            state,
-                            file_hash,
-                            &content_type,
-                            response.content_length(),
-                        )
-                        .await?;
-                        return stream_and_save_from_upstream(
-                            state, &file_url, response, file_hash, prepared,
-                        )
-                        .await;
-                    }
+                    return handle_successful_upstream_response(
+                        state, &client, response, &file_url, file_hash, filename, headers,
+                    )
+                    .await;
                 }
                 Ok(response) => {
                     debug!(
@@ -225,7 +194,7 @@ pub async fn try_upstream_servers(
                 debug!("Trying xs server: {}", file_url);
 
                 let request = client.get(&file_url);
-                let request = copy_headers_to_reqwest(headers, request);
+                let request = copy_headers_for_cold_fetch(headers, request);
 
                 match request.send().await {
                     Ok(response) if response.status().is_success() => {
@@ -282,7 +251,7 @@ pub async fn try_upstream_servers(
 
             // Create request with all relevant headers for upstream servers
             let request = client.get(&file_url);
-            let request = copy_headers_to_reqwest(headers, request);
+            let request = copy_headers_for_cold_fetch(headers, request);
 
             match request.send().await {
                 Ok(response) if response.status().is_success() => {
@@ -345,7 +314,7 @@ pub async fn try_upstream_servers(
 
                     // Create request with all relevant headers for upstream servers
                     let request = client.get(&file_url);
-                    let request = copy_headers_to_reqwest(headers, request);
+                    let request = copy_headers_for_cold_fetch(headers, request);
 
                     match request.send().await {
                         Ok(response) if response.status().is_success() => {
@@ -768,78 +737,63 @@ async fn handle_successful_upstream_response(
     filename: &str,
     headers: &HeaderMap,
 ) -> Result<Response, StatusCode> {
-    // Get content type from upstream response
     let content_type = extract_content_type_from_response(response.headers());
-
-    // Check if this is a range request
-    let has_range_header = headers.get(header::RANGE).is_some();
-
-    if has_range_header {
-        debug!(
-            "Range request detected for non-existent file {}, starting download from byte 0",
-            file_hash
-        );
-
-        // For range requests, we need to start a full download in the background
-        // while proxying the range request for immediate response
-        let full_request = client.get(file_url);
-        let full_request = copy_headers_without_range(headers, full_request);
-
-        match full_request.send().await {
-            Ok(full_response) if full_response.status().is_success() => {
-                debug!(
-                    "Starting full download from byte 0 for range request: {}",
-                    file_hash
-                );
-
-                let prepared = prepare_download_state(
-                    state,
-                    file_hash,
-                    &content_type,
-                    full_response.content_length(),
-                )
-                .await?;
-
-                let state_clone = state.clone();
-                let file_url_clone = file_url.to_string();
-                let file_hash_clone = file_hash.to_string();
-                tokio::spawn(async move {
-                    download_file_from_upstream_background(
-                        &state_clone,
-                        &file_url_clone,
-                        full_response,
-                        &file_hash_clone,
-                        prepared,
-                    )
-                    .await;
-                });
-
-                // Proxy the range request to upstream for immediate response
-                debug!(
-                    "Proxying range request to upstream while download starts in background: {}",
-                    file_hash
-                );
-                return proxy_upstream_response(response, &content_type, filename).await;
-            }
-            Ok(_) | Err(_) => {
-                // If we can't get the full file, fall back to proxying the range request
-                warn!("Failed to start full download for range request, proxying range request only: {}", file_hash);
-                return proxy_upstream_response(response, &content_type, filename).await;
-            }
-        }
-    } else {
-        // For non-range requests, stream and save from upstream
-        debug!(
-            "Non-range request, starting download and streaming to client: {}",
-            file_hash
-        );
-
+    if headers.get(header::RANGE).is_none() {
         let prepared =
             prepare_download_state(state, file_hash, &content_type, response.content_length())
                 .await?;
-
         return stream_and_save_from_upstream(state, file_url, response, file_hash, prepared).await;
     }
+
+    // Far seeks and suffix/multi-ranges were sent upstream unchanged. They are
+    // latency-sensitive and intentionally bypass the sequential cache fill.
+    if coalescible_range_start(headers).is_none() {
+        return proxy_upstream_response(response, &content_type, filename).await;
+    }
+
+    let total_len = upstream_response_total_len(&response);
+    let Some(total_len) = total_len else {
+        // A compliant 206 carries the complete length in Content-Range. If the
+        // origin supplied neither it nor Content-Length, issue the original
+        // range request so the client still receives correct range semantics.
+        let request = copy_headers_to_reqwest(headers, client.get(file_url));
+        let response = request.send().await.map_err(|error| {
+            warn!("Failed range fallback for {}: {}", file_url, error);
+            StatusCode::BAD_GATEWAY
+        })?;
+        return proxy_upstream_response(response, &content_type, filename).await;
+    };
+
+    let prepared = prepare_download_state(state, file_hash, &content_type, Some(total_len)).await?;
+    let handle = prepared.handle.clone();
+    let range_response = serve_range_download(&handle, filename, headers)
+        .await
+        .ok_or(StatusCode::RANGE_NOT_SATISFIABLE)??;
+
+    let state_clone = state.clone();
+    let file_url_clone = file_url.to_string();
+    let file_hash_clone = file_hash.to_string();
+    tokio::spawn(async move {
+        download_file_from_upstream_background(
+            &state_clone,
+            &file_url_clone,
+            response,
+            &file_hash_clone,
+            prepared,
+        )
+        .await;
+    });
+    Ok(range_response)
+}
+
+fn upstream_response_total_len(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest_header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit_once('/'))
+        .and_then(|(_, total)| total.parse::<u64>().ok())
+        .or_else(|| response.content_length())
 }
 
 async fn open_download_file(handle: &DownloadHandle) -> std::io::Result<File> {
@@ -889,6 +843,77 @@ async fn serve_non_range_download(
         }
     }
     Ok(response)
+}
+
+async fn serve_range_download(
+    handle: &DownloadHandle,
+    filename: &str,
+    headers: &HeaderMap,
+) -> Option<Result<Response<Body>, StatusCode>> {
+    let total_len = handle.total_len?;
+    let range = headers.get(header::RANGE)?.to_str().ok()?;
+
+    match parse_range_header(range, total_len) {
+        RangeSpec::Satisfiable { start, end } => {
+            let snapshot = *handle.progress.borrow();
+            if snapshot.phase == DownloadPhase::Running
+                && start > snapshot.written.saturating_add(SEEK_AHEAD_LIMIT)
+            {
+                return None;
+            }
+
+            let reader = match open_download_file(handle).await {
+                Ok(reader) => reader,
+                Err(error) => {
+                    error!("Failed to open in-flight range source: {error}");
+                    return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
+                }
+            };
+            let stream = match create_tailing_stream(
+                reader,
+                handle.progress.subscribe(),
+                start,
+                Some(end + 1),
+            )
+            .await
+            {
+                Ok(stream) => stream,
+                Err(error) => {
+                    error!("Failed to create range tailing stream: {error}");
+                    return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
+                }
+            };
+            let length = end - start + 1;
+            let body = Body::from_stream(stream);
+            let mut response = match Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(
+                    header::CONTENT_RANGE,
+                    format!("bytes {}-{}/{}", start, end, total_len),
+                )
+                .header(header::CONTENT_LENGTH, length)
+                .body(body)
+            {
+                Ok(response) => response,
+                Err(_) => return Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
+            };
+            response = apply_streaming_headers(response, &handle.content_type, filename);
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("private, no-store"),
+            );
+            Some(Ok(response))
+        }
+        RangeSpec::Unsatisfiable => Some(
+            Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{}", total_len))
+                .header(header::ACCEPT_RANGES, "bytes")
+                .body(Body::empty())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR),
+        ),
+        RangeSpec::Ignore => Some(serve_non_range_download(handle, filename).await),
+    }
 }
 
 /// Proxy request to upstream server while download is in progress
@@ -1331,7 +1356,7 @@ async fn run_download(
     let handle = prepared.handle.clone();
     let guard = DownloadGuard::new(&state, &filename, handle.clone());
     let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
-    let expected_len = upstream_resp.content_length();
+    let expected_len = handle.total_len.or_else(|| upstream_resp.content_length());
     let content_type = handle.content_type.clone();
     let extension = get_extension_from_mime(&content_type);
     let temp_path = handle.temp_path.clone();
@@ -1709,5 +1734,97 @@ mod tests {
         download.await.unwrap();
         assert_eq!(body, bytes::Bytes::from_static(b"hello world"));
         tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[test]
+    fn cold_range_fetch_starts_at_zero() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, "bytes=1024-2047".parse().unwrap());
+        let request =
+            copy_headers_for_cold_fetch(&headers, Client::new().get("http://127.0.0.1/blob"))
+                .build()
+                .unwrap();
+        assert_eq!(request.headers()[reqwest_header::RANGE], "bytes=0-");
+
+        headers.insert(
+            header::RANGE,
+            format!("bytes={}-", SEEK_AHEAD_LIMIT + 1).parse().unwrap(),
+        );
+        let request =
+            copy_headers_for_cold_fetch(&headers, Client::new().get("http://127.0.0.1/blob"))
+                .build()
+                .unwrap();
+        assert_eq!(
+            request.headers()[reqwest_header::RANGE],
+            format!("bytes={}-", SEEK_AHEAD_LIMIT + 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn range_follower_streams_requested_bytes_from_full_fetch() {
+        let (path, mut writer, _) = temp_download_file().await;
+        let (progress, _) = watch::channel(DownloadProgress {
+            written: 0,
+            phase: DownloadPhase::Running,
+        });
+        let handle = DownloadHandle {
+            started: std::time::Instant::now(),
+            temp_path: path.clone(),
+            content_type: "application/octet-stream".to_string(),
+            total_len: Some(11),
+            progress: progress.clone(),
+            final_path: std::sync::OnceLock::new(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, "bytes=6-10".parse().unwrap());
+
+        let response = serve_range_download(&handle, "blob.bin", &headers)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 6-10/11");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "5");
+
+        let download = tokio::spawn(async move {
+            writer.write_all(b"hello world").await.unwrap();
+            writer.flush().await.unwrap();
+            progress.send_modify(|state| {
+                state.written = 11;
+                state.phase = DownloadPhase::Complete;
+            });
+        });
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        download.await.unwrap();
+        assert_eq!(body, bytes::Bytes::from_static(b"world"));
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn far_range_follower_declines_to_avoid_stalling() {
+        let path = std::env::temp_dir().join(format!("almond-tail-{}", uuid::Uuid::new_v4()));
+        let (progress, _) = watch::channel(DownloadProgress {
+            written: 0,
+            phase: DownloadPhase::Running,
+        });
+        let handle = DownloadHandle {
+            started: std::time::Instant::now(),
+            temp_path: path,
+            content_type: "application/octet-stream".to_string(),
+            total_len: Some(32 * 1024 * 1024),
+            progress,
+            final_path: std::sync::OnceLock::new(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::RANGE,
+            format!("bytes={}-", SEEK_AHEAD_LIMIT + 1).parse().unwrap(),
+        );
+
+        assert!(serve_range_download(&handle, "blob.bin", &headers)
+            .await
+            .is_none());
     }
 }
