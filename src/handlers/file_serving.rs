@@ -101,11 +101,9 @@ pub async fn handle_file_request(
                 .await
             }
             None => {
-                if let Some(serve_file_metadata) = crate::services::serve_files::get_serve_file(
-                    &state.serve_file_index,
-                    file_hash,
-                )
-                .await
+                if let Some(serve_file_metadata) =
+                    crate::services::serve_files::get_serve_file(&state.serve_file_index, file_hash)
+                        .await
                 {
                     debug!(
                         "File {} found in serve files index, serving read-only",
@@ -317,6 +315,7 @@ pub async fn handle_file_request(
                         &state,
                         &filename,
                         req.headers(),
+                        req.method(),
                         custom_origin,
                         xs_servers_to_use,
                         author_pubkey.as_ref(),
@@ -469,8 +468,7 @@ async fn serve_file_with_range(
             file.seek(SeekFrom::Start(start))
                 .await
                 .map_err(|e| AppError::IoError(format!("Failed to seek in file: {}", e)))?;
-            let stream =
-                ReaderStream::with_capacity(file.take(length), stream_buffer_size(length));
+            let stream = ReaderStream::with_capacity(file.take(length), stream_buffer_size(length));
             let body = Body::from_stream(stream);
 
             Response::builder()

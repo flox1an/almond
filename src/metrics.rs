@@ -12,6 +12,7 @@ pub struct Metrics {
     pub total_files: IntGauge,
     pub served_bytes: IntCounter,
     pub downloaded_from_upstream_bytes: IntCounterVec,
+    pub upstream_requests_coalesced: IntCounter,
     pub free_disk_space: IntGauge,
     pub max_total_files: IntGauge,
     pub max_storage_bytes: IntGauge,
@@ -82,6 +83,15 @@ impl Metrics {
             .register(Box::new(downloaded_from_upstream_bytes.clone()))
             .expect("Failed to register metrics_downloaded_from_upstream_bytes");
 
+        let upstream_requests_coalesced = IntCounter::with_opts(Opts::new(
+            "almond_upstream_requests_coalesced_total",
+            "Requests served from an existing upstream fetch",
+        ))
+        .expect("Failed to create upstream_requests_coalesced counter");
+        registry
+            .register(Box::new(upstream_requests_coalesced.clone()))
+            .expect("Failed to register upstream_requests_coalesced counter");
+
         let free_disk_space = IntGauge::with_opts(Opts::new(
             "almond_free_disk_space_bytes",
             "Free disk space in bytes",
@@ -144,6 +154,7 @@ impl Metrics {
             total_files,
             served_bytes,
             downloaded_from_upstream_bytes,
+            upstream_requests_coalesced,
             free_disk_space,
             max_total_files,
             max_storage_bytes,
@@ -221,6 +232,10 @@ impl Metrics {
             .inc_by(bytes);
     }
 
+    pub fn track_coalesced_request(&self) {
+        self.upstream_requests_coalesced.inc();
+    }
+
     /// Update feature flag metrics
     pub fn update_feature_flags(
         &self,
@@ -247,5 +262,25 @@ impl Metrics {
         self.feature_enabled
             .with_label_values(&["custom_upstream"])
             .set(to_metric_value(custom_upstream));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Metrics;
+
+    #[test]
+    fn coalesced_request_counter_is_registered_and_incremented() {
+        let metrics = Metrics::new();
+        assert_eq!(metrics.upstream_requests_coalesced.get(), 0);
+
+        metrics.track_coalesced_request();
+
+        assert_eq!(metrics.upstream_requests_coalesced.get(), 1);
+        assert!(metrics
+            .registry
+            .gather()
+            .iter()
+            .any(|family| family.name() == "almond_upstream_requests_coalesced_total"));
     }
 }

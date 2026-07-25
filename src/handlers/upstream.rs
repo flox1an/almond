@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     response::Response,
     Json,
 };
@@ -79,11 +79,32 @@ async fn serve_existing_download(
     handle: &DownloadHandle,
     filename: &str,
     headers: &HeaderMap,
+    method: &Method,
 ) -> Option<Result<Response<Body>, StatusCode>> {
+    if *method == Method::HEAD {
+        return Some(serve_head_download(handle, filename));
+    }
     if headers.get(header::RANGE).is_none() {
         Some(serve_non_range_download(handle, filename).await)
     } else {
         serve_range_download(handle, filename, headers).await
+    }
+}
+
+fn track_coalesced_response(state: &AppState, method: &Method, response: &Response<Body>) {
+    state.metrics.track_coalesced_request();
+    if *method == Method::HEAD {
+        return;
+    }
+    if let Some(length) = response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        state.metrics.track_download(length);
+    } else {
+        state.metrics.files_downloaded.inc();
     }
 }
 
@@ -109,6 +130,7 @@ pub async fn try_upstream_servers(
     state: &AppState,
     filename: &str,
     headers: &HeaderMap,
+    method: &Method,
     custom_origin: Option<&str>,
     xs_servers: Option<&[String]>,
     author_pubkey: Option<&nostr_relay_pool::prelude::PublicKey>,
@@ -123,7 +145,10 @@ pub async fn try_upstream_servers(
     let file_hash = crate::utils::get_sha256_hash_from_filename(filename).unwrap_or(filename);
 
     if let Some(handle) = state.ongoing_downloads.read().await.get(file_hash).cloned() {
-        if let Some(response) = serve_existing_download(&handle, filename, headers).await {
+        if let Some(response) = serve_existing_download(&handle, filename, headers, method).await {
+            if let Ok(response) = &response {
+                track_coalesced_response(state, method, response);
+            }
             debug!("Attaching request to in-flight download {}", file_hash);
             return response;
         }
@@ -151,8 +176,12 @@ pub async fn try_upstream_servers(
                                 state.ongoing_downloads.read().await.get(file_hash).cloned()
                             {
                                 if let Some(response) =
-                                    serve_existing_download(&handle, filename, headers).await
+                                    serve_existing_download(&handle, filename, headers, method)
+                                        .await
                                 {
+                                    if let Ok(response) = &response {
+                                        track_coalesced_response(state, method, response);
+                                    }
                                     return response;
                                 }
                                 return proxy_request_to_upstream(
@@ -227,6 +256,7 @@ pub async fn try_upstream_servers(
                         file_hash,
                         filename,
                         headers,
+                        method,
                         negotiation,
                     )
                     .await;
@@ -285,6 +315,7 @@ pub async fn try_upstream_servers(
                             file_hash,
                             filename,
                             headers,
+                            method,
                             negotiation,
                         )
                         .await;
@@ -349,6 +380,7 @@ pub async fn try_upstream_servers(
                         file_hash,
                         filename,
                         headers,
+                        method,
                         negotiation,
                     )
                     .await;
@@ -419,6 +451,7 @@ pub async fn try_upstream_servers(
                                 file_hash,
                                 filename,
                                 headers,
+                                method,
                                 negotiation,
                             )
                             .await;
@@ -835,9 +868,34 @@ async fn handle_successful_upstream_response(
     file_hash: &str,
     filename: &str,
     headers: &HeaderMap,
+    method: &Method,
     negotiation: Option<NegotiationGuard>,
 ) -> Result<Response, StatusCode> {
     let content_type = extract_content_type_from_response(response.headers());
+    if *method == Method::HEAD {
+        let total_len = upstream_response_total_len(&response);
+        let prepared = prepare_download_state(state, file_hash, &content_type, total_len).await?;
+        let handle = prepared.handle.clone();
+        let head_response = serve_head_download(&handle, filename)?;
+        if let Some(negotiation) = negotiation {
+            negotiation.finish(NegotiationPhase::Ready).await;
+        }
+
+        let state_clone = state.clone();
+        let file_url_clone = file_url.to_string();
+        let file_hash_clone = file_hash.to_string();
+        tokio::spawn(async move {
+            download_file_from_upstream_background(
+                &state_clone,
+                &file_url_clone,
+                response,
+                &file_hash_clone,
+                prepared,
+            )
+            .await;
+        });
+        return Ok(head_response);
+    }
     if headers.get(header::RANGE).is_none() {
         let prepared =
             prepare_download_state(state, file_hash, &content_type, response.content_length())
@@ -921,6 +979,27 @@ async fn open_download_file(handle: &DownloadHandle) -> std::io::Result<File> {
             }
         }
     }
+}
+
+fn serve_head_download(
+    handle: &DownloadHandle,
+    filename: &str,
+) -> Result<Response<Body>, StatusCode> {
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::empty())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    response = apply_streaming_headers(response, &handle.content_type, filename);
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("private, no-store"),
+    );
+    if let Some(length) = handle.total_len {
+        if let Ok(value) = length.to_string().parse() {
+            response.headers_mut().insert(header::CONTENT_LENGTH, value);
+        }
+    }
+    Ok(response)
 }
 
 async fn serve_non_range_download(
@@ -1976,5 +2055,34 @@ mod tests {
             wait_for_negotiation(&negotiation, std::time::Duration::from_secs(1)).await,
             NegotiationPhase::Ready
         );
+    }
+
+    #[tokio::test]
+    async fn head_follower_uses_download_metadata_without_reading_body() {
+        let (progress, _) = watch::channel(DownloadProgress {
+            written: 3,
+            phase: DownloadPhase::Running,
+        });
+        let handle = DownloadHandle {
+            started: std::time::Instant::now(),
+            temp_path: std::path::PathBuf::from("/path/does/not/need/to/exist"),
+            content_type: "video/mp4".to_string(),
+            total_len: Some(42),
+            progress,
+            final_path: std::sync::OnceLock::new(),
+        };
+
+        let response = serve_head_download(&handle, "blob.mp4").unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp4");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "42");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-store"
+        );
+        assert!(axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

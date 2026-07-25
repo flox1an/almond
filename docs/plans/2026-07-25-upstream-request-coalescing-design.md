@@ -229,21 +229,21 @@ response stream. Followers are unaffected. This already holds today.
 | 0 | `DownloadHandle` + `watch` + `DownloadGuard`; fold temp-file creation into `prepare_download_state`; unify `stream_and_save_from_upstream` / `download_file_from_upstream_background` onto one `run_download` core; flush-before-publish | unchanged |
 | 1 | `try_serve_from_ongoing`, wired at `upstream.rs:66-89` in place of the proxy call | `N` non-range clients → 1 |
 | 2 | Cold range request issues one full GET and serves the client's range as a follower of its own download | `N + R` → 1 |
-| 3 | Single-flight across the negotiation window: insert the slot with `Phase::Negotiating` *before* the origin GET, so requests arriving during server negotiation wait instead of racing | closes the last duplicate-fetch window |
+| 3 | Single-flight across the negotiation window: claim an `upstream_negotiations` entry before the origin GET, then publish `Ready` only after the attachable download is registered | closes the last duplicate-fetch window |
 | 4 | Answer `HEAD` from the slot when `total_len` is known; add an `almond_upstream_requests_coalesced_total` counter | `HEAD` → 0 |
 
 Phase 0 is a prerequisite for everything and has no independent slices — it runs
 first, alone. Phases 1 and 2 are the value.
 
-Phase 3 needs a bounded wait: a follower parked on a `Negotiating` slot must time
-out and run its own lookup if negotiation stalls across several dead servers.
+Phase 3 uses a five-second bounded wait. A follower parked on a pending
+negotiation runs its own lookup after the timeout, preserving availability when
+origin negotiation stalls across several dead servers.
 
 ## Metrics
 
-- Followers must call `metrics.track_download(bytes_served)`; only the downloader
-  calls `track_upstream_download`. Today `download_file_from_upstream_background`
-  bumps `files_downloaded` directly (`upstream.rs:1691`) — route it through the
-  same place.
+- Coalesced body responses call `metrics.track_download(bytes_served)`; only the
+  downloader calls `track_upstream_download`. Background cache fills increment
+  the file count without counting bytes as served.
 - `almond_upstream_requests_coalesced_total` is the proof the change works.
 
 ## Verification
