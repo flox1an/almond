@@ -8,7 +8,10 @@ use nostr_relay_pool::prelude::*;
 use serde_json::json;
 use tracing::{debug, info, warn};
 
-use crate::models::{AppState, ListQuery};
+use crate::{
+    helpers::build_public_blob_url,
+    models::{AppState, ListQuery},
+};
 
 const DEFAULT_LIST_LIMIT: usize = 100;
 const MAX_LIST_LIMIT: usize = 1000;
@@ -316,11 +319,8 @@ pub async fn list_blobs(
         .skip(start)
         .take(limit)
         .map(|(sha256, metadata)| {
-            // Build URL: {public_url}/{sha256}.{extension} or {public_url}/{sha256}
-            let url = match &metadata.extension {
-                Some(ext) => format!("{}/{}.{}", state.public_url, sha256, ext),
-                None => format!("{}/{}", state.public_url, sha256),
-            };
+            let url =
+                build_public_blob_url(&state.public_url, &sha256, metadata.extension.as_deref());
 
             let content_type = metadata
                 .mime_type

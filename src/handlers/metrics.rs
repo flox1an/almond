@@ -1,7 +1,7 @@
 use axum::{
     extract::State,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
-    http::{StatusCode, header},
 };
 use prometheus::{Encoder, TextEncoder};
 
@@ -24,16 +24,21 @@ pub async fn get_metrics(State(state): State<AppState>) -> Response {
             // Return the metrics with appropriate content type
             (
                 StatusCode::OK,
-                [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-                buffer
-            ).into_response()
+                [(
+                    header::CONTENT_TYPE,
+                    "text/plain; version=0.0.4; charset=utf-8",
+                )],
+                buffer,
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::error!("Failed to encode metrics: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to encode metrics"
-            ).into_response()
+                "Failed to encode metrics",
+            )
+                .into_response()
         }
     }
 }

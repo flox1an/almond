@@ -4,10 +4,8 @@ fn main() {
     // Base64 from localhost:3000/filter
     let base64_data = "lc+RCi3siQJcwQgHCNwAGM2sDc0qQc01Nc1Vfc3eOc3TL80tqs2Mk83S6M0GKs0Fgc3sZs1kuc3DLs3v0s0C+c1ADc1h3s04+s027c1np83H7M02683tyA==";
 
-    let bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        base64_data
-    ).expect("Failed to decode base64");
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, base64_data)
+        .expect("Failed to decode base64");
 
     println!("Raw bytes ({} bytes):", bytes.len());
     for (i, chunk) in bytes.chunks(16).enumerate() {
@@ -19,8 +17,8 @@ fn main() {
     }
 
     // Try to deserialize as generic JSON value
-    let value: serde_json::Value = rmp_serde::from_slice(&bytes)
-        .expect("Failed to deserialize to JSON value");
+    let value: serde_json::Value =
+        rmp_serde::from_slice(&bytes).expect("Failed to deserialize to JSON value");
 
     println!("\nMessagePack structure as JSON:");
     println!("{}", serde_json::to_string_pretty(&value).unwrap());

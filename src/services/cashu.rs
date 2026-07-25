@@ -162,11 +162,12 @@ pub async fn init_wallet(
 
     let seed: [u8; 64] = if seed_path.exists() {
         // Load existing seed
-        let seed_bytes = std::fs::read(&seed_path).map_err(|e| {
-            AppError::InternalError(format!("Failed to read wallet seed: {}", e))
-        })?;
+        let seed_bytes = std::fs::read(&seed_path)
+            .map_err(|e| AppError::InternalError(format!("Failed to read wallet seed: {}", e)))?;
         if seed_bytes.len() != 64 {
-            return Err(AppError::InternalError("Invalid seed file size".to_string()));
+            return Err(AppError::InternalError(
+                "Invalid seed file size".to_string(),
+            ));
         }
         let mut seed = [0u8; 64];
         seed.copy_from_slice(&seed_bytes);
@@ -178,22 +179,23 @@ pub async fn init_wallet(
         rand::fill(&mut seed);
 
         // Save seed to file
-        std::fs::write(&seed_path, &seed).map_err(|e| {
-            AppError::InternalError(format!("Failed to save wallet seed: {}", e))
-        })?;
-        info!("Generated and saved new wallet seed to {}", seed_path.display());
+        std::fs::write(&seed_path, &seed)
+            .map_err(|e| AppError::InternalError(format!("Failed to save wallet seed: {}", e)))?;
+        info!(
+            "Generated and saved new wallet seed to {}",
+            seed_path.display()
+        );
         seed
     };
 
     // Create the wallet
     // Unit is satoshis (sat)
     let unit = cashu::nuts::nut00::CurrencyUnit::Sat;
-    let wallet = CdkWallet::new(mint_url_str, unit, Arc::new(localstore), seed, None).map_err(
-        |e| {
+    let wallet =
+        CdkWallet::new(mint_url_str, unit, Arc::new(localstore), seed, None).map_err(|e| {
             error!("Failed to create wallet: {}", e);
             AppError::InternalError(format!("Failed to create wallet: {}", e))
-        },
-    )?;
+        })?;
 
     info!("Cashu wallet initialized successfully");
 
@@ -351,14 +353,20 @@ mod tests {
     fn test_extract_cashu_header_present() {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("X-Cashu", "cashuAtoken123".parse().unwrap());
-        assert_eq!(extract_cashu_header(&headers), Some("cashuAtoken123".to_string()));
+        assert_eq!(
+            extract_cashu_header(&headers),
+            Some("cashuAtoken123".to_string())
+        );
     }
 
     #[test]
     fn test_extract_cashu_header_lowercase() {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("x-cashu", "cashuBtoken456".parse().unwrap());
-        assert_eq!(extract_cashu_header(&headers), Some("cashuBtoken456".to_string()));
+        assert_eq!(
+            extract_cashu_header(&headers),
+            Some("cashuBtoken456".to_string())
+        );
     }
 
     #[test]

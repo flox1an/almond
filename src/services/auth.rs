@@ -103,8 +103,7 @@ pub async fn check_pubkey_authorization(
         }
         AuthMode::Standard => {
             // Standard mode: check allowed_pubkeys first, then trusted_pubkeys (WoT)
-            if !state.allowed_pubkeys.is_empty() && !state.allowed_pubkeys.contains(&event.pubkey)
-            {
+            if !state.allowed_pubkeys.is_empty() && !state.allowed_pubkeys.contains(&event.pubkey) {
                 let trusted_pubkeys = state.trusted_pubkeys.read().await;
                 if !trusted_pubkeys.contains_key(&event.pubkey) {
                     return Err(AppError::Unauthorized("Pubkey not authorized".to_string()));
@@ -164,7 +163,11 @@ pub async fn check_pubkey_authorization(
                     ));
                 }
                 Err(e) => {
-                    error!("Failed to check DVM announcement for {}: {}", event.pubkey.to_hex(), e);
+                    error!(
+                        "Failed to check DVM announcement for {}: {}",
+                        event.pubkey.to_hex(),
+                        e
+                    );
                     return Err(AppError::Unauthorized(
                         "Pubkey not a recognized DVM for allowed kinds".to_string(),
                     ));
@@ -270,7 +273,9 @@ pub fn validate_upload_auth(event: &Event, expected_sha256: &str) -> AppResult<(
 
     if x_tags.is_empty() {
         error!("No x tag found in event");
-        return Err(AppError::Unauthorized("No x tag found in event".to_string()));
+        return Err(AppError::Unauthorized(
+            "No x tag found in event".to_string(),
+        ));
     }
 
     let has_matching_hash = x_tags.iter().any(|tag| {
@@ -346,9 +351,11 @@ pub fn validate_chunk_upload_auth(
     }
 
     // Verify final blob hash is present
-    let has_final_hash = x_tags
-        .iter()
-        .any(|tag| tag.content().map(|content| content == sha256).unwrap_or(false));
+    let has_final_hash = x_tags.iter().any(|tag| {
+        tag.content()
+            .map(|content| content == sha256)
+            .unwrap_or(false)
+    });
 
     if !has_final_hash {
         return Err(AppError::Unauthorized(format!(
@@ -486,11 +493,8 @@ mod tests {
     #[test]
     fn test_verify_event_created_at_in_future() {
         let keys = Keys::generate();
-        let event = build_event_with_created_at(
-            &keys,
-            vec![valid_expiration_tag()],
-            now_secs() + 3600,
-        );
+        let event =
+            build_event_with_created_at(&keys, vec![valid_expiration_tag()], now_secs() + 3600);
         let err = verify_event(&event).unwrap_err();
         assert!(matches!(err, AppError::Unauthorized(msg) if msg.contains("future")));
     }
@@ -498,11 +502,8 @@ mod tests {
     #[test]
     fn test_verify_event_created_at_in_past() {
         let keys = Keys::generate();
-        let event = build_event_with_created_at(
-            &keys,
-            vec![valid_expiration_tag()],
-            now_secs() - 60,
-        );
+        let event =
+            build_event_with_created_at(&keys, vec![valid_expiration_tag()], now_secs() - 60);
         assert!(verify_event(&event).is_ok());
     }
 
@@ -618,10 +619,7 @@ mod tests {
     #[test]
     fn test_server_tag_wrong_domain() {
         let keys = Keys::generate();
-        let event = build_event(
-            &keys,
-            vec![valid_expiration_tag(), server_tag("other.com")],
-        );
+        let event = build_event(&keys, vec![valid_expiration_tag(), server_tag("other.com")]);
         let err = validate_server_tags(&event, "https://example.com").unwrap_err();
         assert!(matches!(err, AppError::Unauthorized(msg) if msg.contains("server tag")));
     }
@@ -685,10 +683,7 @@ mod tests {
     #[test]
     fn test_upload_auth_missing_t_tag() {
         let keys = Keys::generate();
-        let event = build_event(
-            &keys,
-            vec![valid_expiration_tag(), x_tag(TEST_HASH)],
-        );
+        let event = build_event(&keys, vec![valid_expiration_tag(), x_tag(TEST_HASH)]);
         assert!(validate_upload_auth(&event, TEST_HASH).is_err());
     }
 
@@ -706,10 +701,7 @@ mod tests {
     #[test]
     fn test_upload_auth_missing_x_tag() {
         let keys = Keys::generate();
-        let event = build_event(
-            &keys,
-            vec![valid_expiration_tag(), t_tag("upload")],
-        );
+        let event = build_event(&keys, vec![valid_expiration_tag(), t_tag("upload")]);
         assert!(validate_upload_auth(&event, TEST_HASH).is_err());
     }
 
@@ -728,10 +720,7 @@ mod tests {
     #[test]
     fn test_delete_auth_missing_t_tag() {
         let keys = Keys::generate();
-        let event = build_event(
-            &keys,
-            vec![valid_expiration_tag(), x_tag(TEST_HASH)],
-        );
+        let event = build_event(&keys, vec![valid_expiration_tag(), x_tag(TEST_HASH)]);
         assert!(validate_delete_auth(&event, TEST_HASH).is_err());
     }
 
@@ -846,7 +835,10 @@ mod tests {
     fn test_extract_sha256_valid() {
         let keys = Keys::generate();
         let event = build_event(&keys, vec![valid_expiration_tag(), x_tag(TEST_HASH)]);
-        assert_eq!(extract_sha256_from_event(&event), Some(TEST_HASH.to_string()));
+        assert_eq!(
+            extract_sha256_from_event(&event),
+            Some(TEST_HASH.to_string())
+        );
     }
 
     #[test]

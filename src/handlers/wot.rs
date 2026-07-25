@@ -1,39 +1,39 @@
 use axum::{
-	extract::{Query, State},
-	http::{header, HeaderMap},
-	response::Response,
+    extract::{Query, State},
+    http::{header, HeaderMap},
+    response::Response,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bloomfilter::Bloom;
 use serde::Deserialize;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
 use crate::models::AppState;
 
 #[derive(Deserialize)]
 pub struct WotQuery {
-	// format: json|bin (default: json)
-	pub format: Option<String>,
-	// false positive rate (default ~0.01)
-	pub fp: Option<f64>,
+    // format: json|bin (default: json)
+    pub format: Option<String>,
+    // false positive rate (default ~0.01)
+    pub fp: Option<f64>,
     // optional hex pubkey to test against the filter
     pub test: Option<String>,
 }
 
 pub async fn get_wot(
-	State(state): State<AppState>,
-	Query(q): Query<WotQuery>,
-	_headers: HeaderMap,
+    State(state): State<AppState>,
+    Query(q): Query<WotQuery>,
+    _headers: HeaderMap,
 ) -> Result<Response, axum::http::StatusCode> {
-	// Collect all pubkeys from trusted_pubkeys (the WOT)
-	let trusted_pubkeys = state.trusted_pubkeys.read().await;
-	let num_items = trusted_pubkeys.len().max(1);
-	let fp = q.fp.unwrap_or(0.01).clamp(1e-6, 0.2);
-	let mut bloom = Bloom::new_for_fp_rate(num_items, fp)
-		.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-	for pubkey in trusted_pubkeys.keys() {
-		// Insert pubkey as hex string bytes
-		bloom.set(pubkey.to_hex().as_bytes());
-	}
+    // Collect all pubkeys from trusted_pubkeys (the WOT)
+    let trusted_pubkeys = state.trusted_pubkeys.read().await;
+    let num_items = trusted_pubkeys.len().max(1);
+    let fp = q.fp.unwrap_or(0.01).clamp(1e-6, 0.2);
+    let mut bloom = Bloom::new_for_fp_rate(num_items, fp)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    for pubkey in trusted_pubkeys.keys() {
+        // Insert pubkey as hex string bytes
+        bloom.set(pubkey.to_hex().as_bytes());
+    }
     let bits = bloom.as_slice();
 
     // If a test pubkey is provided, respond with JSON test result regardless of format
@@ -70,36 +70,36 @@ pub async fn get_wot(
         return Ok(resp);
     }
 
-	let want_json = q
-		.format
-		.as_deref()
-		.map(|f| f.eq_ignore_ascii_case("json"))
-		.unwrap_or(true);
+    let want_json = q
+        .format
+        .as_deref()
+        .map(|f| f.eq_ignore_ascii_case("json"))
+        .unwrap_or(true);
 
-	if want_json {
-		// Structure: { n, fp, k, m, bits (base64) }
-		let payload = serde_json::json!({
-			"count": num_items,
-			"fp": fp,
-			"k": bloom.number_of_hash_functions(),
-			"m": bits.len() * 8,
-			"bits_b64": BASE64.encode(&bits),
-		});
-		let body = serde_json::to_vec(&payload)
-			.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-		let resp = Response::builder()
-			.status(axum::http::StatusCode::OK)
-			.header(header::CONTENT_TYPE, "application/json")
-			.body(axum::body::Body::from(body))
-			.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-		Ok(resp)
-	} else {
-		// Binary: raw bitmap
-		let resp = Response::builder()
-			.status(axum::http::StatusCode::OK)
-			.header(header::CONTENT_TYPE, "application/octet-stream")
-			.body(axum::body::Body::from(bits.to_vec()))
-			.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-		Ok(resp)
-	}
+    if want_json {
+        // Structure: { n, fp, k, m, bits (base64) }
+        let payload = serde_json::json!({
+            "count": num_items,
+            "fp": fp,
+            "k": bloom.number_of_hash_functions(),
+            "m": bits.len() * 8,
+            "bits_b64": BASE64.encode(&bits),
+        });
+        let body = serde_json::to_vec(&payload)
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        let resp = Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(resp)
+    } else {
+        // Binary: raw bitmap
+        let resp = Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(axum::body::Body::from(bits.to_vec()))
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(resp)
+    }
 }

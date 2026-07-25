@@ -13,12 +13,12 @@ use tokio_util::io::ReaderStream;
 use tracing::{debug, info, warn};
 
 use crate::constants::*;
+use crate::error::AppError;
 use crate::helpers::{get_mime_type, track_download_stats};
 use crate::models::{AppState, FileRequestQuery, ServeFileMetadata};
-use crate::utils::{find_file, parse_range_header};
 use crate::services::blossom_servers;
 use crate::services::cashu;
-use crate::error::AppError;
+use crate::utils::{find_file, parse_range_header};
 
 /// Handle file requests (GET/HEAD)
 pub async fn handle_file_request(
@@ -28,7 +28,9 @@ pub async fn handle_file_request(
     req: Request,
 ) -> Result<Response, AppError> {
     // Extract range header for logging
-    let range_header = req.headers().get(header::RANGE)
+    let range_header = req
+        .headers()
+        .get(header::RANGE)
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "none".to_string());
@@ -40,8 +42,11 @@ pub async fn handle_file_request(
         match find_file(&state.file_index, &file_hash).await {
             Some(file_metadata) => {
                 // File is available locally - serve it immediately, skip all upstream logic
-                debug!("File {} found locally, serving immediately (skipping upstream lookup)", file_hash);
-                
+                debug!(
+                    "File {} found locally, serving immediately (skipping upstream lookup)",
+                    file_hash
+                );
+
                 if req.method() == Method::HEAD {
                     Response::builder()
                         .status(StatusCode::OK)
@@ -54,11 +59,14 @@ pub async fn handle_file_request(
                         .header(header::CONTENT_LENGTH, file_metadata.size)
                         .header(header::ACCEPT_RANGES, "bytes")
                         .body(Body::empty())
-                        .map_err(|e| AppError::InternalError(format!("Failed to build HEAD response: {}", e)))
+                        .map_err(|e| {
+                            AppError::InternalError(format!("Failed to build HEAD response: {}", e))
+                        })
                 } else {
                     // Check payment for download if required
                     if state.feature_paid_download {
-                        let required_sats = cashu::calculate_price(file_metadata.size, state.cashu_price_per_mb);
+                        let required_sats =
+                            cashu::calculate_price(file_metadata.size, state.cashu_price_per_mb);
                         let headers = req.headers();
                         let cashu_header = cashu::extract_cashu_header(headers);
 
@@ -72,7 +80,11 @@ pub async fn handle_file_request(
                             }
                             Some(token_str) => {
                                 let token = cashu::parse_token(&token_str)?;
-                                cashu::verify_token_basics(&token, required_sats, &state.cashu_accepted_mints)?;
+                                cashu::verify_token_basics(
+                                    &token,
+                                    required_sats,
+                                    &state.cashu_accepted_mints,
+                                )?;
 
                                 if let Some(wallet) = &state.cashu_wallet {
                                     cashu::receive_token(wallet, &token).await?;
@@ -87,17 +99,26 @@ pub async fn handle_file_request(
                 }
             }
             None => {
-                if let Some(serve_file_metadata) =
-                    crate::services::serve_files::get_serve_file(&state.serve_file_index, &file_hash).await
+                if let Some(serve_file_metadata) = crate::services::serve_files::get_serve_file(
+                    &state.serve_file_index,
+                    &file_hash,
+                )
+                .await
                 {
-                    debug!("File {} found in serve files index, serving read-only", file_hash);
+                    debug!(
+                        "File {} found in serve files index, serving read-only",
+                        file_hash
+                    );
 
                     if req.method() == Method::HEAD {
                         return build_serve_file_head_response(serve_file_metadata);
                     }
 
                     if state.feature_paid_download {
-                        let required_sats = cashu::calculate_price(serve_file_metadata.size, state.cashu_price_per_mb);
+                        let required_sats = cashu::calculate_price(
+                            serve_file_metadata.size,
+                            state.cashu_price_per_mb,
+                        );
                         let cashu_header = cashu::extract_cashu_header(req.headers());
 
                         match cashu_header {
@@ -110,7 +131,11 @@ pub async fn handle_file_request(
                             }
                             Some(token_str) => {
                                 let token = cashu::parse_token(&token_str)?;
-                                cashu::verify_token_basics(&token, required_sats, &state.cashu_accepted_mints)?;
+                                cashu::verify_token_basics(
+                                    &token,
+                                    required_sats,
+                                    &state.cashu_accepted_mints,
+                                )?;
 
                                 if let Some(wallet) = &state.cashu_wallet {
                                     cashu::receive_token(wallet, &token).await?;
@@ -120,15 +145,21 @@ pub async fn handle_file_request(
                     }
 
                     track_download_stats(&state, serve_file_metadata.size).await;
-                    return serve_file_with_range(serve_file_metadata.path, req.headers().clone()).await;
+                    return serve_file_with_range(serve_file_metadata.path, req.headers().clone())
+                        .await;
                 }
 
                 // File not found locally - now do upstream server lookup
-                debug!("File {} not found locally, checking upstream servers", file_hash);
+                debug!(
+                    "File {} not found locally, checking upstream servers",
+                    file_hash
+                );
 
                 // Check if custom upstream origin feature is enabled
-                let upstream_feature_enabled = state.feature_custom_upstream_origin_enabled.is_enabled();
-                let upstream_requires_wot = state.feature_custom_upstream_origin_enabled.requires_wot();
+                let upstream_feature_enabled =
+                    state.feature_custom_upstream_origin_enabled.is_enabled();
+                let upstream_requires_wot =
+                    state.feature_custom_upstream_origin_enabled.requires_wot();
 
                 // Extract custom origin (single server) if provided and feature is enabled
                 let custom_origin = if upstream_feature_enabled {
@@ -162,14 +193,23 @@ pub async fn handle_file_request(
                     if let Some(author_str) = &query.author_pubkey {
                         match blossom_servers::parse_pubkey(author_str) {
                             Ok(pubkey) => {
-                                debug!("Parsed author pubkey: {} (from as parameter)", pubkey.to_hex());
+                                debug!(
+                                    "Parsed author pubkey: {} (from as parameter)",
+                                    pubkey.to_hex()
+                                );
 
                                 // If WOT mode is enabled, validate the pubkey is in WOT
                                 if upstream_requires_wot {
-                                    let is_authorized = crate::services::auth::is_pubkey_authorized(&pubkey, &state).await;
+                                    let is_authorized =
+                                        crate::services::auth::is_pubkey_authorized(
+                                            &pubkey, &state,
+                                        )
+                                        .await;
                                     if !is_authorized {
                                         warn!("Author pubkey {} not in Web of Trust, rejecting upstream lookup", pubkey.to_hex());
-                                        return Err(AppError::Forbidden("Author pubkey not in Web of Trust".to_string()));
+                                        return Err(AppError::Forbidden(
+                                            "Author pubkey not in Web of Trust".to_string(),
+                                        ));
                                     }
                                     debug!("Author pubkey {} validated in WOT", pubkey.to_hex());
                                 }
@@ -193,7 +233,10 @@ pub async fn handle_file_request(
 
                 // Log the request with appropriate context
                 if let Some(origin) = custom_origin {
-                    info!("GET request for url: {} (range: {}) with custom origin: {}", filename, range_header, origin);
+                    info!(
+                        "GET request for url: {} (range: {}) with custom origin: {}",
+                        filename, range_header, origin
+                    );
                 } else if let Some(servers) = xs_servers_to_use {
                     info!(
                         "GET request for url: {} (range: {}) with xs servers ({} servers): {:?}",
@@ -208,7 +251,10 @@ pub async fn handle_file_request(
                 } else if author_pubkey.is_some() {
                     info!("GET request for url: {} (range: {}) with author pubkey for lazy server fetch", filename, range_header);
                 } else {
-                    info!("GET request for url: {} (range: {})", filename, range_header);
+                    info!(
+                        "GET request for url: {} (range: {})",
+                        filename, range_header
+                    );
                 }
                 // Check if we've already tried upstream servers recently
                 // Skip cache check if custom origin or xs servers are provided, as different servers may yield different results
@@ -216,13 +262,16 @@ pub async fn handle_file_request(
                 if should_check_cache {
                     let failed_lookups = state.failed_upstream_lookups.read().await;
                     if let Some(failed_time) = failed_lookups.get(&file_hash) {
-                        let one_hour_ago = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+                        let one_hour_ago =
+                            std::time::Instant::now() - std::time::Duration::from_secs(3600);
                         if *failed_time > one_hour_ago {
                             debug!(
                                 "File {} not found in upstream servers recently (cached), returning 404",
                                 file_hash
                             );
-                            return Err(AppError::NotFound("File not found (cached upstream failure)".to_string()));
+                            return Err(AppError::NotFound(
+                                "File not found (cached upstream failure)".to_string(),
+                            ));
                         }
                     }
                 } else {
@@ -233,7 +282,10 @@ pub async fn handle_file_request(
                 // Branch based on upstream mode: proxy vs redirect
                 let upstream_result = if state.upstream_mode.is_redirect() {
                     // Redirect mode: HEAD check then 302 redirect
-                    debug!("Using upstream redirect mode (cache_in_background: {})", state.upstream_mode.caches_in_background());
+                    debug!(
+                        "Using upstream redirect mode (cache_in_background: {})",
+                        state.upstream_mode.caches_in_background()
+                    );
                     crate::handlers::upstream::try_upstream_redirect(
                         &state,
                         &filename,
@@ -241,7 +293,8 @@ pub async fn handle_file_request(
                         xs_servers_to_use,
                         author_pubkey.as_ref(),
                         state.upstream_mode.caches_in_background(),
-                    ).await
+                    )
+                    .await
                 } else {
                     // Proxy mode: stream from upstream while saving locally (default)
                     crate::handlers::upstream::try_upstream_servers(
@@ -251,7 +304,8 @@ pub async fn handle_file_request(
                         custom_origin,
                         xs_servers_to_use,
                         author_pubkey.as_ref(),
-                    ).await
+                    )
+                    .await
                 };
 
                 match upstream_result {
@@ -293,11 +347,18 @@ fn build_serve_file_head_response(file_metadata: ServeFileMetadata) -> Result<Re
 }
 
 /// Serve file with range support
-async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::HeaderMap) -> Result<Response, AppError> {
+async fn serve_file_with_range(
+    path: std::path::PathBuf,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
     use axum::http::header::RANGE;
     let range_header = headers.get(RANGE).and_then(|r| r.to_str().ok());
 
-    debug!("Serving file: {} (range: {})", path.display(), range_header.unwrap_or("none"));
+    debug!(
+        "Serving file: {} (range: {})",
+        path.display(),
+        range_header.unwrap_or("none")
+    );
 
     let expires_dt = chrono::Utc::now() + chrono::Duration::days(365);
     let expires_str = expires_dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
@@ -320,7 +381,10 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
         if let Some(range) = parse_range_header(range_header, total_size) {
             let (start, end) = range;
             let length = end - start + 1;
-            debug!("Serving range: bytes {}-{}/{} (length: {})", start, end, total_size, length);
+            debug!(
+                "Serving range: bytes {}-{}/{} (length: {})",
+                start, end, total_size, length
+            );
 
             file.seek(SeekFrom::Start(start))
                 .await
@@ -342,11 +406,17 @@ async fn serve_file_with_range(path: std::path::PathBuf, headers: axum::http::He
                 .header(axum::http::header::EXPIRES, expires_header.clone())
                 .header(header::CONTENT_DISPOSITION, content_disposition.clone())
                 .body(body)
-                .map_err(|e| AppError::InternalError(format!("Failed to build range response: {}", e)));
+                .map_err(|e| {
+                    AppError::InternalError(format!("Failed to build range response: {}", e))
+                });
         }
     }
 
-    info!("Serving full file: {} (size: {} bytes)", path.display(), total_size);
+    info!(
+        "Serving full file: {} (size: {} bytes)",
+        path.display(),
+        total_size
+    );
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
 

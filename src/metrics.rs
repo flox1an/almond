@@ -1,4 +1,4 @@
-use prometheus::{Registry, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts};
+use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
 use std::path::Path;
 use tracing::warn;
 
@@ -25,67 +25,116 @@ impl Metrics {
     pub fn new() -> Self {
         let registry = Registry::new();
 
-        let files_uploaded = IntCounter::with_opts(
-            Opts::new("almond_files_uploaded_total", "Total number of files uploaded")
-        ).expect("Failed to create metrics_files_uploaded counter");
-        registry.register(Box::new(files_uploaded.clone())).expect("Failed to register metrics_files_uploaded");
+        let files_uploaded = IntCounter::with_opts(Opts::new(
+            "almond_files_uploaded_total",
+            "Total number of files uploaded",
+        ))
+        .expect("Failed to create metrics_files_uploaded counter");
+        registry
+            .register(Box::new(files_uploaded.clone()))
+            .expect("Failed to register metrics_files_uploaded");
 
-        let files_downloaded = IntCounter::with_opts(
-            Opts::new("almond_files_downloaded_total", "Total number of files downloaded")
-        ).expect("Failed to create metrics_files_downloaded counter");
-        registry.register(Box::new(files_downloaded.clone())).expect("Failed to register metrics_files_downloaded");
+        let files_downloaded = IntCounter::with_opts(Opts::new(
+            "almond_files_downloaded_total",
+            "Total number of files downloaded",
+        ))
+        .expect("Failed to create metrics_files_downloaded counter");
+        registry
+            .register(Box::new(files_downloaded.clone()))
+            .expect("Failed to register metrics_files_downloaded");
 
-        let storage_bytes = IntGauge::with_opts(
-            Opts::new("almond_storage_bytes", "Total storage used in bytes")
-        ).expect("Failed to create metrics_storage_bytes gauge");
-        registry.register(Box::new(storage_bytes.clone())).expect("Failed to register metrics_storage_bytes");
+        let storage_bytes = IntGauge::with_opts(Opts::new(
+            "almond_storage_bytes",
+            "Total storage used in bytes",
+        ))
+        .expect("Failed to create metrics_storage_bytes gauge");
+        registry
+            .register(Box::new(storage_bytes.clone()))
+            .expect("Failed to register metrics_storage_bytes");
 
-        let total_files = IntGauge::with_opts(
-            Opts::new("almond_total_files", "Total number of files stored")
-        ).expect("Failed to create metrics_total_files gauge");
-        registry.register(Box::new(total_files.clone())).expect("Failed to register metrics_total_files");
+        let total_files = IntGauge::with_opts(Opts::new(
+            "almond_total_files",
+            "Total number of files stored",
+        ))
+        .expect("Failed to create metrics_total_files gauge");
+        registry
+            .register(Box::new(total_files.clone()))
+            .expect("Failed to register metrics_total_files");
 
-        let served_bytes = IntCounter::with_opts(
-            Opts::new("almond_served_bytes", "Total bytes served to users")
-        ).expect("Failed to create metrics_served_bytes counter");
-        registry.register(Box::new(served_bytes.clone())).expect("Failed to register metrics_served_bytes");
+        let served_bytes = IntCounter::with_opts(Opts::new(
+            "almond_served_bytes",
+            "Total bytes served to users",
+        ))
+        .expect("Failed to create metrics_served_bytes counter");
+        registry
+            .register(Box::new(served_bytes.clone()))
+            .expect("Failed to register metrics_served_bytes");
 
         let downloaded_from_upstream_bytes = IntCounterVec::new(
-            Opts::new("almond_downloaded_from_upstream_bytes", "Total bytes downloaded from upstream servers"),
-            &["upstream"]
-        ).expect("Failed to create metrics_downloaded_from_upstream_bytes counter");
-        registry.register(Box::new(downloaded_from_upstream_bytes.clone())).expect("Failed to register metrics_downloaded_from_upstream_bytes");
+            Opts::new(
+                "almond_downloaded_from_upstream_bytes",
+                "Total bytes downloaded from upstream servers",
+            ),
+            &["upstream"],
+        )
+        .expect("Failed to create metrics_downloaded_from_upstream_bytes counter");
+        registry
+            .register(Box::new(downloaded_from_upstream_bytes.clone()))
+            .expect("Failed to register metrics_downloaded_from_upstream_bytes");
 
-        let free_disk_space = IntGauge::with_opts(
-            Opts::new("almond_free_disk_space_bytes", "Free disk space in bytes")
-        ).expect("Failed to create metrics_free_disk_space gauge");
-        registry.register(Box::new(free_disk_space.clone())).expect("Failed to register metrics_free_disk_space");
+        let free_disk_space = IntGauge::with_opts(Opts::new(
+            "almond_free_disk_space_bytes",
+            "Free disk space in bytes",
+        ))
+        .expect("Failed to create metrics_free_disk_space gauge");
+        registry
+            .register(Box::new(free_disk_space.clone()))
+            .expect("Failed to register metrics_free_disk_space");
 
-        let max_total_files = IntGauge::with_opts(
-            Opts::new("almond_max_total_files", "Maximum total number of files allowed")
-        ).expect("Failed to create metrics_max_total_files gauge");
-        registry.register(Box::new(max_total_files.clone())).expect("Failed to register metrics_max_total_files");
+        let max_total_files = IntGauge::with_opts(Opts::new(
+            "almond_max_total_files",
+            "Maximum total number of files allowed",
+        ))
+        .expect("Failed to create metrics_max_total_files gauge");
+        registry
+            .register(Box::new(max_total_files.clone()))
+            .expect("Failed to register metrics_max_total_files");
 
-        let max_storage_bytes = IntGauge::with_opts(
-            Opts::new("almond_max_storage_bytes", "Maximum total storage in bytes allowed")
-        ).expect("Failed to create metrics_max_storage_bytes gauge");
-        registry.register(Box::new(max_storage_bytes.clone())).expect("Failed to register metrics_max_storage_bytes");
+        let max_storage_bytes = IntGauge::with_opts(Opts::new(
+            "almond_max_storage_bytes",
+            "Maximum total storage in bytes allowed",
+        ))
+        .expect("Failed to create metrics_max_storage_bytes gauge");
+        registry
+            .register(Box::new(max_storage_bytes.clone()))
+            .expect("Failed to register metrics_max_storage_bytes");
 
-        let max_age = IntGauge::with_opts(
-            Opts::new("almond_max_age", "Maximum file age in days")
-        ).expect("Failed to create metrics_max_age gauge");
-        registry.register(Box::new(max_age.clone())).expect("Failed to register metrics_max_age");
+        let max_age = IntGauge::with_opts(Opts::new("almond_max_age", "Maximum file age in days"))
+            .expect("Failed to create metrics_max_age gauge");
+        registry
+            .register(Box::new(max_age.clone()))
+            .expect("Failed to register metrics_max_age");
 
         let feature_enabled = IntGaugeVec::new(
-            Opts::new("almond_feature_enabled", "Feature enabled status (0=off, 1=wot, 2=public)"),
-            &["feature"]
-        ).expect("Failed to create metrics_feature_enabled gauge");
-        registry.register(Box::new(feature_enabled.clone())).expect("Failed to register metrics_feature_enabled");
+            Opts::new(
+                "almond_feature_enabled",
+                "Feature enabled status (0=off, 1=wot, 2=public)",
+            ),
+            &["feature"],
+        )
+        .expect("Failed to create metrics_feature_enabled gauge");
+        registry
+            .register(Box::new(feature_enabled.clone()))
+            .expect("Failed to register metrics_feature_enabled");
 
-        let storage_usage_percent = IntGauge::with_opts(
-            Opts::new("almond_storage_usage_percent", "Storage usage as a percentage (0-100)")
-        ).expect("Failed to create metrics_storage_usage_percent gauge");
-        registry.register(Box::new(storage_usage_percent.clone())).expect("Failed to register metrics_storage_usage_percent");
+        let storage_usage_percent = IntGauge::with_opts(Opts::new(
+            "almond_storage_usage_percent",
+            "Storage usage as a percentage (0-100)",
+        ))
+        .expect("Failed to create metrics_storage_usage_percent gauge");
+        registry
+            .register(Box::new(storage_usage_percent.clone()))
+            .expect("Failed to register metrics_storage_usage_percent");
 
         Self {
             registry,
@@ -117,8 +166,10 @@ impl Metrics {
         upload_dir: &Path,
     ) {
         // Update file and storage metrics
-        self.files_uploaded.inc_by(files_uploaded.saturating_sub(self.files_uploaded.get()));
-        self.files_downloaded.inc_by(files_downloaded.saturating_sub(self.files_downloaded.get()));
+        self.files_uploaded
+            .inc_by(files_uploaded.saturating_sub(self.files_uploaded.get()));
+        self.files_downloaded
+            .inc_by(files_downloaded.saturating_sub(self.files_downloaded.get()));
         self.storage_bytes.set(total_size_bytes as i64);
         self.total_files.set(total_files as i64);
 
@@ -183,8 +234,14 @@ impl Metrics {
             }
         };
 
-        self.feature_enabled.with_label_values(&["upload"]).set(to_metric_value(upload));
-        self.feature_enabled.with_label_values(&["mirror"]).set(to_metric_value(mirror));
-        self.feature_enabled.with_label_values(&["custom_upstream"]).set(to_metric_value(custom_upstream));
+        self.feature_enabled
+            .with_label_values(&["upload"])
+            .set(to_metric_value(upload));
+        self.feature_enabled
+            .with_label_values(&["mirror"])
+            .set(to_metric_value(mirror));
+        self.feature_enabled
+            .with_label_values(&["custom_upstream"])
+            .set(to_metric_value(custom_upstream));
     }
 }

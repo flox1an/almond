@@ -8,7 +8,7 @@ use bloomfilter::Bloom;
 use chrono::Utc;
 use rmp::encode;
 use serde::Deserialize;
-use xorf::{BinaryFuse8, BinaryFuse16, BinaryFuse32};
+use xorf::{BinaryFuse16, BinaryFuse32, BinaryFuse8};
 
 use crate::models::AppState;
 
@@ -42,36 +42,40 @@ where
     T: serde::Serialize,
 {
     // First serialize to JSON to extract fields
-    let json_value = serde_json::to_value(filter)
-        .map_err(|e| format!("Failed to serialize to JSON: {}", e))?;
+    let json_value =
+        serde_json::to_value(filter).map_err(|e| format!("Failed to serialize to JSON: {}", e))?;
 
-    let obj = json_value.as_object()
+    let obj = json_value
+        .as_object()
         .ok_or_else(|| "Expected object".to_string())?;
 
-    let seed = obj.get("seed")
+    let seed = obj
+        .get("seed")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| "Missing or invalid seed".to_string())?;
 
-    let segment_length = obj.get("segment_length")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| "Missing or invalid segment_length".to_string())? as u32;
+    let segment_length =
+        obj.get("segment_length")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "Missing or invalid segment_length".to_string())? as u32;
 
-    let segment_length_mask = obj.get("segment_length_mask")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| "Missing or invalid segment_length_mask".to_string())? as u32;
+    let segment_length_mask =
+        obj.get("segment_length_mask")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "Missing or invalid segment_length_mask".to_string())? as u32;
 
-    let segment_count_length = obj.get("segment_count_length")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| "Missing or invalid segment_count_length".to_string())? as u32;
+    let segment_count_length =
+        obj.get("segment_count_length")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "Missing or invalid segment_count_length".to_string())? as u32;
 
-    let fingerprints = obj.get("fingerprints")
+    let fingerprints = obj
+        .get("fingerprints")
         .and_then(|v| v.as_array())
         .ok_or_else(|| "Missing or invalid fingerprints".to_string())?;
 
     // Convert fingerprints to Vec<u16> or Vec<u8> or Vec<u32> depending on filter type
-    let fingerprint_values: Vec<u64> = fingerprints.iter()
-        .filter_map(|v| v.as_u64())
-        .collect();
+    let fingerprint_values: Vec<u64> = fingerprints.iter().filter_map(|v| v.as_u64()).collect();
 
     // Manually encode as MessagePack array: [seed, segment_length, segment_length_mask, segment_count_length, fingerprints]
     let mut buf = Vec::new();
@@ -81,8 +85,7 @@ where
         .map_err(|e| format!("Failed to write array header: {}", e))?;
 
     // Write seed (u64)
-    encode::write_u64(&mut buf, seed)
-        .map_err(|e| format!("Failed to write seed: {}", e))?;
+    encode::write_u64(&mut buf, seed).map_err(|e| format!("Failed to write seed: {}", e))?;
 
     // Write segment_length (u32)
     encode::write_u32(&mut buf, segment_length)
@@ -142,8 +145,12 @@ impl FilterType {
         match self {
             FilterType::Bloom(bloom) => bloom.as_slice().to_vec(),
             FilterType::Fuse8(filter) => serialize_binary_fuse_as_array(filter).unwrap_or_default(),
-            FilterType::Fuse16(filter) => serialize_binary_fuse_as_array(filter).unwrap_or_default(),
-            FilterType::Fuse32(filter) => serialize_binary_fuse_as_array(filter).unwrap_or_default(),
+            FilterType::Fuse16(filter) => {
+                serialize_binary_fuse_as_array(filter).unwrap_or_default()
+            }
+            FilterType::Fuse32(filter) => {
+                serialize_binary_fuse_as_array(filter).unwrap_or_default()
+            }
         }
     }
 }
@@ -255,8 +262,7 @@ pub async fn get_filter(
             "filter": "",
         });
 
-        let body = serde_json::to_vec(&payload)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let body = serde_json::to_vec(&payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/json")
@@ -272,8 +278,8 @@ pub async fn get_filter(
             let payload = serde_json::json!({
                 "error": format!("failed to construct filter: {}", msg),
             });
-            let body = serde_json::to_vec(&payload)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let body =
+                serde_json::to_vec(&payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             return Ok(Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .header(header::CONTENT_TYPE, "application/json")
@@ -300,8 +306,7 @@ pub async fn get_filter(
         payload["m"] = serde_json::json!(bloom.as_slice().len() * 8);
     }
 
-    let body = serde_json::to_vec(&payload)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let body = serde_json::to_vec(&payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
@@ -326,14 +331,20 @@ mod tests {
 
         println!("Serialized bytes: {:?}", serialized);
         println!("Serialized length: {}", serialized.len());
-        println!("First byte (should be 0x95 for 5-element array): 0x{:02x}", serialized[0]);
+        println!(
+            "First byte (should be 0x95 for 5-element array): 0x{:02x}",
+            serialized[0]
+        );
 
         // Verify the first byte is 0x95 (MessagePack fixarray with 5 elements)
-        assert_eq!(serialized[0], 0x95, "First byte should be 0x95 (5-element array)");
+        assert_eq!(
+            serialized[0], 0x95,
+            "First byte should be 0x95 (5-element array)"
+        );
 
         // Decode the array manually to verify structure
-        let decoded: (u64, u32, u32, u32, Vec<u16>) = rmp_serde::from_slice(&serialized)
-            .expect("Failed to deserialize as array");
+        let decoded: (u64, u32, u32, u32, Vec<u16>) =
+            rmp_serde::from_slice(&serialized).expect("Failed to deserialize as array");
 
         println!("Decoded array: seed={}, segment_length={}, segment_length_mask={}, segment_count_length={}, fingerprints.len()={}",
             decoded.0, decoded.1, decoded.2, decoded.3, decoded.4.len());

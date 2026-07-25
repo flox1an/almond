@@ -52,11 +52,9 @@ pub async fn load_tls_config(
     }
 
     // Build TLS config
-    let config = axum_server::tls_rustls::RustlsConfig::from_pem(
-        fs::read(cert_path)?,
-        fs::read(key_path)?,
-    )
-    .await?;
+    let config =
+        axum_server::tls_rustls::RustlsConfig::from_pem(fs::read(cert_path)?, fs::read(key_path)?)
+            .await?;
 
     info!("✅ TLS configuration loaded successfully");
 

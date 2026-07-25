@@ -35,12 +35,19 @@ pub fn get_mime_type(path: &Path) -> String {
 /// Get file extension from MIME type with proper handling for HLS and other media types
 pub fn get_extension_from_mime(content_type: &str) -> Option<String> {
     // Strip any parameters (e.g., charset, codecs)
-    let mime_type = content_type.split(';').next().unwrap_or(content_type).trim();
+    let mime_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim();
 
     // Check for MIME types that need explicit handling
     match mime_type {
         // HLS playlist
-        "application/vnd.apple.mpegurl" | "application/x-mpegurl" | "audio/mpegurl" | "audio/x-mpegurl" => {
+        "application/vnd.apple.mpegurl"
+        | "application/x-mpegurl"
+        | "audio/mpegurl"
+        | "audio/x-mpegurl" => {
             return Some("m3u8".to_string());
         }
         // MPEG-TS segments
@@ -120,8 +127,7 @@ pub fn create_error_response(status: StatusCode, message: String) -> Response<Bo
 /// Create a JSON response
 #[allow(dead_code)]
 pub fn create_json_response<T: serde::Serialize>(data: T) -> Result<Response<Body>, StatusCode> {
-    let body = serde_json::to_string(&data)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let body = serde_json::to_string(&data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
@@ -142,7 +148,10 @@ pub fn copy_headers_to_reqwest(
     }
     if let Some(range) = headers.get(header::RANGE) {
         request = request.header(header::RANGE, range);
-        info!("Forwarding range request: {}", range.to_str().unwrap_or("invalid"));
+        info!(
+            "Forwarding range request: {}",
+            range.to_str().unwrap_or("invalid")
+        );
     }
     if let Some(if_range) = headers.get(header::IF_RANGE) {
         request = request.header(header::IF_RANGE, if_range);
@@ -232,6 +241,30 @@ pub fn normalize_server_url(url: &str) -> String {
     }
 }
 
+/// Return HTTPS then HTTP candidates for a scheme-less BUD-10 `xs` server hint.
+///
+/// BUD-10 says `xs` SHOULD be a domain name only and clients SHOULD prefer HTTPS
+/// but fall back to HTTP. An explicit scheme is an instruction, not a fallback.
+pub fn server_url_candidates(url: &str) -> Vec<String> {
+    let url = url.trim();
+
+    if url.starts_with("http://") || url.starts_with("https://") {
+        vec![url.to_string()]
+    } else {
+        vec![format!("https://{}", url), format!("http://{}", url)]
+    }
+}
+
+/// Build a public blob URL without duplicating the separator slash.
+pub fn build_public_blob_url(public_url: &str, sha256: &str, extension: Option<&str>) -> String {
+    let base_url = public_url.trim_end_matches('/');
+
+    match extension {
+        Some(ext) => format!("{}/{}.{}", base_url, sha256, ext),
+        None => format!("{}/{}", base_url, sha256),
+    }
+}
+
 /// Combine and normalize server lists from multiple sources
 /// Priority order: xs_servers (highest) -> as_servers -> default_servers (lowest)
 /// Returns a deduplicated, normalized list of servers
@@ -248,9 +281,8 @@ pub fn combine_server_lists(
     let mut seen = HashSet::new();
 
     // Helper to normalize URL for comparison (case-insensitive, no trailing slash)
-    let normalize_for_comparison = |url: &str| -> String {
-        url.trim_end_matches('/').to_lowercase()
-    };
+    let normalize_for_comparison =
+        |url: &str| -> String { url.trim_end_matches('/').to_lowercase() };
 
     // Helper to add servers to combined list while deduplicating
     let mut add_servers = |servers: &[String]| {
@@ -279,4 +311,46 @@ pub fn combine_server_lists(
     }
 
     combined
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_public_blob_url, server_url_candidates};
+
+    #[test]
+    fn build_public_blob_url_removes_duplicate_separator() {
+        let url = build_public_blob_url(
+            "http://npub1080hnas4cuhp7cwty4cayhfftvgtadueem9kwygu88mjy7ksgpgsswkgud.fips/",
+            "77bb8bda6cc05efcbb8ee46840d7010df22f4379834ee817f22650ffa41c567e",
+            Some("mp4"),
+        );
+
+        assert_eq!(
+            url,
+            "http://npub1080hnas4cuhp7cwty4cayhfftvgtadueem9kwygu88mjy7ksgpgsswkgud.fips/77bb8bda6cc05efcbb8ee46840d7010df22f4379834ee817f22650ffa41c567e.mp4"
+        );
+    }
+
+    #[test]
+    fn build_public_blob_url_preserves_scheme_separator() {
+        let url = build_public_blob_url("https://example.com", "abc123", None);
+
+        assert_eq!(url, "https://example.com/abc123");
+    }
+
+    #[test]
+    fn server_url_candidates_falls_back_to_http_for_scheme_less_hint() {
+        assert_eq!(
+            server_url_candidates("media.example.fips"),
+            ["https://media.example.fips", "http://media.example.fips"]
+        );
+    }
+
+    #[test]
+    fn server_url_candidates_preserves_explicit_scheme() {
+        assert_eq!(
+            server_url_candidates("http://media.example.fips"),
+            ["http://media.example.fips"]
+        );
+    }
 }

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -51,26 +51,38 @@ fn analyze_events(events: &[NostrEvent]) -> ReportStats {
                 "L" => {
                     // Label namespace
                     if tag.len() > 1 {
-                        *stats.label_counts.entry(format!("L:{}", tag[1])).or_insert(0) += 1;
+                        *stats
+                            .label_counts
+                            .entry(format!("L:{}", tag[1]))
+                            .or_insert(0) += 1;
                     }
                 }
                 "l" => {
                     // Label value
                     if tag.len() > 1 {
                         let namespace = tag.get(2).map(|s| s.as_str()).unwrap_or("unknown");
-                        *stats.label_counts.entry(format!("l:{}:{}", namespace, tag[1])).or_insert(0) += 1;
+                        *stats
+                            .label_counts
+                            .entry(format!("l:{}:{}", namespace, tag[1]))
+                            .or_insert(0) += 1;
                     }
                 }
                 "p" => {
                     // Reported pubkey
                     if tag.len() > 1 {
-                        *stats.reported_pubkey_counts.entry(tag[1].clone()).or_insert(0) += 1;
+                        *stats
+                            .reported_pubkey_counts
+                            .entry(tag[1].clone())
+                            .or_insert(0) += 1;
                     }
                 }
                 "e" => {
                     // Reported event
                     if tag.len() > 1 {
-                        *stats.reported_event_counts.entry(tag[1].clone()).or_insert(0) += 1;
+                        *stats
+                            .reported_event_counts
+                            .entry(tag[1].clone())
+                            .or_insert(0) += 1;
                     }
                 }
                 _ => {}
@@ -165,7 +177,10 @@ async fn main() -> Result<()> {
     println!("\n📊 Summary:");
     println!("  Total report events: {}", stats.total_events);
     println!("  Unique reporters: {}", stats.unique_reporters);
-    println!("  Unique reported pubkeys: {}", stats.unique_reported_pubkeys);
+    println!(
+        "  Unique reported pubkeys: {}",
+        stats.unique_reported_pubkeys
+    );
     println!("  Unique reported events: {}", stats.unique_reported_events);
 
     println!("\n📌 Events by kind:");
@@ -174,9 +189,21 @@ async fn main() -> Result<()> {
     }
 
     print_top_n("🏷️  Label Types (top 20)", &stats.label_counts, 20);
-    print_top_n("👤 Most Active Reporters (top 10)", &stats.reporter_counts, 10);
-    print_top_n("🎯 Most Reported Pubkeys (top 10)", &stats.reported_pubkey_counts, 10);
-    print_top_n("📄 Most Reported Events (top 10)", &stats.reported_event_counts, 10);
+    print_top_n(
+        "👤 Most Active Reporters (top 10)",
+        &stats.reporter_counts,
+        10,
+    );
+    print_top_n(
+        "🎯 Most Reported Pubkeys (top 10)",
+        &stats.reported_pubkey_counts,
+        10,
+    );
+    print_top_n(
+        "📄 Most Reported Events (top 10)",
+        &stats.reported_event_counts,
+        10,
+    );
 
     // Print some sample events for context
     println!("\n═══════════════════════════════════════════════════════");
@@ -188,9 +215,12 @@ async fn main() -> Result<()> {
         println!("ID: {}", event.id);
         println!("Kind: {}", event.kind);
         println!("Reporter: {}", event.pubkey);
-        println!("Created: {}", chrono::DateTime::from_timestamp(event.created_at, 0)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| event.created_at.to_string()));
+        println!(
+            "Created: {}",
+            chrono::DateTime::from_timestamp(event.created_at, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| event.created_at.to_string())
+        );
         println!("Tags:");
         for tag in &event.tags {
             println!("  {:?}", tag);

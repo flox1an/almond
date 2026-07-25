@@ -26,7 +26,7 @@ pub async fn prepare_download_state(
     // Mark this file as being downloaded with shared state
     let written_len = Arc::new(AtomicU64::new(0));
     let notify = Arc::new(Notify::new());
-    
+
     {
         let mut ongoing_downloads = state.ongoing_downloads.write().await;
         ongoing_downloads.insert(
@@ -41,7 +41,10 @@ pub async fn prepare_download_state(
         );
         info!(
             "Marked {} as being downloaded at {} (content-type: {}, extension: {})",
-            filename, temp_path.display(), content_type, file_extension
+            filename,
+            temp_path.display(),
+            content_type,
+            file_extension
         );
     }
 

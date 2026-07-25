@@ -20,19 +20,19 @@ pub enum AppError {
     /// Validation errors
     BadRequest(String),
     PayloadTooLarge(String),
-    
+
     /// Resource errors
     NotFound(String),
     Conflict(String),
-    
+
     /// I/O errors
     IoError(String),
-    
+
     /// Network/upstream errors
     NetworkError(String),
     Timeout(String),
     BadGateway(String),
-    
+
     /// Internal errors
     InternalError(String),
 }
@@ -92,7 +92,10 @@ impl IntoResponse for AppError {
             return Response::builder()
                 .status(StatusCode::PAYMENT_REQUIRED)
                 .header("X-Cashu", encoded)
-                .body(Body::from(format!("Payment required: {} {}", amount_sats, unit)))
+                .body(Body::from(format!(
+                    "Payment required: {} {}",
+                    amount_sats, unit
+                )))
                 .expect("Failed to build payment required response")
                 .into_response();
         }

@@ -1,13 +1,18 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
-use tracing::{error, debug};
+use tracing::{debug, error};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{AppState, FileMetadata};
 
 /// Calculate nested directory path for a hash (e.g., a/b/abc123.jpg or a/b/abc123_1234567890.jpg)
-pub fn get_nested_path(upload_dir: &Path, hash: &str, extension: Option<&str>, expiration: Option<u64>) -> PathBuf {
+pub fn get_nested_path(
+    upload_dir: &Path,
+    hash: &str,
+    extension: Option<&str>,
+    expiration: Option<u64>,
+) -> PathBuf {
     let first_level = &hash[..1];
     let second_level = &hash[1..2];
     let path = upload_dir.join(first_level).join(second_level);
@@ -37,13 +42,22 @@ pub async fn create_parent_dirs(path: &Path) -> AppResult<()> {
 /// Move a file from source to destination, creating parent directories
 pub async fn move_file(from: &Path, to: &Path) -> AppResult<()> {
     create_parent_dirs(to).await?;
-    
+
     fs::rename(from, to).await.map_err(|e| {
-        error!("Failed to move file from {} to {}: {}", from.display(), to.display(), e);
+        error!(
+            "Failed to move file from {} to {}: {}",
+            from.display(),
+            to.display(),
+            e
+        );
         AppError::IoError(format!("Failed to move file: {}", e))
     })?;
-    
-    debug!("Successfully moved file from {} to {}", from.display(), to.display());
+
+    debug!(
+        "Successfully moved file from {} to {}",
+        from.display(),
+        to.display()
+    );
     Ok(())
 }
 
@@ -103,14 +117,19 @@ pub async fn delete_file(state: &AppState, sha256: &str) -> AppResult<()> {
     // Get file metadata
     let file_metadata = {
         let file_index = state.file_index.read().await;
-        file_index.get(sha256).cloned().ok_or_else(|| {
-            AppError::NotFound(format!("File not found: {}", sha256))
-        })?
+        file_index
+            .get(sha256)
+            .cloned()
+            .ok_or_else(|| AppError::NotFound(format!("File not found: {}", sha256)))?
     };
 
     // Delete physical file
     fs::remove_file(&file_metadata.path).await.map_err(|e| {
-        error!("Failed to delete file {}: {}", file_metadata.path.display(), e);
+        error!(
+            "Failed to delete file {}: {}",
+            file_metadata.path.display(),
+            e
+        );
         AppError::IoError(format!("Failed to delete file: {}", e))
     })?;
 
@@ -132,13 +151,13 @@ pub async fn mark_changes_pending(state: &AppState) {
 pub fn create_temp_path(state: &AppState, prefix: &str, extension: Option<&str>) -> PathBuf {
     let temp_dir = state.upload_dir.join("temp");
     let uuid = uuid::Uuid::new_v4();
-    
+
     let filename = if let Some(ext) = extension {
         format!("{}_{}.{}", prefix, uuid, ext)
     } else {
         format!("{}_{}", prefix, uuid)
     };
-    
+
     temp_dir.join(filename)
 }
 
@@ -166,7 +185,7 @@ pub fn validate_sha256_format(sha256: &str) -> AppResult<()> {
 /// Extract SHA-256 hash from filename (handles both "hash" and "hash.ext" formats)
 pub fn extract_sha256_from_filename(filename: &str) -> Option<String> {
     let hash = filename.split('.').next()?;
-    
+
     // Validate it looks like a SHA-256 hash
     if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
         Some(hash.to_string())

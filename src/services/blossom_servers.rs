@@ -97,7 +97,10 @@ pub async fn fetch_user_server_list(
     }
 
     // Cache miss or expired - fetch from Nostr
-    info!("Fetching server list from Nostr for pubkey: {}", pubkey.to_hex());
+    info!(
+        "Fetching server list from Nostr for pubkey: {}",
+        pubkey.to_hex()
+    );
 
     let pool = create_pool().await?;
 
@@ -117,7 +120,11 @@ pub async fn fetch_user_server_list(
     // Get the most recent event (should only be one due to limit=1)
     let servers = match events.iter().next() {
         Some(event) => {
-            info!("Found server list event for pubkey: {} (id: {})", pubkey.to_hex(), event.id);
+            info!(
+                "Found server list event for pubkey: {} (id: {})",
+                pubkey.to_hex(),
+                event.id
+            );
 
             // Extract server tags from the event
             // Server tags have the format: ["server", "https://cdn.example.com"]
@@ -137,7 +144,10 @@ pub async fn fetch_user_server_list(
                         info!("Found server in user list: {}", server_url_str);
                         servers.push(server_url_str);
                     } else {
-                        warn!("Invalid server URL (missing http:// or https://): {}", server_url);
+                        warn!(
+                            "Invalid server URL (missing http:// or https://): {}",
+                            server_url
+                        );
                     }
                 }
             }
@@ -150,7 +160,11 @@ pub async fn fetch_user_server_list(
         }
     };
 
-    info!("Fetched {} servers for pubkey: {}", servers.len(), pubkey.to_hex());
+    info!(
+        "Fetched {} servers for pubkey: {}",
+        servers.len(),
+        pubkey.to_hex()
+    );
 
     // Update cache (even if empty, to avoid repeated queries)
     {
@@ -166,4 +180,3 @@ pub async fn fetch_user_server_list(
 
     Ok(servers)
 }
-

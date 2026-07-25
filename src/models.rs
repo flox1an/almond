@@ -1,4 +1,4 @@
-use crate::helpers::get_extension_from_mime;
+use crate::helpers::{build_public_blob_url, get_extension_from_mime};
 use crate::metrics::Metrics;
 use cdk::wallet::Wallet as CdkWallet;
 use nostr_relay_pool::prelude::*;
@@ -277,10 +277,7 @@ impl AppState {
             .as_ref()
             .and_then(|ct| get_extension_from_mime(ct));
 
-        let url = match extension {
-            Some(ext) => format!("{}/{}.{}", self.public_url, sha256, ext),
-            None => format!("{}/{}", self.public_url, sha256),
-        };
+        let url = build_public_blob_url(&self.public_url, sha256, extension.as_deref());
 
         BlobDescriptor {
             url,

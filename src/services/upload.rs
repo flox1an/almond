@@ -256,11 +256,11 @@ pub async fn stream_response_to_temp_file(
         body_size += chunk.len() as u64;
 
         if body_size.is_multiple_of(1024 * 1024) {
-debug!(
-            "📊 Download progress: {} MB / {} MB",
-            body_size / (1024 * 1024),
-            max_size_bytes / (1024 * 1024)
-        );
+            debug!(
+                "📊 Download progress: {} MB / {} MB",
+                body_size / (1024 * 1024),
+                max_size_bytes / (1024 * 1024)
+            );
         }
     }
 

@@ -1,5 +1,5 @@
-use xorf::{BinaryFuse16, Filter};
 use serde::Deserialize;
+use xorf::{BinaryFuse16, Filter};
 
 #[derive(Debug, Deserialize)]
 struct FilterDebug {
@@ -26,14 +26,14 @@ fn main() {
     println!("\n");
 
     // Deserialize to verify structure
-    let deserialized: BinaryFuse16 = rmp_serde::from_slice(&serialized)
-        .expect("Failed to deserialize");
+    let deserialized: BinaryFuse16 =
+        rmp_serde::from_slice(&serialized).expect("Failed to deserialize");
 
     println!("Filter works: {}", deserialized.contains(&1u64));
 
     // Deserialize as debug struct to see field names
-    let debug: FilterDebug = rmp_serde::from_slice(&serialized)
-        .expect("Failed to deserialize as debug");
+    let debug: FilterDebug =
+        rmp_serde::from_slice(&serialized).expect("Failed to deserialize as debug");
 
     println!("\nFilter structure:");
     println!("  seed: 0x{:016x}", debug.seed);
@@ -41,7 +41,10 @@ fn main() {
     println!("  segment_length_mask: {}", debug.segment_length_mask);
     println!("  segment_count_length: {}", debug.segment_count_length);
     println!("  fingerprints.len(): {}", debug.fingerprints.len());
-    println!("  fingerprints (first 10): {:?}", &debug.fingerprints[..10.min(debug.fingerprints.len())]);
+    println!(
+        "  fingerprints (first 10): {:?}",
+        &debug.fingerprints[..10.min(debug.fingerprints.len())]
+    );
 
     // Print as base64 for easier testing
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};

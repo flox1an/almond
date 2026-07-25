@@ -70,7 +70,9 @@ pub async fn upload_file(
     // Check if upload feature is enabled and determine auth mode
     let auth_mode = match state.feature_upload_enabled {
         crate::models::FeatureMode::Off => {
-            return Err(AppError::Forbidden("Upload feature is disabled".to_string()));
+            return Err(AppError::Forbidden(
+                "Upload feature is disabled".to_string(),
+            ));
         }
         crate::models::FeatureMode::Wot => auth::AuthMode::WotOnly,
         crate::models::FeatureMode::Dvm => auth::AuthMode::DvmOnly,
@@ -121,7 +123,8 @@ pub async fn upload_file(
     track_upload_stats(&state, total_bytes).await;
 
     // Create response
-    let descriptor = state.create_blob_descriptor(&sha256, total_bytes, Some(content_type), expiration);
+    let descriptor =
+        state.create_blob_descriptor(&sha256, total_bytes, Some(content_type), expiration);
 
     let json_body = serde_json::to_string(&descriptor)
         .map_err(|e| AppError::InternalError(format!("Failed to serialize response: {}", e)))?;
@@ -142,7 +145,9 @@ pub async fn mirror_blob(
     // Check if mirror feature is enabled and determine auth mode
     let auth_mode = match state.feature_mirror_enabled {
         crate::models::FeatureMode::Off => {
-            return Err(AppError::Forbidden("Mirror feature is disabled".to_string()));
+            return Err(AppError::Forbidden(
+                "Mirror feature is disabled".to_string(),
+            ));
         }
         crate::models::FeatureMode::Wot => auth::AuthMode::WotOnly,
         crate::models::FeatureMode::Dvm => auth::AuthMode::DvmOnly,
@@ -161,18 +166,21 @@ pub async fn mirror_blob(
     auth::validate_t_tag(&auth_event, "upload")?;
 
     // Extract expected SHA-256 from auth event and expiration from headers
-    let expected_sha256 = auth::extract_sha256_from_event(&auth_event)
-        .ok_or_else(|| AppError::Unauthorized("No valid SHA-256 hash found in auth event".to_string()))?;
+    let expected_sha256 = auth::extract_sha256_from_event(&auth_event).ok_or_else(|| {
+        AppError::Unauthorized("No valid SHA-256 hash found in auth event".to_string())
+    })?;
     let expiration = extract_expiration(&headers);
 
     info!("Expected SHA-256 from auth event: {}", expected_sha256);
 
     // Parse request body for URL
-    let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX).await
+    let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+        .await
         .map_err(|_| AppError::InternalError("Failed to read request body".to_string()))?;
-    
+
     let body: Value = serde_json::from_slice(&body_bytes)?;
-    let url = body.get("url")
+    let url = body
+        .get("url")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::BadRequest("Missing 'url' field in request body".to_string()))?;
 
@@ -202,14 +210,13 @@ pub async fn mirror_blob(
     info!("💾 Streaming blob to temp file: {}", temp_path.display());
 
     // Stream and hash
-    let (calculated_sha256, body_size) = upload::stream_response_to_temp_file(
-        response,
-        &temp_path,
-        max_size_bytes,
-    )
-    .await?;
+    let (calculated_sha256, body_size) =
+        upload::stream_response_to_temp_file(response, &temp_path, max_size_bytes).await?;
 
-    info!("🔐 SHA256 verification: calculated {} vs expected {}", calculated_sha256, expected_sha256);
+    info!(
+        "🔐 SHA256 verification: calculated {} vs expected {}",
+        calculated_sha256, expected_sha256
+    );
 
     // Validate hash matches
     if calculated_sha256 != expected_sha256 {
@@ -240,7 +247,8 @@ pub async fn mirror_blob(
     if hls::is_hls_playlist(&content_type) {
         if let Some(origin_base_url) = hls::extract_origin_base_url(url) {
             // Read the stored playlist to parse references
-            if let Some(metadata) = file_storage::get_file_metadata(&state, &expected_sha256).await {
+            if let Some(metadata) = file_storage::get_file_metadata(&state, &expected_sha256).await
+            {
                 match tokio::fs::read_to_string(&metadata.path).await {
                     Ok(content) => {
                         let references = hls::parse_playlist_references(&content);
@@ -264,7 +272,10 @@ pub async fn mirror_blob(
                         }
                     }
                     Err(e) => {
-                        warn!("[HLS] Failed to read playlist file for recursive mirror: {}", e);
+                        warn!(
+                            "[HLS] Failed to read playlist file for recursive mirror: {}",
+                            e
+                        );
                     }
                 }
             }
@@ -274,10 +285,13 @@ pub async fn mirror_blob(
     }
 
     // Create response
-    let descriptor = state.create_blob_descriptor(&expected_sha256, body_size, Some(content_type), expiration);
+    let descriptor =
+        state.create_blob_descriptor(&expected_sha256, body_size, Some(content_type), expiration);
 
-    info!("🎉 Mirror operation completed successfully: {} -> {} ({} bytes)",
-          url, expected_sha256, body_size);
+    info!(
+        "🎉 Mirror operation completed successfully: {} -> {} ({} bytes)",
+        url, expected_sha256, body_size
+    );
 
     let json_body = serde_json::to_string(&descriptor)
         .map_err(|e| AppError::InternalError(format!("Failed to serialize response: {}", e)))?;
@@ -304,7 +318,9 @@ pub async fn patch_upload(
 
     // Check if upload feature is enabled
     if !state.feature_upload_enabled.is_enabled() {
-        return Err(AppError::Forbidden("Upload feature is disabled".to_string()));
+        return Err(AppError::Forbidden(
+            "Upload feature is disabled".to_string(),
+        ));
     }
 
     // Extract and validate headers
@@ -322,33 +338,44 @@ pub async fn patch_upload(
         .get(UPLOAD_LENGTH_HEADER)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok())
-        .ok_or_else(|| AppError::BadRequest("Missing or invalid Upload-Length header".to_string()))?;
+        .ok_or_else(|| {
+            AppError::BadRequest("Missing or invalid Upload-Length header".to_string())
+        })?;
 
     let content_length = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok())
-        .ok_or_else(|| AppError::BadRequest("Missing or invalid Content-Length header".to_string()))?;
+        .ok_or_else(|| {
+            AppError::BadRequest("Missing or invalid Content-Length header".to_string())
+        })?;
 
     let upload_offset = headers
         .get(UPLOAD_OFFSET_HEADER)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok())
-        .ok_or_else(|| AppError::BadRequest("Missing or invalid Upload-Offset header".to_string()))?;
+        .ok_or_else(|| {
+            AppError::BadRequest("Missing or invalid Upload-Offset header".to_string())
+        })?;
 
     let content_type = extract_content_type(&headers);
     let expiration = extract_expiration(&headers);
 
     // Validate Content-Type is application/octet-stream
     if content_type != DEFAULT_CONTENT_TYPE {
-        return Err(AppError::BadRequest(format!("Invalid Content-Type: {}", content_type)));
+        return Err(AppError::BadRequest(format!(
+            "Invalid Content-Type: {}",
+            content_type
+        )));
     }
 
     // Determine auth mode based on feature configuration
     let auth_mode = match state.feature_upload_enabled {
         crate::models::FeatureMode::Off => {
             // Already checked above, this shouldn't happen
-            return Err(AppError::Forbidden("Upload feature is disabled".to_string()));
+            return Err(AppError::Forbidden(
+                "Upload feature is disabled".to_string(),
+            ));
         }
         crate::models::FeatureMode::Wot => auth::AuthMode::WotOnly,
         crate::models::FeatureMode::Dvm => auth::AuthMode::DvmOnly,
@@ -371,8 +398,7 @@ pub async fn patch_upload(
     if content_length > max_chunk_size_bytes {
         return Err(AppError::PayloadTooLarge(format!(
             "Chunk size {} exceeds maximum {} MB",
-            content_length,
-            state.max_chunk_size_mb
+            content_length, state.max_chunk_size_mb
         )));
     }
 
@@ -386,15 +412,25 @@ pub async fn patch_upload(
 
     // Create temp directory for chunk files
     let chunk_temp_dir = state.upload_dir.join("temp").join("chunks");
-    tokio::fs::create_dir_all(&chunk_temp_dir).await.map_err(|e| {
-        error!("Failed to create chunk temp directory: {}", e);
-        AppError::IoError(format!("Failed to create chunk directory: {}", e))
-    })?;
+    tokio::fs::create_dir_all(&chunk_temp_dir)
+        .await
+        .map_err(|e| {
+            error!("Failed to create chunk temp directory: {}", e);
+            AppError::IoError(format!("Failed to create chunk directory: {}", e))
+        })?;
 
     // Create chunk file
-    let chunk_filename = format!("chunk_{}_{}_{}", sha256, upload_offset, uuid::Uuid::new_v4());
+    let chunk_filename = format!(
+        "chunk_{}_{}_{}",
+        sha256,
+        upload_offset,
+        uuid::Uuid::new_v4()
+    );
     let chunk_path = chunk_temp_dir.join(&chunk_filename);
-    debug!("💾 Creating chunk file: {} (offset: {}, length: {})", chunk_filename, upload_offset, content_length);
+    debug!(
+        "💾 Creating chunk file: {} (offset: {}, length: {})",
+        chunk_filename, upload_offset, content_length
+    );
 
     // Stream chunk data to file
     let body_stream = req.into_body().into_data_stream();
@@ -428,7 +464,10 @@ pub async fn patch_upload(
 
     // Validate chunk size matches Content-Length
     if total_written != content_length {
-        error!("❌ Chunk size mismatch: expected {}, got {}", content_length, total_written);
+        error!(
+            "❌ Chunk size mismatch: expected {}, got {}",
+            content_length, total_written
+        );
         let _ = tokio::fs::remove_file(&chunk_path).await;
         return Err(AppError::BadRequest(format!(
             "Chunk size mismatch: expected {}, got {}",
@@ -454,21 +493,39 @@ pub async fn patch_upload(
     });
 
     if is_new_upload {
-        debug!("🚀 Starting new chunked upload: {} ({} bytes, type: {})", sha256, upload_length, upload_type);
+        debug!(
+            "🚀 Starting new chunked upload: {} ({} bytes, type: {})",
+            sha256, upload_length, upload_type
+        );
     } else {
-        debug!("📦 Adding chunk to existing upload: {} (offset: {}, length: {})", sha256, upload_offset, content_length);
+        debug!(
+            "📦 Adding chunk to existing upload: {} (offset: {}, length: {})",
+            sha256, upload_offset, content_length
+        );
     }
 
     // Validate upload parameters match
     if chunk_upload.upload_type != upload_type || chunk_upload.upload_length != upload_length {
-        return Err(AppError::BadRequest("Upload parameters mismatch".to_string()));
+        return Err(AppError::BadRequest(
+            "Upload parameters mismatch".to_string(),
+        ));
     }
 
     // Check for duplicate chunks
-    if chunk_upload.chunks.iter().any(|c| c.offset == upload_offset) {
-        error!("Duplicate chunk at offset {} for upload {}", upload_offset, sha256);
+    if chunk_upload
+        .chunks
+        .iter()
+        .any(|c| c.offset == upload_offset)
+    {
+        error!(
+            "Duplicate chunk at offset {} for upload {}",
+            upload_offset, sha256
+        );
         let _ = tokio::fs::remove_file(&chunk_path).await;
-        return Err(AppError::BadRequest(format!("Duplicate chunk at offset {}", upload_offset)));
+        return Err(AppError::BadRequest(format!(
+            "Duplicate chunk at offset {}",
+            upload_offset
+        )));
     }
 
     // Add chunk info
@@ -482,11 +539,19 @@ pub async fn patch_upload(
     let total_received: u64 = chunk_upload.chunks.iter().map(|c| c.length).sum();
     let progress_percent = (total_received as f64 / upload_length as f64 * 100.0) as u8;
 
-    debug!("📈 Chunk upload progress: {}/{} bytes ({}%) - {} chunks",
-          total_received, upload_length, progress_percent, chunk_upload.chunks.len());
+    debug!(
+        "📈 Chunk upload progress: {}/{} bytes ({}%) - {} chunks",
+        total_received,
+        upload_length,
+        progress_percent,
+        chunk_upload.chunks.len()
+    );
 
     if total_received >= upload_length {
-        info!("🎉 Upload complete! Reconstructing final blob for {}", sha256);
+        info!(
+            "🎉 Upload complete! Reconstructing final blob for {}",
+            sha256
+        );
 
         // Check payment if required (for the full upload size)
         check_payment(&state, &headers, upload_length, state.feature_paid_upload).await?;
@@ -507,16 +572,22 @@ pub async fn patch_upload(
                 // Mark changes pending
                 file_storage::mark_changes_pending(&state).await;
 
-                info!("🏁 Chunked upload completed successfully: {} ({} bytes)", sha256, descriptor.size);
+                info!(
+                    "🏁 Chunked upload completed successfully: {} ({} bytes)",
+                    sha256, descriptor.size
+                );
 
-                let json_body = serde_json::to_string(&descriptor)
-                    .map_err(|e| AppError::InternalError(format!("Failed to serialize response: {}", e)))?;
+                let json_body = serde_json::to_string(&descriptor).map_err(|e| {
+                    AppError::InternalError(format!("Failed to serialize response: {}", e))
+                })?;
 
                 Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(json_body))
-                    .map_err(|e| AppError::InternalError(format!("Failed to build response: {}", e)))
+                    .map_err(|e| {
+                        AppError::InternalError(format!("Failed to build response: {}", e))
+                    })
             }
             Err(e) => {
                 error!("Failed to reconstruct blob: {}", e);
@@ -527,8 +598,11 @@ pub async fn patch_upload(
     } else {
         // Upload not complete
         let remaining = upload_length - total_received;
-        debug!("⏳ Chunk accepted: {} bytes remaining - {} chunks received",
-              remaining, chunk_upload.chunks.len());
+        debug!(
+            "⏳ Chunk accepted: {} bytes remaining - {} chunks received",
+            remaining,
+            chunk_upload.chunks.len()
+        );
 
         Response::builder()
             .status(StatusCode::NO_CONTENT)
@@ -548,8 +622,12 @@ async fn reconstruct_blob(
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
 
-    info!("🔧 Reconstructing blob: {} ({} chunks, {} bytes)",
-          expected_sha256, chunk_upload.chunks.len(), chunk_upload.upload_length);
+    info!(
+        "🔧 Reconstructing blob: {} ({} chunks, {} bytes)",
+        expected_sha256,
+        chunk_upload.chunks.len(),
+        chunk_upload.upload_length
+    );
 
     // Sort chunks by offset
     let mut sorted_chunks = chunk_upload.chunks.clone();
@@ -578,56 +656,68 @@ async fn reconstruct_blob(
 
     // Create temp file for reconstruction
     let temp_dir = state.upload_dir.join("temp");
-    tokio::fs::create_dir_all(&temp_dir).await.map_err(|e| {
-        AppError::IoError(format!("Failed to create temp dir: {}", e))
-    })?;
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(|e| AppError::IoError(format!("Failed to create temp dir: {}", e)))?;
 
     let temp_path = temp_dir.join(format!("reconstruct_{}", uuid::Uuid::new_v4()));
-    let mut temp_file = File::create(&temp_path).await.map_err(|e| {
-        AppError::IoError(format!("Failed to create reconstruction file: {}", e))
-    })?;
+    let mut temp_file = File::create(&temp_path)
+        .await
+        .map_err(|e| AppError::IoError(format!("Failed to create reconstruction file: {}", e)))?;
 
     // Reconstruct file with hash calculation
     let mut hasher = Sha256::new();
     let mut total_written = 0u64;
 
     for (i, chunk) in sorted_chunks.iter().enumerate() {
-        let mut chunk_file = File::open(&chunk.chunk_path).await.map_err(|e| {
-            AppError::IoError(format!("Failed to open chunk file: {}", e))
-        })?;
+        let mut chunk_file = File::open(&chunk.chunk_path)
+            .await
+            .map_err(|e| AppError::IoError(format!("Failed to open chunk file: {}", e)))?;
 
         let mut chunk_data = Vec::with_capacity(chunk.length as usize);
-        chunk_file.read_to_end(&mut chunk_data).await.map_err(|e| {
-            AppError::IoError(format!("Failed to read chunk file: {}", e))
-        })?;
+        chunk_file
+            .read_to_end(&mut chunk_data)
+            .await
+            .map_err(|e| AppError::IoError(format!("Failed to read chunk file: {}", e)))?;
 
         if chunk_data.len() as u64 != chunk.length {
             return Err(AppError::InternalError(format!(
                 "Chunk file size mismatch: expected {}, got {}",
-                chunk.length, chunk_data.len()
+                chunk.length,
+                chunk_data.len()
             )));
         }
 
-        temp_file.write_all(&chunk_data).await.map_err(|e| {
-            AppError::IoError(format!("Failed to write chunk: {}", e))
-        })?;
+        temp_file
+            .write_all(&chunk_data)
+            .await
+            .map_err(|e| AppError::IoError(format!("Failed to write chunk: {}", e)))?;
 
         hasher.update(&chunk_data);
         total_written += chunk_data.len() as u64;
 
         if i % 10 == 0 || i == sorted_chunks.len() - 1 {
-            debug!("📊 Reconstruction progress: {}/{} chunks ({} bytes)", i + 1, sorted_chunks.len(), total_written);
+            debug!(
+                "📊 Reconstruction progress: {}/{} chunks ({} bytes)",
+                i + 1,
+                sorted_chunks.len(),
+                total_written
+            );
         }
     }
 
-    temp_file.sync_all().await.map_err(|e| {
-        AppError::IoError(format!("Failed to sync reconstruction file: {}", e))
-    })?;
+    temp_file
+        .sync_all()
+        .await
+        .map_err(|e| AppError::IoError(format!("Failed to sync reconstruction file: {}", e)))?;
     drop(temp_file);
 
     // Verify hash
     let calculated_sha256 = hex::encode(hasher.finalize());
-    info!("🔍 SHA256 verification: calculated {} vs expected {}", calculated_sha256, expected_sha256);
+    info!(
+        "🔍 SHA256 verification: calculated {} vs expected {}",
+        calculated_sha256, expected_sha256
+    );
 
     if calculated_sha256 != expected_sha256 {
         let _ = tokio::fs::remove_file(&temp_path).await;
@@ -658,7 +748,11 @@ async fn reconstruct_blob(
     debug!("🧹 Cleaning up {} chunk files", sorted_chunks.len());
     for chunk in &sorted_chunks {
         if let Err(e) = tokio::fs::remove_file(&chunk.chunk_path).await {
-            error!("Failed to clean up chunk file {}: {}", chunk.chunk_path.display(), e);
+            error!(
+                "Failed to clean up chunk file {}: {}",
+                chunk.chunk_path.display(),
+                e
+            );
         }
     }
 
@@ -686,7 +780,11 @@ impl Drop for TempFileGuard {
     fn drop(&mut self) {
         if self.path.exists() {
             if let Err(e) = std::fs::remove_file(&self.path) {
-                error!("Failed to clean up temp file {}: {}", self.path.display(), e);
+                error!(
+                    "Failed to clean up temp file {}: {}",
+                    self.path.display(),
+                    e
+                );
             }
         }
     }

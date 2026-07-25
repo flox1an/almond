@@ -1,6 +1,5 @@
 /// Binary to inspect the serialization format of BinaryFuse16
 /// Usage: cargo run --bin inspect_filter
-
 use base64::Engine;
 use xorf::{BinaryFuse16, Filter};
 
@@ -12,10 +11,7 @@ fn main() {
     ];
 
     // Convert to u64 fingerprints (using same logic as server)
-    let fingerprints: Vec<u64> = test_hashes
-        .iter()
-        .map(|hex| sha256_to_u64(hex))
-        .collect();
+    let fingerprints: Vec<u64> = test_hashes.iter().map(|hex| sha256_to_u64(hex)).collect();
 
     println!("Test fingerprints:");
     for (i, fp) in fingerprints.iter().enumerate() {

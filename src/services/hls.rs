@@ -15,9 +15,8 @@ pub struct HlsReference {
 }
 
 /// Regex for Blossom HLS references: 64 hex chars with optional .ext
-static HLS_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^([0-9a-fA-F]{64})(?:\.(\w+))?$").unwrap()
-});
+static HLS_REF_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([0-9a-fA-F]{64})(?:\.(\w+))?$").unwrap());
 
 /// Check if a MIME type indicates an HLS playlist
 pub fn is_hls_playlist(mime_type: &str) -> bool {
@@ -59,7 +58,6 @@ pub fn extract_origin_base_url(url: &str) -> Option<String> {
     }
 }
 
-
 /// Maximum recursion depth for nested HLS playlists (master -> variant -> segments)
 const MAX_HLS_RECURSION_DEPTH: usize = 10;
 
@@ -90,7 +88,10 @@ async fn mirror_single_reference(
     info!("[HLS] Fetching segment: {}", fetch_url);
 
     // Fetch (no SSRF check needed - origin was already validated during the playlist mirror)
-    let response = client.get(&fetch_url).send().await
+    let response = client
+        .get(&fetch_url)
+        .send()
+        .await
         .map_err(|e| format!("Failed to fetch {}: {}", fetch_url, e))?;
 
     if !response.status().is_success() {
@@ -103,16 +104,18 @@ async fn mirror_single_reference(
     let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
 
     // Stream to temp file
-    file_storage::ensure_temp_dir(state).await
+    file_storage::ensure_temp_dir(state)
+        .await
         .map_err(|e| format!("Failed to ensure temp dir: {}", e))?;
     let temp_path = file_storage::create_temp_path(state, "hls_segment", extension.as_deref());
 
-    let (calculated_sha256, body_size) = upload::stream_response_to_temp_file(
-        response, &temp_path, max_size_bytes,
-    ).await.map_err(|e| {
-        let _ = tokio::fs::remove_file(&temp_path);
-        format!("Failed to stream {}: {}", fetch_url, e)
-    })?;
+    let (calculated_sha256, body_size) =
+        upload::stream_response_to_temp_file(response, &temp_path, max_size_bytes)
+            .await
+            .map_err(|e| {
+                let _ = tokio::fs::remove_file(&temp_path);
+                format!("Failed to stream {}: {}", fetch_url, e)
+            })?;
 
     // Verify hash
     if calculated_sha256 != reference.sha256 {
@@ -132,7 +135,9 @@ async fn mirror_single_reference(
         extension,
         Some(content_type),
         None, // no expiration for background-fetched segments
-    ).await.map_err(|e| {
+    )
+    .await
+    .map_err(|e| {
         let _ = tokio::fs::remove_file(&temp_path);
         format!("Failed to finalize {}: {}", reference.sha256, e)
     })?;
@@ -141,16 +146,17 @@ async fn mirror_single_reference(
 }
 
 /// Try to parse child references from a stored m3u8 playlist.
-async fn try_collect_child_references(
-    state: &AppState,
-    sha256: &str,
-) -> Vec<HlsReference> {
+async fn try_collect_child_references(state: &AppState, sha256: &str) -> Vec<HlsReference> {
     if let Some(metadata) = file_storage::get_file_metadata(state, sha256).await {
         match tokio::fs::read_to_string(&metadata.path).await {
             Ok(content) => {
                 let child_refs = parse_playlist_references(&content);
                 if !child_refs.is_empty() {
-                    info!("[HLS] Found {} child references in {}", child_refs.len(), sha256);
+                    info!(
+                        "[HLS] Found {} child references in {}",
+                        child_refs.len(),
+                        sha256
+                    );
                 }
                 child_refs
             }
@@ -204,21 +210,27 @@ pub async fn mirror_hls_references(
             );
             break;
         }
-        info!("[HLS] Round {}: processing {} references", round, all_references.len());
+        info!(
+            "[HLS] Round {}: processing {} references",
+            round,
+            all_references.len()
+        );
 
-        let results: Vec<(HlsReference, Result<bool, String>)> = stream::iter(all_references.iter().cloned())
-            .map(|reference| {
-                let state = state.clone();
-                let origin = origin_base_url.clone();
-                let client = client.clone();
-                async move {
-                    let result = mirror_single_reference(&state, &client, &origin, &reference).await;
-                    (reference, result)
-                }
-            })
-            .buffer_unordered(concurrency)
-            .collect()
-            .await;
+        let results: Vec<(HlsReference, Result<bool, String>)> =
+            stream::iter(all_references.iter().cloned())
+                .map(|reference| {
+                    let state = state.clone();
+                    let origin = origin_base_url.clone();
+                    let client = client.clone();
+                    async move {
+                        let result =
+                            mirror_single_reference(&state, &client, &origin, &reference).await;
+                        (reference, result)
+                    }
+                })
+                .buffer_unordered(concurrency)
+                .collect()
+                .await;
 
         // Collect newly discovered m3u8 playlists for recursive processing
         let mut next_round_references = Vec::new();
@@ -233,7 +245,8 @@ pub async fn mirror_hls_references(
                     }
                     // Whether newly fetched or already existing, recurse into m3u8 playlists
                     if reference.extension.as_deref() == Some("m3u8") {
-                        let child_refs = try_collect_child_references(&state, &reference.sha256).await;
+                        let child_refs =
+                            try_collect_child_references(&state, &reference.sha256).await;
                         next_round_references.extend(child_refs);
                     }
                 }
@@ -277,7 +290,9 @@ mod tests {
 
     #[test]
     fn test_is_hls_playlist_with_charset() {
-        assert!(is_hls_playlist("application/vnd.apple.mpegurl; charset=utf-8"));
+        assert!(is_hls_playlist(
+            "application/vnd.apple.mpegurl; charset=utf-8"
+        ));
     }
 
     #[test]
@@ -300,9 +315,15 @@ f6e5d4c3b2a1098765432109876543210987654321fedcba0987654321fedcba.m3u8
 "#;
         let refs = parse_playlist_references(content);
         assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0].sha256, "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456");
+        assert_eq!(
+            refs[0].sha256,
+            "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
+        );
         assert_eq!(refs[0].extension, Some("m3u8".to_string()));
-        assert_eq!(refs[1].sha256, "f6e5d4c3b2a1098765432109876543210987654321fedcba0987654321fedcba");
+        assert_eq!(
+            refs[1].sha256,
+            "f6e5d4c3b2a1098765432109876543210987654321fedcba0987654321fedcba"
+        );
         assert_eq!(refs[1].extension, Some("m3u8".to_string()));
     }
 
@@ -378,7 +399,10 @@ b82fcf4dbcec2d8fab7d94bdd48b070aa6e74d7240b1965a0b28c128d6858477.ts
         let content = "AABBCCDD11223344556677889900AABBCCDD11223344556677889900AABBCCDD.ts\n";
         let refs = parse_playlist_references(content);
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].sha256, "aabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd");
+        assert_eq!(
+            refs[0].sha256,
+            "aabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd"
+        );
     }
 
     // --- extract_origin_base_url tests ---

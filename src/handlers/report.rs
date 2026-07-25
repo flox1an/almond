@@ -1,10 +1,4 @@
-use axum::{
-    body::Body,
-    extract::State,
-    http::StatusCode,
-    response::Response,
-    Json,
-};
+use axum::{body::Body, extract::State, http::StatusCode, response::Response, Json};
 use nostr_relay_pool::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -65,11 +59,16 @@ fn extract_report_type(tags: &[Vec<String>]) -> Option<String> {
 }
 
 /// Move blob to quarantine directory
-async fn quarantine_blob(state: &AppState, sha256: &str, file_path: &PathBuf) -> Result<PathBuf, std::io::Error> {
+async fn quarantine_blob(
+    state: &AppState,
+    sha256: &str,
+    file_path: &PathBuf,
+) -> Result<PathBuf, std::io::Error> {
     let quarantine_dir = state.upload_dir.join("quarantine");
     fs::create_dir_all(&quarantine_dir).await?;
 
-    let file_name = file_path.file_name()
+    let file_name = file_path
+        .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| sha256.to_string());
 
@@ -96,7 +95,10 @@ pub async fn report_blob(
 
     // Validate report event kind (must be 1984 for NIP-56)
     if report.kind != 1984 {
-        error!("Invalid report event kind: expected 1984, got {}", report.kind);
+        error!(
+            "Invalid report event kind: expected 1984, got {}",
+            report.kind
+        );
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -120,7 +122,10 @@ pub async fn report_blob(
     };
 
     if !is_allowed {
-        error!("Reporter {} not authorized to submit reports", report.pubkey);
+        error!(
+            "Reporter {} not authorized to submit reports",
+            report.pubkey
+        );
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -133,7 +138,8 @@ pub async fn report_blob(
         "tags": report.tags,
         "content": report.content,
         "sig": report.sig
-    })).map_err(|e| {
+    }))
+    .map_err(|e| {
         error!("Failed to serialize event: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -187,14 +193,22 @@ pub async fn report_blob(
         drop(file_index);
 
         let file_path = file_metadata.path.clone();
-        info!("📁 Processing reported blob: {} at {}", sha256, file_path.display());
+        info!(
+            "📁 Processing reported blob: {} at {}",
+            sha256,
+            file_path.display()
+        );
 
         match state.report_action {
             ReportAction::Quarantine => {
                 // Move to quarantine directory
                 match quarantine_blob(&state, sha256, &file_path).await {
                     Ok(quarantine_path) => {
-                        info!("🔒 Quarantined blob {} to {}", sha256, quarantine_path.display());
+                        info!(
+                            "🔒 Quarantined blob {} to {}",
+                            sha256,
+                            quarantine_path.display()
+                        );
 
                         // Remove from file index
                         let mut file_index = state.file_index.write().await;
@@ -237,7 +251,8 @@ pub async fn report_blob(
         warn!("No blobs were processed from report");
         let body = serde_json::to_string(&serde_json::json!({
             "error": "No matching blobs found"
-        })).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header("Content-Type", "application/json")
@@ -265,8 +280,7 @@ pub async fn report_blob(
         action: state.report_action.as_str().to_string(),
     };
 
-    let body = serde_json::to_string(&response)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let body = serde_json::to_string(&response).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
