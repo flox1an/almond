@@ -1,5 +1,5 @@
 # Build Almond.
-FROM rustlang/rust:nightly-bullseye-slim AS almond-builder
+FROM rustlang/rust:nightly-2026-07-23-bullseye-slim AS almond-builder
 
 WORKDIR /usr/src/app
 
