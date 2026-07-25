@@ -1,10 +1,21 @@
 # Build Almond.
-FROM rustlang/rust:nightly-2026-07-23-bullseye-slim AS almond-builder
+# debian:bullseye-slim + explicit rustup nightly pin (see Dockerfile for rationale:
+# the floating rustlang/rust:nightly-bullseye-slim tag rolled forward to a nightly
+# with rust-lang/rust#159815, an ICE compiling tokio 1.53.x at opt-level=3).
+FROM debian:bullseye-slim AS almond-builder
+
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:$PATH
 
 WORKDIR /usr/src/app
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends pkg-config libssl-dev && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl gcc libc6-dev pkg-config libssl-dev && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --default-toolchain nightly-2026-07-23 --profile minimal && \
+    rustup default nightly-2026-07-23 && \
     rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./

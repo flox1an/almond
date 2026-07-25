@@ -1,11 +1,24 @@
 # Build stage
-FROM rustlang/rust:nightly-2026-07-23-bullseye-slim AS builder
+# Base on debian:bullseye-slim (matches the runtime image's glibc) and install
+# the Rust nightly toolchain explicitly. The floating rustlang/rust:nightly-bullseye-slim
+# tag rolled forward to a nightly (2026-07-24+) that hits an internal compiler error
+# (rust-lang/rust#159815) compiling tokio 1.53.x at opt-level=3. rustlang/rust does not
+# publish dated bullseye-slim tags, so we pin the toolchain via rustup instead.
+FROM debian:bullseye-slim AS builder
+
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:$PATH
 
 WORKDIR /usr/src/app
 
-# Install build dependencies
+# Install build dependencies and the pinned Rust nightly (last known-good before the ICE).
 RUN apt-get update && \
-    apt-get install -y pkg-config libssl-dev && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl gcc libc6-dev pkg-config libssl-dev && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --default-toolchain nightly-2026-07-23 --profile minimal && \
+    rustup default nightly-2026-07-23 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy dependency files for caching
