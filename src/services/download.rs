@@ -6,11 +6,84 @@ use tracing::info;
 
 use crate::error::{AppError, AppResult};
 use crate::helpers::get_extension_from_mime;
-use crate::models::{AppState, DownloadHandle, DownloadPhase, DownloadProgress};
+use crate::models::{
+    AppState, DownloadHandle, DownloadPhase, DownloadProgress, NegotiationPhase,
+    UpstreamNegotiation,
+};
 
 pub struct PreparedDownload {
     pub handle: Arc<DownloadHandle>,
     pub writer: File,
+}
+
+pub enum NegotiationClaim {
+    Leader(NegotiationGuard),
+    Follower(Arc<UpstreamNegotiation>),
+}
+
+pub async fn claim_upstream_negotiation(state: &AppState, key: &str) -> NegotiationClaim {
+    let mut negotiations = state.upstream_negotiations.write().await;
+    if let Some(existing) = negotiations.get(key).cloned() {
+        if *existing.phase.borrow() != NegotiationPhase::Failed {
+            return NegotiationClaim::Follower(existing);
+        }
+        negotiations.remove(key);
+    }
+
+    let (phase, _) = watch::channel(NegotiationPhase::Pending);
+    let negotiation = Arc::new(UpstreamNegotiation {
+        started: std::time::Instant::now(),
+        phase,
+    });
+    negotiations.insert(key.to_string(), negotiation.clone());
+    NegotiationClaim::Leader(NegotiationGuard {
+        state: state.clone(),
+        key: key.to_string(),
+        negotiation,
+        armed: true,
+    })
+}
+
+pub struct NegotiationGuard {
+    state: AppState,
+    key: String,
+    negotiation: Arc<UpstreamNegotiation>,
+    armed: bool,
+}
+
+impl NegotiationGuard {
+    pub async fn finish(mut self, phase: NegotiationPhase) {
+        self.negotiation.phase.send_replace(phase);
+        remove_negotiation(&self.state, &self.key, &self.negotiation).await;
+        self.armed = false;
+    }
+}
+
+impl Drop for NegotiationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.negotiation
+            .phase
+            .send_replace(NegotiationPhase::Failed);
+        let state = self.state.clone();
+        let key = std::mem::take(&mut self.key);
+        let negotiation = self.negotiation.clone();
+        tokio::spawn(async move {
+            remove_negotiation(&state, &key, &negotiation).await;
+        });
+    }
+}
+
+async fn remove_negotiation(state: &AppState, key: &str, negotiation: &Arc<UpstreamNegotiation>) {
+    let mut negotiations = state.upstream_negotiations.write().await;
+    if negotiations
+        .get(key)
+        .is_some_and(|current| Arc::ptr_eq(current, negotiation))
+    {
+        negotiations.remove(key);
+    }
 }
 
 /// Prepare the temp file and publish an attachable download handle.

@@ -20,11 +20,17 @@ use crate::services::upload::validate_upstream_url;
 
 use crate::constants::*;
 use crate::helpers::*;
-use crate::models::{AppState, DownloadHandle, DownloadPhase, DownloadProgress};
-use crate::services::download::{DownloadGuard, PreparedDownload};
+use crate::models::{
+    AppState, DownloadHandle, DownloadPhase, DownloadProgress, NegotiationPhase,
+    UpstreamNegotiation,
+};
+use crate::services::download::{
+    claim_upstream_negotiation, DownloadGuard, NegotiationClaim, NegotiationGuard, PreparedDownload,
+};
 use crate::utils::{parse_range_header, RangeSpec};
 
 const SEEK_AHEAD_LIMIT: u64 = 8 * 1024 * 1024;
+const NEGOTIATION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn coalescible_range_start(headers: &HeaderMap) -> Option<u64> {
     let value = headers.get(header::RANGE)?.to_str().ok()?;
@@ -45,6 +51,39 @@ fn copy_headers_for_cold_fetch(
         copy_headers_without_range(headers, request).header(reqwest_header::RANGE, "bytes=0-")
     } else {
         copy_headers_to_reqwest(headers, request)
+    }
+}
+
+async fn wait_for_negotiation(
+    negotiation: &UpstreamNegotiation,
+    timeout: std::time::Duration,
+) -> NegotiationPhase {
+    let mut phase = negotiation.phase.subscribe();
+    let wait = async {
+        loop {
+            let current = *phase.borrow_and_update();
+            if current != NegotiationPhase::Pending {
+                return current;
+            }
+            if phase.changed().await.is_err() {
+                return NegotiationPhase::Failed;
+            }
+        }
+    };
+    tokio::time::timeout(timeout, wait)
+        .await
+        .unwrap_or(NegotiationPhase::Pending)
+}
+
+async fn serve_existing_download(
+    handle: &DownloadHandle,
+    filename: &str,
+    headers: &HeaderMap,
+) -> Option<Result<Response<Body>, StatusCode>> {
+    if headers.get(header::RANGE).is_none() {
+        Some(serve_non_range_download(handle, filename).await)
+    } else {
+        serve_range_download(handle, filename, headers).await
     }
 }
 
@@ -84,22 +123,10 @@ pub async fn try_upstream_servers(
     let file_hash = crate::utils::get_sha256_hash_from_filename(filename).unwrap_or(filename);
 
     if let Some(handle) = state.ongoing_downloads.read().await.get(file_hash).cloned() {
-        if headers.get(header::RANGE).is_none() {
+        if let Some(response) = serve_existing_download(&handle, filename, headers).await {
             debug!("Attaching request to in-flight download {}", file_hash);
-            return serve_non_range_download(&handle, filename).await;
-        }
-        if let Some(response) = serve_range_download(&handle, filename, headers).await {
-            debug!(
-                "Attaching range request to in-flight download {}",
-                file_hash
-            );
             return response;
         }
-
-        debug!(
-            "Far range seek for {}, proxying to preserve latency",
-            file_hash
-        );
         return proxy_request_to_upstream(
             state,
             filename,
@@ -110,6 +137,50 @@ pub async fn try_upstream_servers(
         )
         .await;
     }
+
+    let should_coalesce =
+        headers.get(header::RANGE).is_none() || coalescible_range_start(headers).is_some();
+    let negotiation = if should_coalesce {
+        loop {
+            match claim_upstream_negotiation(state, file_hash).await {
+                NegotiationClaim::Leader(guard) => break Some(guard),
+                NegotiationClaim::Follower(existing) => {
+                    match wait_for_negotiation(&existing, NEGOTIATION_WAIT_TIMEOUT).await {
+                        NegotiationPhase::Ready => {
+                            if let Some(handle) =
+                                state.ongoing_downloads.read().await.get(file_hash).cloned()
+                            {
+                                if let Some(response) =
+                                    serve_existing_download(&handle, filename, headers).await
+                                {
+                                    return response;
+                                }
+                                return proxy_request_to_upstream(
+                                    state,
+                                    filename,
+                                    headers,
+                                    custom_origin,
+                                    xs_servers,
+                                    author_pubkey,
+                                )
+                                .await;
+                            }
+                        }
+                        NegotiationPhase::Failed => continue,
+                        NegotiationPhase::Pending => {
+                            debug!(
+                                "Timed out waiting for upstream negotiation for {}",
+                                file_hash
+                            );
+                            break None;
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        None
+    };
 
     // Track which servers we've already tried to avoid duplicate HEAD requests
     let mut tried_servers = std::collections::HashSet::<String>::new();
@@ -149,7 +220,14 @@ pub async fn try_upstream_servers(
                 Ok(response) if response.status().is_success() => {
                     debug!("Found file on custom origin server: {}", file_url);
                     return handle_successful_upstream_response(
-                        state, &client, response, &file_url, file_hash, filename, headers,
+                        state,
+                        &client,
+                        response,
+                        &file_url,
+                        file_hash,
+                        filename,
+                        headers,
+                        negotiation,
                     )
                     .await;
                 }
@@ -200,7 +278,14 @@ pub async fn try_upstream_servers(
                     Ok(response) if response.status().is_success() => {
                         debug!("Found file on xs server: {}", file_url);
                         return handle_successful_upstream_response(
-                            state, &client, response, &file_url, file_hash, filename, headers,
+                            state,
+                            &client,
+                            response,
+                            &file_url,
+                            file_hash,
+                            filename,
+                            headers,
+                            negotiation,
                         )
                         .await;
                     }
@@ -257,7 +342,14 @@ pub async fn try_upstream_servers(
                 Ok(response) if response.status().is_success() => {
                     debug!("Found file on local UPSTREAM_SERVER: {}", file_url);
                     return handle_successful_upstream_response(
-                        state, &client, response, &file_url, file_hash, filename, headers,
+                        state,
+                        &client,
+                        response,
+                        &file_url,
+                        file_hash,
+                        filename,
+                        headers,
+                        negotiation,
                     )
                     .await;
                 }
@@ -320,7 +412,14 @@ pub async fn try_upstream_servers(
                         Ok(response) if response.status().is_success() => {
                             debug!("Found file on user server: {}", file_url);
                             return handle_successful_upstream_response(
-                                state, &client, response, &file_url, file_hash, filename, headers,
+                                state,
+                                &client,
+                                response,
+                                &file_url,
+                                file_hash,
+                                filename,
+                                headers,
+                                negotiation,
                             )
                             .await;
                         }
@@ -736,13 +835,22 @@ async fn handle_successful_upstream_response(
     file_hash: &str,
     filename: &str,
     headers: &HeaderMap,
+    negotiation: Option<NegotiationGuard>,
 ) -> Result<Response, StatusCode> {
     let content_type = extract_content_type_from_response(response.headers());
     if headers.get(header::RANGE).is_none() {
         let prepared =
             prepare_download_state(state, file_hash, &content_type, response.content_length())
                 .await?;
-        return stream_and_save_from_upstream(state, file_url, response, file_hash, prepared).await;
+        return stream_and_save_from_upstream(
+            state,
+            file_url,
+            response,
+            file_hash,
+            prepared,
+            negotiation,
+        )
+        .await;
     }
 
     // Far seeks and suffix/multi-ranges were sent upstream unchanged. They are
@@ -756,6 +864,9 @@ async fn handle_successful_upstream_response(
         // A compliant 206 carries the complete length in Content-Range. If the
         // origin supplied neither it nor Content-Length, issue the original
         // range request so the client still receives correct range semantics.
+        if let Some(negotiation) = negotiation {
+            negotiation.finish(NegotiationPhase::Failed).await;
+        }
         let request = copy_headers_to_reqwest(headers, client.get(file_url));
         let response = request.send().await.map_err(|error| {
             warn!("Failed range fallback for {}: {}", file_url, error);
@@ -770,6 +881,9 @@ async fn handle_successful_upstream_response(
         .await
         .ok_or(StatusCode::RANGE_NOT_SATISFIABLE)??;
 
+    if let Some(negotiation) = negotiation {
+        negotiation.finish(NegotiationPhase::Ready).await;
+    }
     let state_clone = state.clone();
     let file_url_clone = file_url.to_string();
     let file_hash_clone = file_hash.to_string();
@@ -1275,6 +1389,7 @@ async fn stream_and_save_from_upstream(
     upstream_resp: reqwest::Response,
     filename: &str,
     prepared: PreparedDownload,
+    negotiation: Option<NegotiationGuard>,
 ) -> Result<Response<Body>, StatusCode> {
     let content_length = upstream_resp.content_length();
     let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
@@ -1316,6 +1431,9 @@ async fn stream_and_save_from_upstream(
         }
     }
 
+    if let Some(negotiation) = negotiation {
+        negotiation.finish(NegotiationPhase::Ready).await;
+    }
     let state = state.clone();
     let file_url = file_url.to_string();
     let filename = filename.to_string();
@@ -1826,5 +1944,37 @@ mod tests {
         assert!(serve_range_download(&handle, "blob.bin", &headers)
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn negotiation_wait_times_out_for_stalled_leader() {
+        let (phase, _) = watch::channel(NegotiationPhase::Pending);
+        let negotiation = UpstreamNegotiation {
+            started: std::time::Instant::now(),
+            phase,
+        };
+
+        assert_eq!(
+            wait_for_negotiation(&negotiation, std::time::Duration::from_millis(1)).await,
+            NegotiationPhase::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn negotiation_wait_observes_leader_completion() {
+        let (phase, _) = watch::channel(NegotiationPhase::Pending);
+        let negotiation = UpstreamNegotiation {
+            started: std::time::Instant::now(),
+            phase: phase.clone(),
+        };
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            phase.send_replace(NegotiationPhase::Ready);
+        });
+
+        assert_eq!(
+            wait_for_negotiation(&negotiation, std::time::Duration::from_secs(1)).await,
+            NegotiationPhase::Ready
+        );
     }
 }

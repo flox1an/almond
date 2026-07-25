@@ -195,6 +195,20 @@ pub struct DownloadHandle {
     pub final_path: OnceLock<PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NegotiationPhase {
+    Pending,
+    Ready,
+    Failed,
+}
+
+pub struct UpstreamNegotiation {
+    pub started: Instant,
+    pub phase: watch::Sender<NegotiationPhase>,
+}
+
+type UpstreamNegotiationsMap = Arc<RwLock<HashMap<String, Arc<UpstreamNegotiation>>>>;
+
 type OngoingDownloadsMap = Arc<RwLock<HashMap<String, Arc<DownloadHandle>>>>;
 
 #[derive(Clone)]
@@ -279,6 +293,7 @@ pub struct AppState {
     pub p2p_hello_interval_ms: u64,
     pub p2p_debug: bool,
     pub ongoing_downloads: OngoingDownloadsMap,
+    pub upstream_negotiations: UpstreamNegotiationsMap,
     pub chunk_uploads: Arc<RwLock<HashMap<String, ChunkUpload>>>,
     pub failed_upstream_lookups: Arc<RwLock<HashMap<String, Instant>>>,
     pub blossom_server_lists: Arc<RwLock<HashMap<PublicKey, (Vec<String>, Instant)>>>,

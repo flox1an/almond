@@ -672,6 +672,7 @@ async fn load_app_state() -> AppState {
         p2p_hello_interval_ms,
         p2p_debug,
         ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
+        upstream_negotiations: Arc::new(RwLock::new(HashMap::new())),
         chunk_uploads: Arc::new(RwLock::new(HashMap::new())),
         failed_upstream_lookups: Arc::new(RwLock::new(HashMap::new())),
         blossom_server_lists: Arc::new(RwLock::new(HashMap::new())),
