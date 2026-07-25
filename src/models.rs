@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::{atomic::AtomicU64, Arc},
+    sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{watch, RwLock};
 
 /// Feature mode controlling access to features
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,8 +173,28 @@ impl ReportAction {
     }
 }
 
-type OngoingDownloadsMap =
-    Arc<RwLock<HashMap<String, (Instant, Arc<AtomicU64>, Arc<Notify>, PathBuf, String)>>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadPhase {
+    Running,
+    Complete,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DownloadProgress {
+    pub written: u64,
+    pub phase: DownloadPhase,
+}
+
+pub struct DownloadHandle {
+    pub started: Instant,
+    pub temp_path: PathBuf,
+    pub content_type: String,
+    pub total_len: Option<u64>,
+    pub progress: watch::Sender<DownloadProgress>,
+}
+
+type OngoingDownloadsMap = Arc<RwLock<HashMap<String, Arc<DownloadHandle>>>>;
 
 #[derive(Clone)]
 pub struct ServeFileMetadata {

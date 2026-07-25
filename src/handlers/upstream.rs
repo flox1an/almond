@@ -5,19 +5,14 @@ use axum::{
     response::Response,
     Json,
 };
-use futures_util::stream;
 use futures_util::StreamExt;
 use reqwest::{header as reqwest_header, Client};
 use serde_json::json;
 use sha2::Digest;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
-    sync::Notify,
+    sync::watch,
 };
 use tracing::{debug, error, info, warn};
 
@@ -25,7 +20,8 @@ use crate::services::upload::validate_upstream_url;
 
 use crate::constants::*;
 use crate::helpers::*;
-use crate::models::AppState;
+use crate::models::{AppState, DownloadPhase, DownloadProgress};
+use crate::services::download::{DownloadGuard, PreparedDownload};
 
 /// Handle upstream servers requests
 pub async fn get_upstream(
@@ -60,16 +56,10 @@ pub async fn try_upstream_servers(
 
     // Extract hash from filename for internal tracking (ongoing downloads, file index, etc.)
     // But use the full filename (with extension) for upstream URL construction
-    let file_hash =
-        crate::utils::get_sha256_hash_from_filename(filename).unwrap_or(filename);
+    let file_hash = crate::utils::get_sha256_hash_from_filename(filename).unwrap_or(filename);
 
     // Check if this file is already being downloaded (use hash for tracking)
-    if state
-        .ongoing_downloads
-        .read()
-        .await
-        .contains_key(file_hash)
-    {
+    if state.ongoing_downloads.read().await.contains_key(file_hash) {
         debug!(
             "File {} is already being downloaded, proxying request to upstream",
             file_hash
@@ -143,24 +133,23 @@ pub async fn try_upstream_servers(
                                     "Starting full download from byte 0 for range request: {}",
                                     file_hash
                                 );
-                                // Prepare download state (use hash for tracking)
-                                let (temp_path, _written_len, _notify) =
-                                    prepare_download_state(state, file_hash, &content_type)
-                                        .await?;
-                                // Start the download in the background
+                                let prepared = prepare_download_state(
+                                    state,
+                                    file_hash,
+                                    &content_type,
+                                    full_response.content_length(),
+                                )
+                                .await?;
                                 let state_clone = state.clone();
                                 let file_url_clone = file_url.clone();
                                 let file_hash_clone = file_hash.to_string();
-                                let content_type_clone = content_type.clone();
-                                let temp_path_clone = temp_path.clone();
                                 tokio::spawn(async move {
                                     download_file_from_upstream_background(
                                         &state_clone,
                                         &file_url_clone,
                                         full_response,
                                         &file_hash_clone,
-                                        &content_type_clone,
-                                        &temp_path_clone,
+                                        prepared,
                                     )
                                     .await;
                                 });
@@ -181,17 +170,15 @@ pub async fn try_upstream_servers(
                             "Non-range request, starting download and streaming to client: {}",
                             file_hash
                         );
-                        // Prepare download state (use hash for tracking)
-                        let (temp_path, written_len, notify) =
-                            prepare_download_state(state, file_hash, &content_type).await?;
-                        return stream_and_save_from_upstream(
+                        let prepared = prepare_download_state(
                             state,
-                            &file_url,
-                            response,
                             file_hash,
-                            written_len,
-                            notify,
-                            temp_path,
+                            &content_type,
+                            response.content_length(),
+                        )
+                        .await?;
+                        return stream_and_save_from_upstream(
+                            state, &file_url, response, file_hash, prepared,
                         )
                         .await;
                     }
@@ -409,16 +396,10 @@ pub async fn try_upstream_redirect(
     cache_in_background: bool,
 ) -> Result<Response, StatusCode> {
     // Extract hash from filename for internal tracking
-    let file_hash =
-        crate::utils::get_sha256_hash_from_filename(filename).unwrap_or(filename);
+    let file_hash = crate::utils::get_sha256_hash_from_filename(filename).unwrap_or(filename);
 
     // Check if this file is already being downloaded
-    if state
-        .ongoing_downloads
-        .read()
-        .await
-        .contains_key(file_hash)
-    {
+    if state.ongoing_downloads.read().await.contains_key(file_hash) {
         debug!(
             "File {} is already being downloaded in background, redirecting to upstream",
             file_hash
@@ -744,17 +725,11 @@ async fn start_background_download_for_redirect(
         Ok(response) if response.status().is_success() => {
             debug!("Starting background download from: {}", file_url);
 
-            // Prepare download state
-            match prepare_download_state(state, file_hash, content_type).await {
-                Ok((temp_path, _written_len, _notify)) => {
-                    // Use the existing background download function
+            let total_len = response.content_length();
+            match prepare_download_state(state, file_hash, content_type, total_len).await {
+                Ok(prepared) => {
                     download_file_from_upstream_background(
-                        state,
-                        file_url,
-                        response,
-                        file_hash,
-                        content_type,
-                        &temp_path,
+                        state, file_url, response, file_hash, prepared,
                     )
                     .await;
                 }
@@ -816,24 +791,24 @@ async fn handle_successful_upstream_response(
                     file_hash
                 );
 
-                // Prepare download state (use hash for tracking)
-                let (temp_path, _written_len, _notify) =
-                    prepare_download_state(state, file_hash, &content_type).await?;
+                let prepared = prepare_download_state(
+                    state,
+                    file_hash,
+                    &content_type,
+                    full_response.content_length(),
+                )
+                .await?;
 
-                // Start the download in the background
                 let state_clone = state.clone();
                 let file_url_clone = file_url.to_string();
                 let file_hash_clone = file_hash.to_string();
-                let content_type_clone = content_type.clone();
-                let temp_path_clone = temp_path.clone();
                 tokio::spawn(async move {
                     download_file_from_upstream_background(
                         &state_clone,
                         &file_url_clone,
                         full_response,
                         &file_hash_clone,
-                        &content_type_clone,
-                        &temp_path_clone,
+                        prepared,
                     )
                     .await;
                 });
@@ -858,20 +833,11 @@ async fn handle_successful_upstream_response(
             file_hash
         );
 
-        // Prepare download state (use hash for tracking)
-        let (temp_path, written_len, notify) =
-            prepare_download_state(state, file_hash, &content_type).await?;
+        let prepared =
+            prepare_download_state(state, file_hash, &content_type, response.content_length())
+                .await?;
 
-        return stream_and_save_from_upstream(
-            state,
-            file_url,
-            response,
-            file_hash,
-            written_len,
-            notify,
-            temp_path,
-        )
-        .await;
+        return stream_and_save_from_upstream(state, file_url, response, file_hash, prepared).await;
     }
 }
 
@@ -1217,38 +1183,14 @@ async fn prepare_download_state(
     state: &AppState,
     filename: &str,
     content_type: &str,
-) -> Result<(std::path::PathBuf, Arc<AtomicU64>, Arc<Notify>), StatusCode> {
-    // Strip codecs and other parameters from content type before extracting extension
-    // Derive extension from content type
-    let file_extension = get_extension_from_mime(content_type)
-        .map(|ext| format!(".{}", ext))
-        .unwrap_or_default();
-
-    // Create temp file with proper extension derived from content type
-    let temp_dir = state.upload_dir.join("temp");
-    let temp_filename = format!("upstream_{}{}", uuid::Uuid::new_v4(), file_extension);
-    let temp_path = temp_dir.join(temp_filename);
-
-    // Mark this file as being downloaded with shared state
-    let written_len = Arc::new(AtomicU64::new(0));
-    let notify = Arc::new(Notify::new());
-    {
-        let mut ongoing_downloads = state.ongoing_downloads.write().await;
-        ongoing_downloads.insert(
-            filename.to_string(),
-            (
-                std::time::Instant::now(),
-                written_len.clone(),
-                notify.clone(),
-                temp_path.clone(),
-                content_type.to_string(),
-            ),
-        );
-        debug!("Marked {} as being downloaded with shared state at {} (content-type: {}, extension: {})", 
-              filename, temp_path.display(), content_type, file_extension);
-    }
-
-    Ok((temp_path, written_len, notify))
+    total_len: Option<u64>,
+) -> Result<PreparedDownload, StatusCode> {
+    crate::services::download::prepare_download_state(state, filename, content_type, total_len)
+        .await
+        .map_err(|error| {
+            error!("Failed to prepare upstream download for {filename}: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
 
 /// Stream file from upstream server to client while saving to local storage
@@ -1257,279 +1199,53 @@ async fn stream_and_save_from_upstream(
     file_url: &str,
     upstream_resp: reqwest::Response,
     filename: &str,
-    written_len: Arc<AtomicU64>,
-    notify: Arc<Notify>,
-    temp_path: std::path::PathBuf,
+    prepared: PreparedDownload,
 ) -> Result<Response<Body>, StatusCode> {
-    // ---- Take headers from upstream
-    let content_type = upstream_resp
-        .headers()
-        .get(reqwest_header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(DEFAULT_CONTENT_TYPE)
-        .to_string();
-
     let content_length = upstream_resp.content_length();
-
-    // Check size limit before starting download
-    let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024; // Convert MB to bytes
-    if let Some(content_length) = content_length {
-        if content_length > max_size_bytes {
-            error!(
-                "Upstream file {} too large: {} bytes (max allowed: {} bytes / {} MB)",
-                file_url, content_length, max_size_bytes, state.max_upstream_download_size_mb
-            );
-            return Err(StatusCode::PAYLOAD_TOO_LARGE);
-        }
-        debug!(
-            "Upstream file size check passed: {} bytes (limit: {} MB)",
-            content_length, state.max_upstream_download_size_mb
-        );
-    } else {
-        warn!(
-            "Upstream file {} has no Content-Length header, proceeding with download (limit: {} MB)",
-            file_url, state.max_upstream_download_size_mb
-        );
+    let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
+    if content_length.is_some_and(|length| length > max_size_bytes) {
+        let guard = DownloadGuard::new(state, filename, prepared.handle.clone());
+        guard.finish(DownloadPhase::Failed).await;
+        let _ = tokio::fs::remove_file(&prepared.handle.temp_path).await;
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
-    // Derive extension from content type
-    let extension = get_extension_from_mime(&content_type);
-
-    debug!(
-        "Starting download from upstream: {} to temp file: {}",
-        file_url,
-        temp_path.display()
-    );
-
-    // Ensure temp directory exists
-    if let Some(parent) = temp_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            error!("create temp dir: {e}");
+    let reader = File::open(&prepared.handle.temp_path)
+        .await
+        .map_err(|error| {
+            error!("Failed to open temp file for streaming: {error}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    }
-
-    // two independent handles
-    debug!("Creating writer file handle...");
-    let mut writer = File::create(&temp_path).await.map_err(|e| {
-        error!("create temp file: {e}");
+    let stream = create_tailing_stream(
+        reader,
+        prepared.handle.progress.subscribe(),
+        0,
+        content_length,
+    )
+    .await
+    .map_err(|error| {
+        error!("Failed to create tailing stream: {error}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    debug!("✅ Writer file handle created successfully");
 
-    // Check if file was actually created
-    if !temp_path.exists() {
-        error!("Temp file was not created: {}", temp_path.display());
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-    debug!(
-        "✅ Temp file exists after creation: {}",
-        temp_path.display()
-    );
-
-    debug!("Creating reader file handle...");
-    let reader = File::open(&temp_path).await.map_err(|e| {
-        error!("open temp file for read: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    debug!("✅ Reader file handle created successfully");
-
-    // ---- Shared progress + Notify (passed as parameters)
-
-    // ---- Downloader: reads reqwest stream → writes file, hash, progress++
-    let mut hasher = sha2::Sha256::new();
-    let mut body_size: u64 = 0;
-
-    let written_len_dl = written_len.clone();
-    let notify_dl = notify.clone();
-
-    let mut chunks = upstream_resp.bytes_stream(); // real streaming!
-
-    let max_size_bytes_clone = max_size_bytes;
-    let download_task = tokio::spawn(async move {
-        debug!("Download task started, beginning to read from upstream stream");
-
-        while let Some(next) = chunks.next().await {
-            let chunk = next.map_err(|e| std::io::Error::other(e.to_string()))?;
-
-            // Check size limit during download (in case Content-Length was missing or wrong)
-            let new_size = body_size + chunk.len() as u64;
-            if new_size > max_size_bytes_clone {
-                error!(
-                    "Download exceeded size limit: {} bytes > {} bytes ({} MB limit)",
-                    new_size,
-                    max_size_bytes_clone,
-                    max_size_bytes_clone / (1024 * 1024)
-                );
-                return Err(std::io::Error::other(format!(
-                    "File too large: {} bytes exceeds limit of {} MB",
-                    new_size,
-                    max_size_bytes_clone / (1024 * 1024)
-                )));
-            }
-
-            writer.write_all(&chunk).await?;
-            hasher.update(&chunk);
-            body_size += chunk.len() as u64;
-
-            // publish progress and wake up readers
-            written_len_dl.fetch_add(chunk.len() as u64, Ordering::Release);
-            notify_dl.notify_waiters();
-
-            // Log progress every 1MB
-            if body_size.is_multiple_of(1024 * 1024) {
-                debug!(
-                    "Download progress: {} bytes written to temp file (limit: {} MB)",
-                    body_size,
-                    max_size_bytes_clone / (1024 * 1024)
-                );
-            }
-        }
-
-        debug!("Upstream stream finished, flushing temp file");
-        // Important: flush so readers can safely see all bytes
-        writer.flush().await?;
-        debug!(
-            "Download completed: {} total bytes, temp file flushed",
-            body_size
-        );
-        std::io::Result::<(String, u64)>::Ok((hex::encode(hasher.finalize()), body_size))
-    });
-
-    // ---- Streamer: reads the growing file without blocking the downloader
-    // Use helper function to create the tailing stream
-    let stream = create_tailing_stream(reader, written_len.clone(), notify.clone()).await;
-
-    // ---- Build response (streaming starts immediately)
-    debug!("🚀 Starting immediate streaming to client (download runs in background)");
+    let content_type = prepared.handle.content_type.clone();
     let body = Body::from_stream(stream);
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .body(body)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Apply streaming headers
     response = apply_streaming_headers(response, &content_type, filename);
-
-    // Add Content-Length if available from upstream
-    if let Some(len) = content_length {
-        if let Ok(header_value) = len.to_string().parse() {
-            response
-                .headers_mut()
-                .insert(header::CONTENT_LENGTH, header_value);
+    if let Some(length) = content_length {
+        if let Ok(value) = length.to_string().parse() {
+            response.headers_mut().insert(header::CONTENT_LENGTH, value);
         }
     }
 
-    // ---- Cleanup: complete download, finalize file & index
-    let state_clone = state.clone();
-    let content_type_clone = content_type.clone();
-    let extension_clone = extension.clone();
-    let file_url_clone = file_url.to_string();
-    let filename_clone = filename.to_string();
+    let state = state.clone();
+    let file_url = file_url.to_string();
+    let filename = filename.to_string();
     tokio::spawn(async move {
-        debug!("Waiting for download task to complete...");
-        match download_task.await {
-            Ok(Ok((sha256, total))) => {
-                debug!("Download task completed successfully, finalizing file");
-                debug!("SHA256: {}", sha256);
-                debug!("Total bytes: {}", total);
-
-                // calculate final path
-                let final_path = crate::utils::get_nested_path(
-                    &state_clone.upload_dir,
-                    &sha256,
-                    extension_clone.as_deref(),
-                    None,
-                );
-                debug!(
-                    "Moving temp file {} to final location: {}",
-                    temp_path.display(),
-                    final_path.display()
-                );
-
-                if let Some(parent) = final_path.parent() {
-                    let _ = tokio::fs::create_dir_all(parent).await;
-                }
-                if let Err(e) = tokio::fs::rename(&temp_path, &final_path).await {
-                    error!("rename temp -> final failed: {e}");
-                    // Clean up temp file on error
-                    let _ = std::fs::remove_file(&temp_path);
-                    return;
-                }
-                debug!("Successfully moved temp file to final location");
-
-                // Index & Stats
-                let key = sha256[..sha256.len().min(64)].to_string();
-                debug!("Adding file to index with key: {}", key);
-                state_clone
-                    .file_index
-                    .insert(
-                        key.clone(),
-                        crate::models::FileMetadata {
-                            path: final_path,
-                            extension: extension_clone,
-                            mime_type: Some(content_type_clone),
-                            size: total,
-                            created_at: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs(),
-                            pubkey: None,
-                            expiration: None,
-                        },
-                    )
-                    .await;
-                debug!("Successfully added file to index");
-
-                // Mark that changes are pending for storage limit enforcement
-                let mut changes_pending = state_clone.changes_pending.write().await;
-                *changes_pending = true;
-
-                // Count the download and the bytes streamed to the client
-                state_clone.metrics.track_download(total);
-
-                // Track bytes downloaded from upstream server
-                state_clone
-                    .metrics
-                    .track_upstream_download(&file_url_clone, total);
-
-                info!(
-                    "✅ UPSTREAM DOWNLOAD COMPLETED: {} -> {} ({} bytes)",
-                    file_url_clone, sha256, total
-                );
-
-                // Remove from ongoing downloads
-                {
-                    let mut ongoing_downloads = state_clone.ongoing_downloads.write().await;
-                    ongoing_downloads.remove(&filename_clone);
-                    debug!("Removed {} from ongoing downloads", filename_clone);
-                }
-            }
-            Ok(Err(e)) => {
-                error!("❌ Download task failed: {e}");
-                // Remove from ongoing downloads on error too
-                {
-                    let mut ongoing_downloads = state_clone.ongoing_downloads.write().await;
-                    ongoing_downloads.remove(&filename_clone);
-                    debug!(
-                        "Removed {} from ongoing downloads due to error",
-                        filename_clone
-                    );
-                }
-            }
-            Err(e) => {
-                error!("❌ Join error: {e}");
-                // Remove from ongoing downloads on error too
-                {
-                    let mut ongoing_downloads = state_clone.ongoing_downloads.write().await;
-                    ongoing_downloads.remove(&filename_clone);
-                    debug!(
-                        "Removed {} from ongoing downloads due to join error",
-                        filename_clone
-                    );
-                }
-            }
-        }
+        run_download(state, file_url, upstream_resp, filename, prepared, true).await;
     });
 
     Ok(response)
@@ -1541,211 +1257,198 @@ async fn download_file_from_upstream_background(
     file_url: &str,
     upstream_resp: reqwest::Response,
     filename: &str,
-    content_type: &str,
-    temp_path: &std::path::PathBuf,
+    prepared: PreparedDownload,
 ) {
-    let content_length = upstream_resp.content_length();
+    run_download(
+        state.clone(),
+        file_url.to_string(),
+        upstream_resp,
+        filename.to_string(),
+        prepared,
+        false,
+    )
+    .await;
+}
 
-    // Check size limit before starting download
+async fn run_download(
+    state: AppState,
+    file_url: String,
+    upstream_resp: reqwest::Response,
+    filename: String,
+    mut prepared: PreparedDownload,
+    count_as_served: bool,
+) {
+    let handle = prepared.handle.clone();
+    let guard = DownloadGuard::new(&state, &filename, handle.clone());
     let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
-    if let Some(content_length) = content_length {
-        if content_length > max_size_bytes {
-            error!(
-                "Upstream file {} too large: {} bytes (max allowed: {} bytes / {} MB)",
-                file_url, content_length, max_size_bytes, state.max_upstream_download_size_mb
-            );
-            // Remove from ongoing downloads
-            let mut ongoing_downloads = state.ongoing_downloads.write().await;
-            ongoing_downloads.remove(filename);
-            return;
+    let expected_len = upstream_resp.content_length();
+    let content_type = handle.content_type.clone();
+    let extension = get_extension_from_mime(&content_type);
+    let temp_path = handle.temp_path.clone();
+
+    let result: Result<(String, u64), String> = async {
+        if expected_len.is_some_and(|length| length > max_size_bytes) {
+            return Err(format!(
+                "upstream file exceeds the {} byte limit",
+                max_size_bytes
+            ));
         }
-    }
 
-    // Derive extension from content type
-    let extension = get_extension_from_mime(content_type);
-
-    debug!(
-        "Starting background download from upstream: {} to temp file: {}",
-        file_url,
-        temp_path.display()
-    );
-
-    // Ensure temp directory exists
-    if let Some(parent) = temp_path.parent() {
-        if let Err(e) = tokio::fs::create_dir_all(parent).await {
-            error!("create temp dir: {e}");
-            let mut ongoing_downloads = state.ongoing_downloads.write().await;
-            ongoing_downloads.remove(filename);
-            return;
-        }
-    }
-
-    // Create file for writing
-    let mut writer = match File::create(temp_path).await {
-        Ok(w) => w,
-        Err(e) => {
-            error!("create temp file: {e}");
-            let mut ongoing_downloads = state.ongoing_downloads.write().await;
-            ongoing_downloads.remove(filename);
-            return;
-        }
-    };
-
-    // Download and save
-    let mut hasher = sha2::Sha256::new();
-    let mut body_size: u64 = 0;
-    let mut chunks = upstream_resp.bytes_stream();
-
-    while let Some(next) = chunks.next().await {
-        let chunk = match next {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Error reading chunk: {e}");
-                let mut ongoing_downloads = state.ongoing_downloads.write().await;
-                ongoing_downloads.remove(filename);
-                return;
+        let mut chunks = upstream_resp.bytes_stream();
+        let mut hasher = sha2::Sha256::new();
+        let mut body_size = 0u64;
+        while let Some(next) = chunks.next().await {
+            let chunk = next.map_err(|error| error.to_string())?;
+            let new_size = body_size + chunk.len() as u64;
+            if new_size > max_size_bytes {
+                return Err(format!(
+                    "upstream body exceeded the {} byte limit",
+                    max_size_bytes
+                ));
             }
-        };
 
-        // Check size limit during download
-        let new_size = body_size + chunk.len() as u64;
-        if new_size > max_size_bytes {
-            error!(
-                "Download exceeded size limit: {} bytes > {} bytes ({} MB limit)",
-                new_size,
-                max_size_bytes,
-                max_size_bytes / (1024 * 1024)
+            prepared
+                .writer
+                .write_all(&chunk)
+                .await
+                .map_err(|error| error.to_string())?;
+            // `flush` waits for tokio's blocking-file operation. Publishing
+            // progress afterwards guarantees followers can read these bytes.
+            prepared
+                .writer
+                .flush()
+                .await
+                .map_err(|error| error.to_string())?;
+            hasher.update(&chunk);
+            body_size = new_size;
+            handle.progress.send_modify(|progress| {
+                progress.written = body_size;
+            });
+        }
+
+        if expected_len.is_some_and(|length| length != body_size) {
+            return Err(format!(
+                "upstream body length mismatch: expected {:?}, received {}",
+                expected_len, body_size
+            ));
+        }
+
+        let sha256 = hex::encode(hasher.finalize());
+        let final_path =
+            crate::utils::get_nested_path(&state.upload_dir, &sha256, extension.as_deref(), None);
+        if let Some(parent) = final_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        tokio::fs::rename(&temp_path, &final_path)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let key = sha256[..sha256.len().min(64)].to_string();
+        state
+            .file_index
+            .insert(
+                key,
+                crate::models::FileMetadata {
+                    path: final_path,
+                    extension,
+                    mime_type: Some(content_type),
+                    size: body_size,
+                    created_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    pubkey: None,
+                    expiration: None,
+                },
+            )
+            .await;
+        *state.changes_pending.write().await = true;
+        Ok((sha256, body_size))
+    }
+    .await;
+
+    match result {
+        Ok((sha256, total)) => {
+            if count_as_served {
+                state.metrics.track_download(total);
+            } else {
+                state.metrics.files_downloaded.inc();
+            }
+            state.metrics.track_upstream_download(&file_url, total);
+            handle.progress.send_modify(|progress| {
+                progress.phase = DownloadPhase::Complete;
+            });
+            info!(
+                "Upstream download completed: {} -> {} ({} bytes)",
+                file_url, sha256, total
             );
-            let mut ongoing_downloads = state.ongoing_downloads.write().await;
-            ongoing_downloads.remove(filename);
-            return;
+            guard.finish(DownloadPhase::Complete).await;
         }
-
-        if let Err(e) = writer.write_all(&chunk).await {
-            error!("Error writing chunk: {e}");
-            let mut ongoing_downloads = state.ongoing_downloads.write().await;
-            ongoing_downloads.remove(filename);
-            return;
+        Err(error) => {
+            error!("Upstream download failed for {}: {}", file_url, error);
+            handle.progress.send_modify(|progress| {
+                progress.phase = DownloadPhase::Failed;
+            });
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            guard.finish(DownloadPhase::Failed).await;
         }
-
-        hasher.update(&chunk);
-        body_size += chunk.len() as u64;
     }
-
-    // Flush and finalize
-    if let Err(e) = writer.flush().await {
-        error!("Error flushing file: {e}");
-        let mut ongoing_downloads = state.ongoing_downloads.write().await;
-        ongoing_downloads.remove(filename);
-        return;
-    }
-
-    let sha256 = hex::encode(hasher.finalize());
-    debug!(
-        "Background download completed: {} bytes, SHA256: {}",
-        body_size, sha256
-    );
-
-    // Move to final location
-    let final_path =
-        crate::utils::get_nested_path(&state.upload_dir, &sha256, extension.as_deref(), None);
-    if let Some(parent) = final_path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-
-    if let Err(e) = tokio::fs::rename(temp_path, &final_path).await {
-        error!("rename temp -> final failed: {e}");
-        let _ = std::fs::remove_file(temp_path);
-        let mut ongoing_downloads = state.ongoing_downloads.write().await;
-        ongoing_downloads.remove(filename);
-        return;
-    }
-
-    // Update index
-    let key = sha256[..sha256.len().min(64)].to_string();
-    state
-        .file_index
-        .insert(
-            key.clone(),
-            crate::models::FileMetadata {
-                path: final_path,
-                extension,
-                mime_type: Some(content_type.to_string()),
-                size: body_size,
-                created_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                pubkey: None,
-                expiration: None,
-            },
-        )
-        .await;
-
-    // Mark that changes are pending for storage limit enforcement
-    let mut changes_pending = state.changes_pending.write().await;
-    *changes_pending = true;
-
-    // Count the download. Bytes are not counted as served: this is a background
-    // fetch, the client's range request was proxied straight from upstream.
-    state.metrics.files_downloaded.inc();
-
-    // Track bytes downloaded from upstream server
-    // Note: We don't track served_bytes here because this is a background download
-    // The user's range request was already served by proxying directly to upstream
-    state.metrics.track_upstream_download(file_url, body_size);
-
-    info!(
-        "✅ BACKGROUND UPSTREAM DOWNLOAD COMPLETED: {} -> {} ({} bytes)",
-        file_url, sha256, body_size
-    );
-
-    // Remove from ongoing downloads
-    let mut ongoing_downloads = state.ongoing_downloads.write().await;
-    ongoing_downloads.remove(filename);
 }
 
 /// Create a streaming response that reads from a growing file
 async fn create_tailing_stream(
-    reader: File,
-    written_len: Arc<AtomicU64>,
-    notify: Arc<Notify>,
-) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> {
-    stream::unfold((reader, written_len, notify, 0u64), |state| async move {
-        let (mut reader, written_len, notify, mut pos) = state;
+    mut reader: File,
+    mut progress: watch::Receiver<DownloadProgress>,
+    start: u64,
+    end: Option<u64>,
+) -> std::io::Result<impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>>> {
+    reader.seek(SeekFrom::Start(start)).await?;
 
+    Ok(async_stream::try_stream! {
+        let mut position = start;
         loop {
-            let available = written_len.load(Ordering::Acquire);
-            if pos < available {
-                // There are new bytes; read a moderate block
-                let to_read = std::cmp::min(64 * 1024, (available - pos) as usize);
-                let mut buf = vec![0u8; to_read];
+            let snapshot = *progress.borrow_and_update();
+            let available = end.unwrap_or(u64::MAX).min(snapshot.written);
 
-                // Seek to current position and read
-                if reader.seek(SeekFrom::Start(pos)).await.is_err() {
-                    return None;
+            if position < available {
+                let to_read = std::cmp::min(64 * 1024, (available - position) as usize);
+                let mut buffer = vec![0u8; to_read];
+                reader.read_exact(&mut buffer).await?;
+                position += to_read as u64;
+                yield bytes::Bytes::from(buffer);
+                continue;
+            }
+
+            if end.is_some_and(|limit| position >= limit) {
+                break;
+            }
+
+            match snapshot.phase {
+                DownloadPhase::Running => {
+                    progress.changed().await.map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "download progress channel closed",
+                        )
+                    })?;
                 }
-                let n = match reader.read(&mut buf).await {
-                    Ok(n) => n,
-                    Err(_) => return None,
-                };
-
-                if n == 0 {
-                    // EOF reached, wait for more data
-                    notify.notified().await;
-                    continue;
+                DownloadPhase::Complete => {
+                    if end.is_some_and(|limit| position < limit) {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "download completed before the requested range",
+                        ))?;
+                    }
+                    break;
                 }
-
-                pos += n as u64;
-                buf.truncate(n); // Only the actually read bytes
-
-                return Some((
-                    Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(buf)),
-                    (reader, written_len, notify, pos),
-                ));
-            } else {
-                // Wait until downloader has written more
-                notify.notified().await;
+                DownloadPhase::Failed => {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "upstream download failed",
+                    ))?;
+                }
             }
         }
     })
@@ -1796,4 +1499,122 @@ fn apply_streaming_headers(
     );
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{pin_mut, StreamExt};
+    use tokio::io::AsyncWriteExt;
+
+    async fn temp_download_file() -> (std::path::PathBuf, File, File) {
+        let path = std::env::temp_dir().join(format!("almond-tail-{}", uuid::Uuid::new_v4()));
+        let writer = File::create(&path).await.unwrap();
+        let reader = File::open(&path).await.unwrap();
+        (path, writer, reader)
+    }
+
+    #[tokio::test]
+    async fn tailing_stream_joins_mid_download_and_terminates() {
+        let (path, mut writer, reader) = temp_download_file().await;
+        let (progress, receiver) = watch::channel(DownloadProgress {
+            written: 0,
+            phase: DownloadPhase::Running,
+        });
+        let stream = create_tailing_stream(reader, receiver, 0, None)
+            .await
+            .unwrap();
+        pin_mut!(stream);
+
+        writer.write_all(b"hello").await.unwrap();
+        writer.flush().await.unwrap();
+        progress.send_modify(|state| state.written = 5);
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            bytes::Bytes::from_static(b"hello")
+        );
+
+        writer.write_all(b" world").await.unwrap();
+        writer.flush().await.unwrap();
+        progress.send_modify(|state| {
+            state.written = 11;
+            state.phase = DownloadPhase::Complete;
+        });
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            bytes::Bytes::from_static(b" world")
+        );
+        assert!(stream.next().await.is_none());
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tailing_stream_reports_download_failure() {
+        let (path, mut writer, reader) = temp_download_file().await;
+        let (progress, receiver) = watch::channel(DownloadProgress {
+            written: 0,
+            phase: DownloadPhase::Running,
+        });
+        let stream = create_tailing_stream(reader, receiver, 0, None)
+            .await
+            .unwrap();
+        pin_mut!(stream);
+
+        writer.write_all(b"abc").await.unwrap();
+        writer.flush().await.unwrap();
+        progress.send_modify(|state| state.written = 3);
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            bytes::Bytes::from_static(b"abc")
+        );
+        progress.send_modify(|state| state.phase = DownloadPhase::Failed);
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tailing_stream_respects_requested_bounds() {
+        let (path, mut writer, reader) = temp_download_file().await;
+        writer.write_all(b"abcdefgh").await.unwrap();
+        writer.flush().await.unwrap();
+        let (_, receiver) = watch::channel(DownloadProgress {
+            written: 8,
+            phase: DownloadPhase::Complete,
+        });
+        let stream = create_tailing_stream(reader, receiver, 2, Some(6))
+            .await
+            .unwrap();
+        pin_mut!(stream);
+
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            bytes::Bytes::from_static(b"cdef")
+        );
+        assert!(stream.next().await.is_none());
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tailing_stream_rejects_truncated_completed_range() {
+        let (path, mut writer, reader) = temp_download_file().await;
+        writer.write_all(b"abc").await.unwrap();
+        writer.flush().await.unwrap();
+        let (_, receiver) = watch::channel(DownloadProgress {
+            written: 3,
+            phase: DownloadPhase::Complete,
+        });
+        let stream = create_tailing_stream(reader, receiver, 0, Some(5))
+            .await
+            .unwrap();
+        pin_mut!(stream);
+
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            bytes::Bytes::from_static(b"abc")
+        );
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        tokio::fs::remove_file(path).await.unwrap();
+    }
 }
