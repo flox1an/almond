@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use tracing::{error, info, warn};
 
 use crate::helpers::get_extension_from_mime;
-use crate::models::AppState;
+use crate::models::{AppState, FileLocation};
 use crate::services::{file_storage, upload};
 
 /// A reference extracted from an HLS playlist (sha256 hash + optional extension)
@@ -144,26 +144,34 @@ async fn mirror_single_reference(
 
 /// Try to parse child references from a stored m3u8 playlist.
 async fn try_collect_child_references(state: &AppState, sha256: &str) -> Vec<HlsReference> {
-    if let Some(metadata) = file_storage::get_file_metadata(state, sha256).await {
-        match tokio::fs::read_to_string(&metadata.path).await {
-            Ok(content) => {
-                let child_refs = parse_playlist_references(&content);
-                if !child_refs.is_empty() {
-                    info!(
-                        "[HLS] Found {} child references in {}",
-                        child_refs.len(),
-                        sha256
-                    );
-                }
-                child_refs
+    let Some(metadata) = file_storage::get_file_metadata(state, sha256).await else {
+        return Vec::new();
+    };
+    let playlist: Result<String, String> = match &metadata.location {
+        FileLocation::Local(path) => tokio::fs::read_to_string(path)
+            .await
+            .map_err(|error| error.to_string()),
+        FileLocation::S3 { key } => match &state.native_s3 {
+            Some(s3) => s3.read_text(key).await.map_err(|error| error.to_string()),
+            None => return Vec::new(),
+        },
+    };
+    match playlist {
+        Ok(content) => {
+            let child_refs = parse_playlist_references(&content);
+            if !child_refs.is_empty() {
+                info!(
+                    "[HLS] Found {} child references in {}",
+                    child_refs.len(),
+                    sha256
+                );
             }
-            Err(e) => {
-                warn!("[HLS] Failed to read playlist {}: {}", sha256, e);
-                Vec::new()
-            }
+            child_refs
         }
-    } else {
-        Vec::new()
+        Err(error) => {
+            warn!("[HLS] Failed to read playlist {}: {}", sha256, error);
+            Vec::new()
+        }
     }
 }
 

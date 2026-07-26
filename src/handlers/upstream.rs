@@ -1624,7 +1624,7 @@ async fn run_download(
             .insert(
                 key,
                 crate::models::FileMetadata {
-                    path: final_path,
+                    location: crate::models::FileLocation::Local(final_path),
                     extension,
                     mime_type: Some(content_type),
                     size: body_size,

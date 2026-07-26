@@ -5,7 +5,7 @@ use tokio::fs;
 use tracing::{debug, error};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{AppState, FileMetadata};
+use crate::models::{AppState, FileLocation, FileMetadata};
 
 /// Calculate nested directory path for a hash (e.g., a/b/abc123.jpg or a/b/abc123_1234567890.jpg)
 pub fn get_nested_path(
@@ -79,7 +79,7 @@ pub async fn add_to_index(
         .insert(
             key.clone(),
             FileMetadata {
-                path,
+                location: FileLocation::Local(path),
                 extension,
                 mime_type,
                 size,
@@ -123,17 +123,14 @@ pub async fn delete_file(state: &AppState, sha256: &str) -> AppResult<()> {
         .await
         .ok_or_else(|| AppError::NotFound(format!("File not found: {}", sha256)))?;
 
-    // Delete physical file
-    fs::remove_file(&file_metadata.path).await.map_err(|e| {
-        error!(
-            "Failed to delete file {}: {}",
-            file_metadata.path.display(),
-            e
-        );
-        AppError::IoError(format!("Failed to delete file: {}", e))
-    })?;
-
-    debug!("Deleted file from disk: {}", file_metadata.path.display());
+    // Delete physical file when this index entry is local.
+    if let FileLocation::Local(path) = &file_metadata.location {
+        fs::remove_file(path).await.map_err(|e| {
+            error!("Failed to delete file {}: {}", path.display(), e);
+            AppError::IoError(format!("Failed to delete file: {}", e))
+        })?;
+        debug!("Deleted file from disk: {}", path.display());
+    }
 
     // Remove from index
     remove_from_index(state, sha256).await?;

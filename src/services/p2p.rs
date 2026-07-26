@@ -10,7 +10,7 @@ use tokio::fs;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    models::AppState,
+    models::{AppState, FileLocation},
     services::{blob_index::BlobIndex, p2p_webrtc::RealPeerConnectionFactory},
 };
 
@@ -31,7 +31,10 @@ impl AlmondLocalBlobStore {
         self.file_index
             .get(&hash_hex)
             .await
-            .map(|metadata| metadata.path.clone())
+            .and_then(|metadata| match &metadata.location {
+                FileLocation::Local(path) => Some(path.clone()),
+                FileLocation::S3 { .. } => None,
+            })
     }
 }
 

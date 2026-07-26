@@ -219,9 +219,15 @@ pub struct ServeFileMetadata {
     pub size: u64,
 }
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FileLocation {
+    Local(PathBuf),
+    S3 { key: String },
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FileMetadata {
-    pub path: PathBuf,
+    pub location: FileLocation,
     pub extension: Option<String>,
     pub mime_type: Option<String>,
     pub size: u64,
@@ -249,6 +255,8 @@ pub struct CachedFilter {
 pub struct AppState {
     pub upload_dir: PathBuf,
     pub file_index: Arc<BlobIndex>,
+    /// Optional S3-compatible backend for native blobs. Upstream cache stays local.
+    pub native_s3: Option<crate::services::native_storage::SharedNativeS3Storage>,
     pub serve_file_index: Arc<RwLock<HashMap<String, Arc<ServeFileMetadata>>>>,
     pub serve_files_path: Option<PathBuf>,
     pub serve_files_manifest_name: String,

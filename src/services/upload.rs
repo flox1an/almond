@@ -320,14 +320,41 @@ pub async fn finalize_upload(
     mime_type: Option<String>,
     expiration: Option<u64>,
 ) -> AppResult<()> {
-    let final_path =
-        file_storage::get_nested_path(&state.upload_dir, sha256, extension.as_deref(), expiration);
-
-    file_storage::move_file(temp_path, &final_path).await?;
-    file_storage::add_to_index(
-        state, sha256, final_path, extension, mime_type, size, expiration,
-    )
-    .await?;
+    if let Some(s3) = &state.native_s3 {
+        let key = s3
+            .put(temp_path, sha256, extension.as_deref(), expiration)
+            .await?;
+        state
+            .file_index
+            .insert(
+                sha256.to_owned(),
+                crate::models::FileMetadata {
+                    location: crate::models::FileLocation::S3 { key },
+                    extension,
+                    mime_type,
+                    size,
+                    created_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    pubkey: None,
+                    expiration,
+                },
+            )
+            .await;
+    } else {
+        let final_path = file_storage::get_nested_path(
+            &state.upload_dir,
+            sha256,
+            extension.as_deref(),
+            expiration,
+        );
+        file_storage::move_file(temp_path, &final_path).await?;
+        file_storage::add_to_index(
+            state, sha256, final_path, extension, mime_type, size, expiration,
+        )
+        .await?;
+    }
     file_storage::mark_changes_pending(state).await;
 
     Ok(())

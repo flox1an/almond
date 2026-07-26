@@ -114,6 +114,42 @@ makes the body byte-stable and the validator meaningful.
 - `CLEANUP_INTERVAL_SECS`: Interval for lightweight cleanup checks in seconds (default: 30). Full storage cleanup runs when changes are pending, plus an occasional full scan.
 - `MAX_FILE_AGE_DAYS`: Maximum age of files in days, 0 for no limit (default: 0)
 
+### Optional S3-Compatible Native Storage
+New uploads and explicit mirrors use S3 when all four variables are configured. Existing local blobs and automatic upstream cache fills remain local; Almond continues to proxy every blob response.
+
+All four variables are required together. Supplying only a subset fails startup.
+
+```dotenv
+ALMOND_S3_ENDPOINT=https://<endpoint>
+ALMOND_S3_BUCKET=<bucket-name>
+ALMOND_S3_ACCESS_KEY_ID=<access-key-id>
+ALMOND_S3_SECRET_ACCESS_KEY=<secret-access-key>
+```
+
+Cloudflare R2:
+```dotenv
+ALMOND_S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+ALMOND_S3_BUCKET=<bucket-name>
+ALMOND_S3_ACCESS_KEY_ID=<r2-access-key-id>
+ALMOND_S3_SECRET_ACCESS_KEY=<r2-secret-access-key>
+```
+
+MinIO:
+```dotenv
+ALMOND_S3_ENDPOINT=http://localhost:9000
+ALMOND_S3_BUCKET=<bucket-name>
+ALMOND_S3_ACCESS_KEY_ID=<minio-access-key>
+ALMOND_S3_SECRET_ACCESS_KEY=<minio-secret-key>
+```
+
+Backblaze B2:
+```dotenv
+ALMOND_S3_ENDPOINT=https://s3.<region>.backblazeb2.com
+ALMOND_S3_BUCKET=<bucket-name>
+ALMOND_S3_ACCESS_KEY_ID=<b2-key-id>
+ALMOND_S3_SECRET_ACCESS_KEY=<b2-application-key>
+```
+
 ### Upstream Configuration
 - `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback (optional)
 - `UPSTREAM_MODE`: How to handle upstream requests (default: `proxy`)

@@ -209,6 +209,19 @@ async fn load_app_state() -> AppState {
         .await
         .expect("Failed to create storage directory");
     info!("⚙️ Storage path: {}", upload_dir.display());
+    let native_s3 = match crate::services::native_storage::S3Settings::from_env() {
+        Ok(Some(settings)) => {
+            info!("S3 native storage enabled for bucket {}", settings.bucket);
+            Some(Arc::new(
+                crate::services::native_storage::NativeS3Storage::connect(settings).await,
+            ))
+        }
+        Ok(None) => None,
+        Err(message) => {
+            error!("{message}");
+            std::process::exit(1);
+        }
+    };
 
     // Clear temp directory on startup
     let temp_dir = upload_dir.join("temp");
@@ -233,6 +246,18 @@ async fn load_app_state() -> AppState {
 
     let file_index = Arc::new(crate::services::blob_index::BlobIndex::new());
     build_file_index(&upload_dir, &file_index).await;
+    if let Some(s3) = &native_s3 {
+        for (sha256, metadata) in s3
+            .list_all()
+            .await
+            .unwrap_or_else(|error| panic!("Failed to build S3 blob index: {error}"))
+        {
+            // Native files retain precedence during the V1 no-migration transition.
+            if !file_index.contains(&sha256).await {
+                file_index.insert(sha256, metadata).await;
+            }
+        }
+    }
 
     let serve_file_index = Arc::new(RwLock::new(HashMap::new()));
     let serve_files_path = env::var("SERVE_FILES_PATH")
@@ -632,6 +657,7 @@ async fn load_app_state() -> AppState {
     }
 
     AppState {
+        native_s3,
         upload_dir,
         file_index,
         serve_file_index,

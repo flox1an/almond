@@ -100,14 +100,18 @@ impl BlobIndex {
         self.entries.write().await.remove(sha256)
     }
 
-    /// Remove `sha256` only if its indexed path still matches `path`, guarding
-    /// against evicting an entry that was re-uploaded while we were deleting.
-    pub async fn remove_if_path_matches(&self, sha256: &str, path: &std::path::Path) -> bool {
+    /// Remove `sha256` only if its indexed storage location still matches,
+    /// guarding against evicting an entry that was re-published concurrently.
+    pub async fn remove_if_location_matches(
+        &self,
+        sha256: &str,
+        location: &crate::models::FileLocation,
+    ) -> bool {
         let mut entries = self.entries.write().await;
         let matches = entries
             .map
             .get(sha256)
-            .map(|metadata| metadata.path == path)
+            .map(|metadata| metadata.location == *location)
             .unwrap_or(false);
         if matches {
             entries.remove(sha256);
@@ -158,7 +162,10 @@ mod tests {
 
     fn meta(size: u64) -> FileMetadata {
         FileMetadata {
-            path: std::path::PathBuf::from(format!("/tmp/{}", size)),
+            location: crate::models::FileLocation::Local(std::path::PathBuf::from(format!(
+                "/tmp/{}",
+                size
+            ))),
             extension: None,
             mime_type: None,
             size,
@@ -219,14 +226,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_if_path_matches_guards_against_reupload() {
+    async fn remove_if_location_matches_guards_against_reupload() {
         let index = BlobIndex::new();
         index.insert("a".into(), meta(100)).await;
 
-        assert!(!index.remove_if_path_matches("a", std::path::Path::new("/tmp/other")).await);
+        assert!(
+            !index
+                .remove_if_location_matches(
+                    "a",
+                    &crate::models::FileLocation::Local(std::path::PathBuf::from("/tmp/other")),
+                )
+                .await
+        );
         assert_eq!(index.stats().await.count, 1);
 
-        assert!(index.remove_if_path_matches("a", std::path::Path::new("/tmp/100")).await);
+        assert!(
+            index
+                .remove_if_location_matches(
+                    "a",
+                    &crate::models::FileLocation::Local(std::path::PathBuf::from("/tmp/100")),
+                )
+                .await
+        );
         assert_eq!(index.stats().await.count, 0);
     }
 

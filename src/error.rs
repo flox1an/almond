@@ -32,6 +32,7 @@ pub enum AppError {
     NetworkError(String),
     Timeout(String),
     BadGateway(String),
+    ServiceUnavailable(String),
 
     /// Internal errors
     InternalError(String),
@@ -63,6 +64,7 @@ impl fmt::Display for AppError {
             AppError::NetworkError(msg) => write!(f, "Network error: {}", msg),
             AppError::Timeout(msg) => write!(f, "Timeout: {}", msg),
             AppError::BadGateway(msg) => write!(f, "Bad gateway: {}", msg),
+            AppError::ServiceUnavailable(msg) => write!(f, "Service unavailable: {}", msg),
             AppError::InternalError(msg) => write!(f, "Internal error: {}", msg),
         }
     }
@@ -113,6 +115,7 @@ impl IntoResponse for AppError {
             AppError::NetworkError(_) => StatusCode::BAD_REQUEST,
             AppError::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
             AppError::BadGateway(_) => StatusCode::BAD_GATEWAY,
+            AppError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             AppError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
@@ -149,6 +152,7 @@ impl From<AppError> for StatusCode {
             AppError::NetworkError(_) => StatusCode::BAD_REQUEST,
             AppError::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
             AppError::BadGateway(_) => StatusCode::BAD_GATEWAY,
+            AppError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             AppError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

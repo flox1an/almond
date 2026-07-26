@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::AppError;
 use crate::helpers::*;
-use crate::models::AppState;
+use crate::models::{AppState, FileLocation};
 use crate::services::{auth, cashu, file_storage, hls, upload};
 
 /// Check if payment is required and process it
@@ -249,7 +249,16 @@ pub async fn mirror_blob(
             // Read the stored playlist to parse references
             if let Some(metadata) = file_storage::get_file_metadata(&state, &expected_sha256).await
             {
-                match tokio::fs::read_to_string(&metadata.path).await {
+                let playlist: Result<String, String> = match &metadata.location {
+                    FileLocation::Local(path) => tokio::fs::read_to_string(path)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    FileLocation::S3 { key } => match &state.native_s3 {
+                        Some(s3) => s3.read_text(key).await.map_err(|error| error.to_string()),
+                        None => Err("S3 backend is not configured".to_owned()),
+                    },
+                };
+                match playlist {
                     Ok(content) => {
                         let references = hls::parse_playlist_references(&content);
                         if !references.is_empty() {
@@ -271,12 +280,10 @@ pub async fn mirror_blob(
                             });
                         }
                     }
-                    Err(e) => {
-                        warn!(
-                            "[HLS] Failed to read playlist file for recursive mirror: {}",
-                            e
-                        );
-                    }
+                    Err(e) => warn!(
+                        "[HLS] Failed to read playlist file for recursive mirror: {}",
+                        e
+                    ),
                 }
             }
         } else {

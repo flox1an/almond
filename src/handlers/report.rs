@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tokio::fs;
 use tracing::{error, info, warn};
 
-use crate::models::{AppState, FeatureMode, ReportAction};
+use crate::models::{AppState, FeatureMode, FileLocation, ReportAction};
 
 /// NIP-56 Report event structure
 #[derive(Debug, Deserialize)]
@@ -115,7 +115,9 @@ pub async fn report_blob(
         // Check trusted pubkeys for WOT mode
         let trusted = state.trusted_pubkeys.read().await;
         trusted.contains_key(&reporter_pubkey)
-    } else { state.feature_report_enabled == FeatureMode::Public };
+    } else {
+        state.feature_report_enabled == FeatureMode::Public
+    };
 
     if !is_allowed {
         error!(
@@ -186,7 +188,18 @@ pub async fn report_blob(
             }
         };
 
-        let file_path = file_metadata.path.clone();
+        let FileLocation::Local(file_path) = &file_metadata.location else {
+            if let Some(s3) = &state.native_s3 {
+                if let Err(error) = s3.delete_matching(sha256).await {
+                    error!("Failed to delete reported S3 blob {}: {}", sha256, error);
+                    continue;
+                }
+                state.file_index.remove(sha256).await;
+                processed_hashes.push(sha256.clone());
+            }
+            continue;
+        };
+        let file_path = file_path.clone();
         info!(
             "📁 Processing reported blob: {} at {}",
             sha256,

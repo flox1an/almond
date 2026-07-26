@@ -8,7 +8,7 @@ use std::{
 use tokio::fs;
 use tracing::{error, info, warn};
 
-use crate::models::{AppState, FileMetadata};
+use crate::models::{AppState, FileLocation, FileMetadata};
 use crate::services::blob_index::BlobIndex;
 
 pub fn get_nested_path(
@@ -64,7 +64,7 @@ pub async fn build_file_index(upload_dir: &Path, index: &BlobIndex) {
                             map.insert(
                                 key,
                                 FileMetadata {
-                                    path,
+                                    location: FileLocation::Local(path),
                                     extension,
                                     mime_type,
                                     size: metadata.len(),
@@ -215,23 +215,41 @@ pub async fn enforce_storage_limits(state: &AppState) {
             _ => info!("🗑 Deleting file to enforce limits: {}", sha256),
         }
 
-        if let Err(e) = fs::remove_file(&metadata.path).await {
-            error!("❌ Failed to delete file {}: {}", sha256, e);
+        let deleted = match &metadata.location {
+            FileLocation::Local(path) => match fs::remove_file(path).await {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(error) => {
+                    error!("❌ Failed to delete file {}: {}", sha256, error);
+                    false
+                }
+            },
+            FileLocation::S3 { .. } => match &state.native_s3 {
+                Some(s3) => match s3.delete_matching(&sha256).await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        error!("❌ Failed to delete S3 blob {}: {}", sha256, error);
+                        false
+                    }
+                },
+                None => false,
+            },
+        };
+        if !deleted {
             continue;
         }
-
         match reason {
             "expiration" => deleted_by_expiration += 1,
             "age" => deleted_by_age += 1,
             _ => deleted_by_limits += 1,
         }
-        deleted_files.push((sha256, metadata.path.clone()));
+        deleted_files.push((sha256, metadata.location.clone()));
     }
 
-    for (sha256, deleted_path) in deleted_files {
+    for (sha256, deleted_location) in deleted_files {
         state
             .file_index
-            .remove_if_path_matches(&sha256, &deleted_path)
+            .remove_if_location_matches(&sha256, &deleted_location)
             .await;
     }
 

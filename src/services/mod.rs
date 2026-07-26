@@ -5,6 +5,7 @@ pub mod cashu;
 pub mod download;
 pub mod file_storage;
 pub mod hls;
+pub mod native_storage;
 pub mod p2p;
 pub mod p2p_webrtc;
 pub mod serve_files;

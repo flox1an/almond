@@ -5,9 +5,9 @@ use axum::{
     response::Response,
 };
 use tokio::fs;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
-use crate::models::AppState;
+use crate::models::{AppState, FileLocation};
 use crate::services::auth;
 
 /// Handle blob deletion
@@ -57,31 +57,34 @@ pub async fn delete_blob(
 
     debug!("✅ Delete authorization tags validated");
 
-    // Check if blob exists in file index
-    let file_metadata = state.file_index.get(&sha256).await.ok_or_else(|| {
-        warn!("Blob not found in index: {}", sha256);
-        StatusCode::NOT_FOUND
-    })?;
-    let file_path = file_metadata.path.clone();
+    // Delete every relevant native copy. Absence in either backend is success;
+    // a backend failure is availability uncertainty and must not become a 404.
+    if let Some(file_metadata) = state.file_index.get(&sha256).await {
+        if let FileLocation::Local(file_path) = &file_metadata.location {
+            match fs::remove_file(file_path).await {
+                Ok(()) => debug!("✅ Deleted local blob: {}", file_path.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    error!(
+                        "Failed to delete local blob {}: {}",
+                        file_path.display(),
+                        error
+                    );
+                    return Err(StatusCode::SERVICE_UNAVAILABLE);
+                }
+            }
+        }
+    }
 
-    debug!("📁 Found blob at: {}", file_path.display());
+    if let Some(s3) = &state.native_s3 {
+        s3.delete_matching(&sha256).await.map_err(|error| {
+            error!("Failed to delete S3 blob {sha256}: {error}");
+            StatusCode::SERVICE_UNAVAILABLE
+        })?;
+    }
 
-    // Delete the physical file
-    fs::remove_file(&file_path).await.map_err(|e| {
-        error!("Failed to delete file {}: {}", file_path.display(), e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    debug!("✅ Deleted file from disk: {}", file_path.display());
-
-    // Remove from file index
     state.file_index.remove(&sha256).await;
-
-    debug!("✅ Removed blob from index: {}", sha256);
-
-    // Mark changes pending for cleanup (empty directory cleanup)
-    let mut changes_pending = state.changes_pending.write().await;
-    *changes_pending = true;
+    *state.changes_pending.write().await = true;
 
     info!("🎉 Successfully deleted blob: {}", sha256);
 

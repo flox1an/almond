@@ -1,6 +1,6 @@
 [package]
 name = "almond"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 
 [[bin]]
@@ -48,6 +48,9 @@ serde_html_form = "0.4.0"
 prometheus = "0.14"
 fs2 = "0.4"
 rmp = "0.8.15"
+aws-config = { version = "1.8", features = ["behavior-version-latest"] }
+aws-credential-types = "1.2"
+aws-sdk-s3 = "1.137"
 
 # Global allocator: glibc malloc degrades badly under many concurrent
 # streaming responses (one BytesMut per chunk per connection).

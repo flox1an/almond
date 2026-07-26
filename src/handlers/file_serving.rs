@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 use crate::constants::*;
 use crate::error::AppError;
 use crate::helpers::{get_mime_type, track_download_stats};
-use crate::models::{AppState, FileRequestQuery};
+use crate::models::{AppState, FileLocation, FileRequestQuery};
 use crate::services::blossom_servers;
 use crate::services::cashu;
 use crate::utils::{find_file, parse_range_header, RangeSpec};
@@ -39,7 +39,24 @@ pub async fn handle_file_request(
     if let Some(file_hash) = crate::utils::get_sha256_hash_from_filename(&filename) {
         debug!("Found file hash: {}", file_hash);
 
-        match find_file(&state.file_index, file_hash).await {
+        let native_file = find_file(&state.file_index, file_hash).await;
+        let file_metadata = if native_file.is_some() {
+            native_file
+        } else if let Some(s3) = &state.native_s3 {
+            match s3.find(file_hash).await? {
+                Some(metadata) => {
+                    state
+                        .file_index
+                        .insert(file_hash.to_owned(), metadata.clone())
+                        .await;
+                    Some(std::sync::Arc::new(metadata))
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        match file_metadata {
             Some(file_metadata) => {
                 // File is available locally - serve it immediately, skip all upstream logic
                 debug!(
@@ -92,13 +109,31 @@ pub async fn handle_file_request(
 
                 // Track download statistics
                 track_download_stats(&state, file_metadata.size);
-                serve_file_with_range(
-                    &file_metadata.path,
-                    file_metadata.mime_type.as_deref(),
-                    req.headers(),
-                    &etag,
-                )
-                .await
+                match &file_metadata.location {
+                    FileLocation::Local(path) => {
+                        serve_file_with_range(
+                            path,
+                            file_metadata.mime_type.as_deref(),
+                            req.headers(),
+                            &etag,
+                        )
+                        .await
+                    }
+                    FileLocation::S3 { key } => {
+                        serve_s3_with_range(
+                            state
+                                .native_s3
+                                .as_ref()
+                                .expect("S3 indexed without configured backend"),
+                            key,
+                            file_metadata.mime_type.as_deref(),
+                            file_metadata.size,
+                            req.headers(),
+                            &etag,
+                        )
+                        .await
+                    }
+                }
             }
             None => {
                 if let Some(serve_file_metadata) =
@@ -530,4 +565,70 @@ async fn serve_file_with_range(
                 })
         }
     }
+}
+
+async fn serve_s3_with_range(
+    storage: &crate::services::native_storage::NativeS3Storage,
+    key: &str,
+    mime_type: Option<&str>,
+    total_size: u64,
+    headers: &axum::http::HeaderMap,
+    etag: &str,
+) -> Result<Response, AppError> {
+    let honor_range = headers
+        .get(header::IF_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| etag_list_matches(value, etag))
+        .unwrap_or(true);
+    let range = match (
+        honor_range,
+        headers
+            .get(header::RANGE)
+            .and_then(|value| value.to_str().ok()),
+    ) {
+        (true, Some(value)) => parse_range_header(value, total_size),
+        _ => RangeSpec::Ignore,
+    };
+    let (s3_range, status, content_length, content_range) = match range {
+        RangeSpec::Satisfiable { start, end } => (
+            Some(format!("bytes={start}-{end}")),
+            StatusCode::PARTIAL_CONTENT,
+            end - start + 1,
+            Some(format!("bytes {start}-{end}/{total_size}")),
+        ),
+        RangeSpec::Unsatisfiable => {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{total_size}"))
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::ETAG, etag)
+                .body(Body::empty())
+                .map_err(|error| {
+                    AppError::InternalError(format!("Failed to build S3 range response: {error}"))
+                });
+        }
+        RangeSpec::Ignore => (None, StatusCode::OK, total_size, None),
+    };
+    let output = storage.get(key, s3_range.as_deref()).await?;
+    let stream = ReaderStream::new(output.body.into_async_read());
+    let mut response = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, mime_type.unwrap_or(DEFAULT_MIME_TYPE))
+        .header(header::CONTENT_LENGTH, content_length)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, CACHE_CONTROL_IMMUTABLE)
+        .body(Body::from_stream(stream))
+        .map_err(|error| {
+            AppError::InternalError(format!("Failed to build S3 response: {error}"))
+        })?;
+    if let Some(content_range) = content_range {
+        response.headers_mut().insert(
+            header::CONTENT_RANGE,
+            content_range.parse().map_err(|error| {
+                AppError::InternalError(format!("Invalid S3 content range: {error}"))
+            })?,
+        );
+    }
+    Ok(response)
 }
