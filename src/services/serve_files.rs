@@ -139,6 +139,10 @@ async fn write_manifest(manifest_path: &Path, entries: &[(String, String)]) -> s
             .await?;
     }
 
+    // Tokio files can retain an in-flight write after `write_all` completes.
+    // Make the manifest fully observable before publishing the refreshed index.
+    file.flush().await?;
+
     Ok(())
 }
 
