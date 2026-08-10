@@ -279,15 +279,15 @@ pub async fn finalize_upload(
     mime_type: Option<String>,
     expiration: Option<u64>,
 ) -> AppResult<()> {
-    file_storage::publish_blob(
+    crate::services::intake::accept(
         state,
         temp,
-        file_storage::BlobPublication {
+        crate::services::intake::Accepted {
             sha256: sha256.to_owned(),
             origin: crate::models::BlobOrigin::Upload,
+            size,
             extension,
             mime_type,
-            size,
             expiration,
         },
     )

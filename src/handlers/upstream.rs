@@ -12,6 +12,7 @@ use sha2::Digest;
 use tokio::{fs::File, io::AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
+use crate::services::intake;
 use crate::services::upstream_candidates;
 
 use crate::constants::CACHE_CONTROL_IMMUTABLE;
@@ -332,7 +333,7 @@ async fn try_head_and_redirect(
                     );
                 } else {
                     // Check size limit before starting background download
-                    let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
+                    let max_size_bytes = intake::size_limit(state, intake::Intake::UpstreamFetch);
                     let should_cache = match content_length {
                         Some(len) if len > max_size_bytes => {
                             debug!(
@@ -910,7 +911,7 @@ async fn stream_and_save_from_upstream(
     negotiation: Option<NegotiationGuard>,
 ) -> Result<Response<Body>, StatusCode> {
     let content_length = upstream_resp.content_length();
-    let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
+    let max_size_bytes = intake::size_limit(state, intake::Intake::UpstreamFetch);
     if content_length.is_some_and(|length| length > max_size_bytes) {
         let temp_path = prepared.handle.temp_path.clone();
         drop(prepared); // guard drop → map removal
@@ -1005,7 +1006,7 @@ async fn run_download(
 ) {
     let handle = prepared.handle.clone();
     let guard = prepared.take_guard();
-    let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
+    let max_size_bytes = intake::size_limit(&state, intake::Intake::UpstreamFetch);
     let expected_len = handle.total_len.or_else(|| upstream_resp.content_length());
     let content_type = handle.content_type.clone();
     let extension = get_extension_from_mime(&content_type);
@@ -1067,15 +1068,15 @@ async fn run_download(
         }
         // The coalescing machinery owned this file while followers tailed it;
         // publication is the point where ownership transfers to storage.
-        let published = crate::services::file_storage::publish_blob(
+        let published = intake::accept(
             &state,
             crate::services::file_storage::TempBlob::adopt(temp_path.clone()),
-            crate::services::file_storage::BlobPublication {
+            intake::Accepted {
                 sha256: sha256.clone(),
                 origin: crate::models::BlobOrigin::UpstreamCache,
+                size: body_size,
                 extension,
                 mime_type: Some(content_type),
-                size: body_size,
                 expiration: None,
             },
         )

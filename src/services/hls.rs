@@ -86,8 +86,10 @@ async fn mirror_single_reference(
         .map_err(|error| format!("Failed to fetch segment: {error}"))?;
     let content_type = crate::helpers::extract_content_type_from_response(response.headers());
     let extension = get_extension_from_mime(&content_type);
-    let max_size_bytes =
-        (state.max_upstream_download_size_mb * 1024 * 1024).min(state.max_blob_size_bytes);
+    let max_size_bytes = crate::services::intake::size_limit(
+        state,
+        crate::services::intake::Intake::UpstreamFetch,
+    );
     file_storage::ensure_storage_capacity(
         state,
         response.content_length().unwrap_or(max_size_bytes),
@@ -124,7 +126,11 @@ async fn mirror_single_reference(
 }
 
 /// Try to parse child references from a stored m3u8 playlist.
-async fn try_collect_child_references(state: &AppState, sha256: &str) -> Vec<HlsReference> {
+/// Read a stored playlist and parse the blobs it references.
+///
+/// Shared with the mirror handler, which used to keep a byte-identical copy of
+/// the read-and-parse rather than call the function that already existed.
+pub async fn collect_playlist_references(state: &AppState, sha256: &str) -> Vec<HlsReference> {
     let Some(metadata) = file_storage::get_file_metadata(state, sha256).await else {
         return Vec::new();
     };
@@ -210,7 +216,7 @@ pub async fn mirror_hls_references(
                 }
             }
             if reference.extension.as_deref() == Some("m3u8") {
-                for child in try_collect_child_references(&state, &reference.sha256).await {
+                for child in collect_playlist_references(&state, &reference.sha256).await {
                     if seen.len() >= MAX_HLS_REFERENCES_TOTAL {
                         break;
                     }

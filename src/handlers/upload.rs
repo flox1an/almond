@@ -15,8 +15,8 @@ use crate::helpers::{
     extract_content_type, extract_content_type_from_response, extract_expiration,
     get_extension_from_mime, track_upload_stats,
 };
-use crate::models::{AppState, FileLocation};
-use crate::services::{auth, authorization, cashu, file_storage, hls, upload};
+use crate::models::AppState;
+use crate::services::{auth, authorization, cashu, file_storage, hls, intake, upload};
 
 /// Handle file uploads - REFACTORED VERSION
 pub async fn upload_file(
@@ -46,7 +46,12 @@ pub async fn upload_file(
     // required even when a transport layer already rejects oversized bodies.
     let body_stream = req.into_body().into_data_stream();
     let (sha256, total_bytes) =
-        upload::stream_to_temp_file(body_stream, temp.path(), state.max_blob_size_bytes).await?;
+        upload::stream_to_temp_file(
+            body_stream,
+            temp.path(),
+            intake::size_limit(&state, intake::Intake::ClientUpload),
+        )
+        .await?;
 
     // Validate authorization matches the hash (must come before payment check)
     authorized.bind(&state, &sha256).await?;
@@ -119,8 +124,7 @@ pub async fn mirror_blob(
     let response = upload::fetch_from_url(url).await?;
     let content_type = extract_content_type_from_response(response.headers());
     let content_length = response.content_length();
-    let max_size_bytes =
-        (state.max_upstream_download_size_mb * 1024 * 1024).min(state.max_blob_size_bytes);
+    let max_size_bytes = intake::size_limit(&state, intake::Intake::UpstreamFetch);
     upload::check_size_limit(content_length, max_size_bytes)?;
     let declared_size = content_length.ok_or_else(|| {
         AppError::BadRequest("Mirror source must provide Content-Length".to_string())
@@ -178,45 +182,26 @@ pub async fn mirror_blob(
     // HLS recursive mirror: if this is a playlist, mirror referenced segments in background
     if hls::is_hls_playlist(&content_type) {
         if let Some(origin_base_url) = hls::extract_origin_base_url(url) {
-            // Read the stored playlist to parse references
-            if let Some(metadata) = file_storage::get_file_metadata(&state, &expected_sha256).await
-            {
-                let playlist: Result<String, String> = match &metadata.location {
-                    FileLocation::Local(path) => tokio::fs::read_to_string(path)
-                        .await
-                        .map_err(|error| error.to_string()),
-                    FileLocation::S3 { key } => match &state.native_s3 {
-                        Some(s3) => s3.read_text(key).await.map_err(|error| error.to_string()),
-                        None => Err("S3 backend is not configured".to_owned()),
-                    },
-                };
-                match playlist {
-                    Ok(content) => {
-                        let references = hls::parse_playlist_references(&content);
-                        if !references.is_empty() {
-                            debug!(
-                                "[HLS] Detected playlist with {} references, spawning background mirror from {}",
-                                references.len(),
-                                origin_base_url
-                            );
-                            let state_clone = state.clone();
-                            let concurrency = state.hls_mirror_concurrency;
-                            tokio::spawn(async move {
-                                hls::mirror_hls_references(
-                                    state_clone,
-                                    origin_base_url,
-                                    references,
-                                    concurrency,
-                                )
-                                .await;
-                            });
-                        }
-                    }
-                    Err(e) => warn!(
-                        "[HLS] Failed to read playlist file for recursive mirror: {}",
-                        e
-                    ),
-                }
+            let references = hls::collect_playlist_references(&state, &expected_sha256).await;
+            if references.is_empty() {
+                debug!("[HLS] Playlist {expected_sha256} references nothing to mirror");
+            } else {
+                debug!(
+                    "[HLS] Detected playlist with {} references, spawning background mirror from {}",
+                    references.len(),
+                    origin_base_url
+                );
+                let state_clone = state.clone();
+                let concurrency = state.hls_mirror_concurrency;
+                tokio::spawn(async move {
+                    hls::mirror_hls_references(
+                        state_clone,
+                        origin_base_url,
+                        references,
+                        concurrency,
+                    )
+                    .await;
+                });
             }
         } else {
             warn!("[HLS] Could not extract origin base URL from: {}", url);

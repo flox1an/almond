@@ -8,6 +8,7 @@ pub mod chunk_sessions;
 pub mod download;
 pub mod file_storage;
 pub mod hls;
+pub mod intake;
 pub mod native_storage;
 pub mod p2p;
 pub mod p2p_webrtc;
