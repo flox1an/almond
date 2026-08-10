@@ -10,7 +10,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, SeekFrom},
 };
 use tokio_util::io::ReaderStream;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::constants::{
     CACHE_CONTROL_IMMUTABLE, DEFAULT_MIME_TYPE, FILE_STREAM_BUFFER_SIZE,
@@ -24,6 +24,51 @@ use crate::services::cashu;
 use crate::services::file_storage;
 use crate::utils::{find_file, parse_range_header, RangeSpec};
 
+/// How long a proven-absent hash stays absent before upstream is retried.
+const UPSTREAM_MISS_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Where a requested blob's bytes come from.
+///
+/// The decision used to exist only as control flow inside a 300-line handler,
+/// which is why the ETag, HEAD, payment and statistics preamble was written
+/// out once per source and drifted between them. Naming the outcome lets the
+/// serving path be written once.
+enum BlobSource {
+    /// Held by this server, on disk or in the native backend.
+    Indexed(std::sync::Arc<crate::models::FileMetadata>),
+    /// A read-only file from the serve-files directory.
+    ServeFile(std::sync::Arc<crate::models::ServeFileMetadata>),
+    /// Not held here. The upstream tiers must be walked.
+    Upstream(Box<UpstreamPlan>),
+    /// Proven absent upstream recently enough to answer without asking again.
+    RecentlyMissing,
+}
+
+/// The request-scoped upstream inputs, after feature gating and trust checks.
+pub struct UpstreamPlan {
+    custom_origin: Option<String>,
+    xs_servers: Option<Vec<String>>,
+    author_pubkey: Option<nostr_relay_pool::prelude::PublicKey>,
+}
+
+impl UpstreamPlan {
+    /// A plan naming specific servers is request-scoped, so its failures say
+    /// nothing about whether the blob exists anywhere else and must not be
+    /// cached as a miss.
+    const fn names_specific_servers(&self) -> bool {
+        self.custom_origin.is_some() || self.xs_servers.is_some()
+    }
+}
+
+/// The bytes behind a resolved blob, and who can read them.
+enum BlobBytes<'a> {
+    LocalFile(&'a std::path::Path),
+    Native {
+        storage: &'a crate::services::native_storage::SharedNativeS3Storage,
+        key: &'a str,
+    },
+}
+
 /// Handle file requests (GET/HEAD)
 pub async fn handle_file_request(
     AxumPath(filename): AxumPath<String>,
@@ -31,304 +76,239 @@ pub async fn handle_file_request(
     Query(query): Query<FileRequestQuery>,
     req: Request,
 ) -> Result<Response, AppError> {
-    // Extract range header for logging
-    let range_header = req
-        .headers()
-        .get(header::RANGE)
-        .and_then(|h| h.to_str().ok())
-        .map_or_else(|| "none".to_string(), ToString::to_string);
+    let Some(file_hash) = crate::utils::get_sha256_hash_from_filename(&filename) else {
+        return Err(AppError::NotFound("Invalid filename format".to_string()));
+    };
 
-    // First, check if file exists locally - if it does, serve it immediately without upstream lookup
-    if let Some(file_hash) = crate::utils::get_sha256_hash_from_filename(&filename) {
-        debug!("Found file hash: {}", file_hash);
+    // Split the request up front: a borrowed `Request` is not `Send`, because
+    // its body is not `Sync`, and every path below awaits.
+    let (parts, _body) = req.into_parts();
+    let headers = &parts.headers;
+    let method = &parts.method;
 
-        let native_file = find_file(&state.file_index, file_hash).await;
-        let file_metadata = if native_file.is_some() {
-            native_file
-        } else if let Some(s3) = &state.native_s3 {
-            match s3.find(file_hash).await? {
-                Some(metadata) => Some(
-                    file_storage::publish_existing_metadata(&state, file_hash.to_owned(), metadata)
-                        .await?,
-                ),
-                None => None,
-            }
-        } else {
-            None
-        };
-        if let Some(file_metadata) = file_metadata {
-            // File is available locally - serve it immediately, skip all upstream logic
-            debug!(
-                "File {} found locally, serving immediately (skipping upstream lookup)",
-                file_hash
-            );
-
-            let etag = blob_etag(file_hash);
-            if let Some(response) = check_not_modified(req.headers(), &etag)? {
-                return Ok(response);
-            }
-
-            if req.method() == Method::HEAD {
-                return build_blob_head_response(
-                    file_metadata.mime_type.as_deref(),
-                    file_metadata.size,
-                    &etag,
-                );
-            }
-
-            // Check payment for download if required
-            cashu::charge(
+    match resolve_blob(&state, file_hash, &query).await? {
+        BlobSource::Indexed(metadata) => {
+            let bytes = match &metadata.location {
+                FileLocation::Local(path) => BlobBytes::LocalFile(path),
+                FileLocation::S3 { key } => BlobBytes::Native {
+                    storage: state.native_s3.as_ref().ok_or_else(|| {
+                        AppError::ServiceUnavailable("S3 storage is not configured".to_string())
+                    })?,
+                    key,
+                },
+            };
+            serve_blob(
                 &state,
-                req.headers(),
-                cashu::PaidOperation::Download,
-                file_metadata.size,
+                headers,
+                method,
+                file_hash,
+                metadata.size,
+                metadata.mime_type.as_deref(),
+                bytes,
             )
-            .await?;
-
-            // Track download statistics
-            track_download_stats(&state, file_metadata.size);
-            match &file_metadata.location {
-                FileLocation::Local(path) => {
-                    serve_file_with_range(
-                        path,
-                        file_metadata.mime_type.as_deref(),
-                        req.headers(),
-                        &etag,
-                    )
-                    .await
-                }
-                FileLocation::S3 { key } => {
-                    serve_s3_with_range(
-                        state
-                            .native_s3
-                            .as_ref()
-                            .expect("S3 indexed without configured backend"),
-                        key,
-                        file_metadata.mime_type.as_deref(),
-                        file_metadata.size,
-                        req.headers(),
-                        &etag,
-                    )
-                    .await
-                }
-            }
-        } else {
-            if let Some(serve_file_metadata) =
-                crate::services::serve_files::get_serve_file(&state.serve_file_index, file_hash)
-                    .await
-            {
-                debug!(
-                    "File {} found in serve files index, serving read-only",
-                    file_hash
-                );
-
-                let etag = blob_etag(file_hash);
-                if let Some(response) = check_not_modified(req.headers(), &etag)? {
-                    return Ok(response);
-                }
-
-                if req.method() == Method::HEAD {
-                    return build_blob_head_response(
-                        serve_file_metadata.mime_type.as_deref(),
-                        serve_file_metadata.size,
-                        &etag,
-                    );
-                }
-
-                cashu::charge(
-                    &state,
-                    req.headers(),
-                    cashu::PaidOperation::Download,
-                    serve_file_metadata.size,
-                )
-                .await?;
-
-                track_download_stats(&state, serve_file_metadata.size);
-                return serve_file_with_range(
-                    &serve_file_metadata.path,
-                    serve_file_metadata.mime_type.as_deref(),
-                    req.headers(),
-                    &etag,
-                )
-                .await;
-            }
-
-            // File not found locally - now do upstream server lookup
-            debug!(
-                "File {} not found locally, checking upstream servers",
-                file_hash
-            );
-
-            // Check if custom upstream origin feature is enabled
-            let upstream_feature_enabled =
-                state.feature_custom_upstream_origin_enabled.is_enabled();
-            let upstream_requires_wot = state.feature_custom_upstream_origin_enabled.requires_wot();
-
-            // Extract custom origin (single server) if provided and feature is enabled
-            let custom_origin = if upstream_feature_enabled {
-                query.origin.as_deref()
-            } else {
-                if query.origin.is_some() {
-                    warn!("Origin parameter provided but FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED is disabled, ignoring");
-                }
-                None
-            };
-
-            // Extract xs (servers) parameters - multiple xs query parameters can be provided per BUD-01
-            // xs takes priority, then fall back to legacy servers parameter
-            let xs_servers = if upstream_feature_enabled {
-                if !query.xs.is_empty() {
-                    Some(&query.xs[..])
-                } else if !query.servers.is_empty() {
-                    Some(&query.servers[..])
-                } else {
-                    None
-                }
-            } else {
-                if !query.xs.is_empty() || !query.servers.is_empty() {
-                    warn!("Server parameters provided but FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED is disabled, ignoring");
-                }
-                None
-            };
-
-            // Parse author pubkey if provided (BUD-03) - we'll fetch servers lazily only if needed
-            let author_pubkey = if query.author_pubkey.is_some() && upstream_feature_enabled {
-                if let Some(author_str) = &query.author_pubkey {
-                    match blossom_servers::parse_pubkey(author_str) {
-                        Ok(pubkey) => {
-                            debug!(
-                                "Parsed author pubkey: {} (from as parameter)",
-                                pubkey.to_hex()
-                            );
-
-                            // If WOT mode is enabled, validate the pubkey is in WOT
-                            if upstream_requires_wot {
-                                let is_authorized =
-                                    crate::services::auth::is_pubkey_authorized(&pubkey, &state)
-                                        .await;
-                                if !is_authorized {
-                                    warn!("Author pubkey {} not in Web of Trust, rejecting upstream lookup", pubkey.to_hex());
-                                    return Err(AppError::Forbidden(
-                                        "Author pubkey not in Web of Trust".to_string(),
-                                    ));
-                                }
-                                debug!("Author pubkey {} validated in WOT", pubkey.to_hex());
-                            }
-
-                            Some(pubkey)
-                        }
-                        Err(e) => {
-                            warn!("Invalid pubkey in 'as' parameter: {} ({})", author_str, e);
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // We only prepare xs servers here, NOT user servers (lazy fetch in upstream.rs)
-            let xs_servers_to_use = xs_servers;
-
-            // Log the request with appropriate context
-            if let Some(origin) = custom_origin {
-                info!(
-                    "GET request for url: {} (range: {}) with custom origin: {}",
-                    filename, range_header, origin
-                );
-            } else if let Some(servers) = xs_servers_to_use {
-                info!(
-                    "GET request for url: {} (range: {}) with xs servers ({} servers): {:?}",
-                    filename,
-                    range_header,
-                    servers.len(),
-                    servers
-                );
-                if author_pubkey.is_some() {
-                    debug!("Request includes author pubkey (as) for lazy fetch if needed");
-                }
-            } else if author_pubkey.is_some() {
-                info!(
-                    "GET request for url: {} (range: {}) with author pubkey for lazy server fetch",
-                    filename, range_header
-                );
-            } else {
-                info!(
-                    "GET request for url: {} (range: {})",
-                    filename, range_header
-                );
-            }
-            // Check if we've already tried upstream servers recently
-            // Skip cache check if custom origin or xs servers are provided, as different servers may yield different results
-            let should_check_cache = custom_origin.is_none() && xs_servers_to_use.is_none();
-            if should_check_cache {
-                let failed_lookups = state.failed_upstream_lookups.read().await;
-                if let Some(failed_time) = failed_lookups.get(file_hash) {
-                    if failed_time.elapsed() < std::time::Duration::from_secs(3600) {
-                        debug!(
-                            "File {} not found in upstream servers recently (cached), returning 404",
-                            file_hash
-                        );
-                        return Err(AppError::NotFound(
-                            "File not found (cached upstream failure)".to_string(),
-                        ));
-                    }
-                }
-            } else {
-                debug!("Skipping failed lookups cache check because custom origin or xs servers are provided");
-            }
-
-            // Try upstream servers with prioritization: xs → UPSTREAM_SERVERS → user servers (lazy)
-            // Branch based on upstream mode: proxy vs redirect
-            let upstream_result = if state.upstream_mode.is_redirect() {
-                // Redirect mode: HEAD check then 302 redirect
-                debug!(
-                    "Using upstream redirect mode (cache_in_background: {})",
-                    state.upstream_mode.caches_in_background()
-                );
-                crate::handlers::upstream::try_upstream_redirect(
-                    &state,
-                    &filename,
-                    custom_origin,
-                    xs_servers_to_use,
-                    author_pubkey.as_ref(),
-                    state.upstream_mode.caches_in_background(),
-                )
-                .await
-            } else {
-                // Proxy mode: stream from upstream while saving locally (default)
-                crate::handlers::upstream::try_upstream_servers(
-                    &state,
-                    &filename,
-                    req.headers(),
-                    req.method(),
-                    custom_origin,
-                    xs_servers_to_use,
-                    author_pubkey.as_ref(),
-                )
-                .await
-            };
-
-            if let Ok(response) = upstream_result {
-                Ok(response)
-            } else {
-                // Add to failed lookups cache only if no custom origin or xs servers were used
-                // (since custom servers may have different success/failure patterns)
-                if custom_origin.is_none() && xs_servers_to_use.is_none() {
-                    let mut failed_lookups = state.failed_upstream_lookups.write().await;
-                    failed_lookups.insert(file_hash.to_string(), std::time::Instant::now());
-                    debug!("Added {} to failed upstream lookups cache", file_hash);
-                } else {
-                    debug!("Skipping failed lookups cache because custom origin or xs servers were used");
-                }
-                Err(AppError::NotFound("File not found".to_string()))
-            }
+            .await
         }
+        BlobSource::ServeFile(metadata) => {
+            serve_blob(
+                &state,
+                headers,
+                method,
+                file_hash,
+                metadata.size,
+                metadata.mime_type.as_deref(),
+                BlobBytes::LocalFile(&metadata.path),
+            )
+            .await
+        }
+        BlobSource::RecentlyMissing => Err(AppError::NotFound(
+            "File not found (cached upstream failure)".to_string(),
+        )),
+        BlobSource::Upstream(plan) => {
+            fetch_from_upstream(&state, &filename, file_hash, headers, method, *plan).await
+        }
+    }
+}
+
+/// Decide where this blob comes from, without building any response.
+async fn resolve_blob(
+    state: &AppState,
+    file_hash: &str,
+    query: &FileRequestQuery,
+) -> Result<BlobSource, AppError> {
+    if let Some(metadata) = find_file(&state.file_index, file_hash).await {
+        return Ok(BlobSource::Indexed(metadata));
+    }
+
+    // An object can exist in the native backend without being indexed yet, for
+    // instance after a restart against a pre-populated bucket.
+    if let Some(s3) = &state.native_s3 {
+        if let Some(metadata) = s3.find(file_hash).await? {
+            let published =
+                file_storage::publish_existing_metadata(state, file_hash.to_owned(), metadata)
+                    .await?;
+            return Ok(BlobSource::Indexed(published));
+        }
+    }
+
+    if let Some(metadata) =
+        crate::services::serve_files::get_serve_file(&state.serve_file_index, file_hash).await
+    {
+        return Ok(BlobSource::ServeFile(metadata));
+    }
+
+    let plan = upstream_plan(state, query).await?;
+    if !plan.names_specific_servers() && upstream_recently_missed(state, file_hash).await {
+        return Ok(BlobSource::RecentlyMissing);
+    }
+    Ok(BlobSource::Upstream(Box::new(plan)))
+}
+
+/// Apply the custom-upstream-origin feature gate to the request's query.
+///
+/// Ignored parameters are warned about rather than silently dropped, and an
+/// `?as=` author is rejected outright when the feature demands web of trust.
+async fn upstream_plan(
+    state: &AppState,
+    query: &FileRequestQuery,
+) -> Result<UpstreamPlan, AppError> {
+    let enabled = state.feature_custom_upstream_origin_enabled.is_enabled();
+    let requires_wot = state.feature_custom_upstream_origin_enabled.requires_wot();
+
+    if !enabled {
+        if query.origin.is_some() || !query.xs.is_empty() || !query.servers.is_empty() {
+            warn!("Upstream origin parameters provided but FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED is disabled, ignoring");
+        }
+        return Ok(UpstreamPlan {
+            custom_origin: None,
+            xs_servers: None,
+            author_pubkey: None,
+        });
+    }
+
+    // `xs` takes priority; `servers` is the legacy spelling of the same list.
+    let xs_servers = if query.xs.is_empty() {
+        (!query.servers.is_empty()).then(|| query.servers.clone())
     } else {
-        // Invalid filename format (no hash found)
-        Err(AppError::NotFound("Invalid filename format".to_string()))
+        Some(query.xs.clone())
+    };
+
+    let mut author_pubkey = None;
+    if let Some(author) = &query.author_pubkey {
+        match blossom_servers::parse_pubkey(author) {
+            Ok(pubkey) => {
+                if requires_wot
+                    && !crate::services::auth::is_pubkey_authorized(&pubkey, state).await
+                {
+                    warn!(
+                        "Author pubkey {} not in Web of Trust, rejecting upstream lookup",
+                        pubkey.to_hex()
+                    );
+                    return Err(AppError::Forbidden(
+                        "Author pubkey not in Web of Trust".to_string(),
+                    ));
+                }
+                author_pubkey = Some(pubkey);
+            }
+            Err(error) => warn!("Invalid pubkey in 'as' parameter: {author} ({error})"),
+        }
+    }
+
+    Ok(UpstreamPlan {
+        custom_origin: query.origin.clone(),
+        xs_servers,
+        author_pubkey,
+    })
+}
+
+/// Whether upstream already proved this hash absent recently.
+async fn upstream_recently_missed(state: &AppState, file_hash: &str) -> bool {
+    let failed = state.failed_upstream_lookups.read().await;
+    failed
+        .get(file_hash)
+        .is_some_and(|missed_at| missed_at.elapsed() < UPSTREAM_MISS_TTL)
+}
+
+/// Walk the upstream tiers, in whichever mode is configured.
+async fn fetch_from_upstream(
+    state: &AppState,
+    filename: &str,
+    file_hash: &str,
+    headers: &axum::http::HeaderMap,
+    method: &Method,
+    plan: UpstreamPlan,
+) -> Result<Response, AppError> {
+    let custom_origin = plan.custom_origin.as_deref();
+    let xs_servers = plan.xs_servers.as_deref();
+
+    let result = if state.upstream_mode.is_redirect() {
+        crate::handlers::upstream::try_upstream_redirect(
+            state,
+            filename,
+            custom_origin,
+            xs_servers,
+            plan.author_pubkey.as_ref(),
+            state.upstream_mode.caches_in_background(),
+        )
+        .await
+    } else {
+        crate::handlers::upstream::try_upstream_servers(
+            state,
+            filename,
+            headers,
+            method,
+            custom_origin,
+            xs_servers,
+            plan.author_pubkey.as_ref(),
+        )
+        .await
+    };
+
+    if let Ok(response) = result {
+        return Ok(response);
+    }
+
+    if !plan.names_specific_servers() {
+        state
+            .failed_upstream_lookups
+            .write()
+            .await
+            .insert(file_hash.to_string(), std::time::Instant::now());
+        debug!("Added {file_hash} to failed upstream lookups cache");
+    }
+    Err(AppError::NotFound("File not found".to_string()))
+}
+
+/// Turn a resolved blob into a response.
+///
+/// Written once, whatever holds the bytes: revalidation, HEAD, payment and
+/// statistics used to be repeated per source, and the payment step had already
+/// drifted between the copies.
+async fn serve_blob(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    method: &Method,
+    file_hash: &str,
+    size: u64,
+    mime_type: Option<&str>,
+    bytes: BlobBytes<'_>,
+) -> Result<Response, AppError> {
+    let etag = blob_etag(file_hash);
+    if let Some(response) = check_not_modified(headers, &etag)? {
+        return Ok(response);
+    }
+
+    if method == Method::HEAD {
+        return build_blob_head_response(mime_type, size, &etag);
+    }
+
+    cashu::charge(state, headers, cashu::PaidOperation::Download, size).await?;
+    track_download_stats(state, size);
+
+    match bytes {
+        BlobBytes::LocalFile(path) => serve_file_with_range(path, mime_type, headers, &etag).await,
+        BlobBytes::Native { storage, key } => {
+            serve_s3_with_range(storage, key, mime_type, size, headers, &etag).await
+        }
     }
 }
 
@@ -580,4 +560,36 @@ async fn serve_s3_with_range(
         );
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plan(custom_origin: Option<&str>, xs_servers: Option<&[&str]>) -> UpstreamPlan {
+        UpstreamPlan {
+            custom_origin: custom_origin.map(ToString::to_string),
+            xs_servers: xs_servers
+                .map(|servers| servers.iter().map(|s| (*s).to_string()).collect()),
+            author_pubkey: None,
+        }
+    }
+
+    #[test]
+    fn a_plain_lookup_may_be_remembered_as_a_miss() {
+        // Nothing about this request is caller-specific, so upstream saying no
+        // is a fact about the blob and worth caching.
+        assert!(!plan(None, None).names_specific_servers());
+    }
+
+    #[test]
+    fn a_request_scoped_server_list_must_not_poison_the_miss_cache() {
+        // These failures say only that the servers *this caller named* did not
+        // have the blob. Caching that would hide it from everyone else for an
+        // hour.
+        assert!(plan(Some("https://origin.example"), None).names_specific_servers());
+        assert!(plan(None, Some(&["https://xs.example"])).names_specific_servers());
+        assert!(plan(Some("https://origin.example"), Some(&["https://xs.example"]))
+            .names_specific_servers());
+    }
 }
