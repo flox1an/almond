@@ -11,9 +11,20 @@ use crate::models::{
     UpstreamNegotiation,
 };
 
+#[must_use]
 pub struct PreparedDownload {
     pub handle: Arc<DownloadHandle>,
     pub writer: File,
+    guard: Option<DownloadGuard>,
+}
+
+impl PreparedDownload {
+    /// Extract the guard so the happy path can call `guard.finish(Complete)`.
+    /// Every other drop path unwinds via `DownloadGuard::drop` → Failed + map removal.
+    pub fn take_guard(&mut self) -> DownloadGuard {
+        self.guard.take()
+            .expect("take_guard called more than once")
+    }
 }
 
 pub enum NegotiationClaim {
@@ -44,6 +55,7 @@ pub async fn claim_upstream_negotiation(state: &AppState, key: &str) -> Negotiat
     })
 }
 
+#[must_use]
 pub struct NegotiationGuard {
     state: AppState,
     key: String,
@@ -135,9 +147,16 @@ pub async fn prepare_download_state(
         file_extension
     );
 
-    Ok(PreparedDownload { handle, writer })
+    let guard = DownloadGuard::new(state, filename, handle.clone());
+
+    Ok(PreparedDownload {
+        handle,
+        writer,
+        guard: Some(guard),
+    })
 }
 
+#[must_use]
 pub struct DownloadGuard {
     state: AppState,
     key: String,
@@ -222,10 +241,7 @@ pub async fn mark_failed_lookup(state: &AppState, filename: &str) {
 pub async fn is_recently_failed(state: &AppState, filename: &str) -> bool {
     let failed_lookups = state.failed_upstream_lookups.read().await;
     if let Some(failed_time) = failed_lookups.get(filename) {
-        let one_hour_ago = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_secs(3600))
-            .unwrap();
-        return *failed_time > one_hour_ago;
+        return failed_time.elapsed() < std::time::Duration::from_secs(3600);
     }
     false
 }

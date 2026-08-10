@@ -28,7 +28,7 @@ use crate::models::{
     UpstreamNegotiation,
 };
 use crate::services::download::{
-    claim_upstream_negotiation, DownloadGuard, NegotiationClaim, NegotiationGuard, PreparedDownload,
+    claim_upstream_negotiation, NegotiationClaim, NegotiationGuard, PreparedDownload,
 };
 use crate::utils::{parse_range_header, RangeSpec};
 
@@ -1475,29 +1475,36 @@ async fn stream_and_save_from_upstream(
     let content_length = upstream_resp.content_length();
     let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
     if content_length.is_some_and(|length| length > max_size_bytes) {
-        let guard = DownloadGuard::new(state, filename, prepared.handle.clone());
-        guard.finish(DownloadPhase::Failed).await;
-        let _ = tokio::fs::remove_file(&prepared.handle.temp_path).await;
+        let temp_path = prepared.handle.temp_path.clone();
+        drop(prepared); // guard drop → map removal
+        let _ = tokio::fs::remove_file(&temp_path).await;
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
-    let reader = File::open(&prepared.handle.temp_path)
-        .await
-        .map_err(|error| {
+    let reader = match File::open(&prepared.handle.temp_path).await {
+        Ok(file) => file,
+        Err(error) => {
             error!("Failed to open temp file for streaming: {error}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    let stream = create_tailing_stream(
+            let _ = tokio::fs::remove_file(&prepared.handle.temp_path).await;
+            drop(prepared);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    let stream = match create_tailing_stream(
         reader,
         prepared.handle.progress.subscribe(),
         0,
         content_length,
     )
     .await
-    .map_err(|error| {
-        error!("Failed to create tailing stream: {error}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            error!("Failed to create tailing stream: {error}");
+            drop(prepared);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
 
     let content_type = prepared.handle.content_type.clone();
     let body = Body::from_stream(stream);
@@ -1548,12 +1555,12 @@ async fn run_download(
     state: AppState,
     file_url: String,
     upstream_resp: reqwest::Response,
-    filename: String,
+    _filename: String,
     mut prepared: PreparedDownload,
     count_as_served: bool,
 ) {
     let handle = prepared.handle.clone();
-    let guard = DownloadGuard::new(&state, &filename, handle.clone());
+    let guard = prepared.take_guard();
     let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
     let expected_len = handle.total_len.or_else(|| upstream_resp.content_length());
     let content_type = handle.content_type.clone();

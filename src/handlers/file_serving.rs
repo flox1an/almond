@@ -307,10 +307,7 @@ pub async fn handle_file_request(
             if should_check_cache {
                 let failed_lookups = state.failed_upstream_lookups.read().await;
                 if let Some(failed_time) = failed_lookups.get(file_hash) {
-                    let one_hour_ago = std::time::Instant::now()
-                        .checked_sub(std::time::Duration::from_secs(3600))
-                        .unwrap();
-                    if *failed_time > one_hour_ago {
+                    if failed_time.elapsed() < std::time::Duration::from_secs(3600) {
                         debug!(
                             "File {} not found in upstream servers recently (cached), returning 404",
                             file_hash
