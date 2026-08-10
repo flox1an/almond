@@ -44,6 +44,7 @@ use std::{collections::HashMap, env, net::SocketAddr, path::PathBuf, sync::Arc, 
 use tokio::signal;
 
 use crate::models::AppState;
+use crate::services::cashu;
 use crate::trust_network::{refresh_dvm_pubkeys, refresh_trust_network};
 use crate::utils::{
     build_file_index, cleanup_abandoned_chunks, cleanup_expired_blossom_server_lists,
@@ -84,12 +85,19 @@ async fn head_upload(
         .status(StatusCode::OK)
         .header(header::ACCEPT, "application/octet-stream");
 
-    // Add payment info if paid uploads are enabled
+    // Price discovery renders the same quote the 402 would, so a client cannot
+    // derive a price the server disagrees with. One megabyte is the unit the
+    // header advertises.
     if state.feature_paid_upload {
+        let quote = cashu::quote(
+            state.cashu_price_per_mb,
+            &state.cashu_accepted_mints,
+            1024 * 1024,
+        );
         builder = builder
-            .header("X-Price-Per-MB", state.cashu_price_per_mb.to_string())
-            .header("X-Price-Unit", "sat")
-            .header("X-Accepted-Mints", state.cashu_accepted_mints.join(","));
+            .header("X-Price-Per-MB", quote.amount_sats.to_string())
+            .header("X-Price-Unit", quote.unit)
+            .header("X-Accepted-Mints", quote.mints.join(","));
     }
 
     builder
@@ -618,7 +626,7 @@ async fn load_app_state() -> AppState {
     info!("HLS mirror concurrency: {}", hls_mirror_concurrency);
 
     let cashu_wallet = if any_paid_feature {
-        match services::cashu::init_wallet(&cashu_wallet_path, &cashu_accepted_mints).await {
+        match cashu::init_wallet(&cashu_wallet_path, &cashu_accepted_mints).await {
             Ok(wallet) => {
                 info!("💰 Cashu wallet ready for payments");
                 Some(wallet)

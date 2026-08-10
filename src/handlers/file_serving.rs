@@ -77,34 +77,13 @@ pub async fn handle_file_request(
             }
 
             // Check payment for download if required
-            if state.feature_paid_download {
-                let required_sats =
-                    cashu::calculate_price(file_metadata.size, state.cashu_price_per_mb);
-                let headers = req.headers();
-                let cashu_header = cashu::extract_cashu_header(headers);
-
-                match cashu_header {
-                    None => {
-                        return Err(AppError::PaymentRequired {
-                            amount_sats: required_sats,
-                            unit: "sat".to_string(),
-                            mints: state.cashu_accepted_mints.clone(),
-                        });
-                    }
-                    Some(token_str) => {
-                        let token = cashu::parse_token(&token_str)?;
-                        cashu::verify_token_basics(
-                            &token,
-                            required_sats,
-                            &state.cashu_accepted_mints,
-                        )?;
-
-                        if let Some(wallet) = &state.cashu_wallet {
-                            cashu::receive_token(wallet, &token).await?;
-                        }
-                    }
-                }
-            }
+            cashu::charge(
+                &state,
+                req.headers(),
+                cashu::PaidOperation::Download,
+                file_metadata.size,
+            )
+            .await?;
 
             // Track download statistics
             track_download_stats(&state, file_metadata.size);
@@ -156,33 +135,13 @@ pub async fn handle_file_request(
                     );
                 }
 
-                if state.feature_paid_download {
-                    let required_sats =
-                        cashu::calculate_price(serve_file_metadata.size, state.cashu_price_per_mb);
-                    let cashu_header = cashu::extract_cashu_header(req.headers());
-
-                    match cashu_header {
-                        None => {
-                            return Err(AppError::PaymentRequired {
-                                amount_sats: required_sats,
-                                unit: "sat".to_string(),
-                                mints: state.cashu_accepted_mints.clone(),
-                            });
-                        }
-                        Some(token_str) => {
-                            let token = cashu::parse_token(&token_str)?;
-                            cashu::verify_token_basics(
-                                &token,
-                                required_sats,
-                                &state.cashu_accepted_mints,
-                            )?;
-
-                            if let Some(wallet) = &state.cashu_wallet {
-                                cashu::receive_token(wallet, &token).await?;
-                            }
-                        }
-                    }
-                }
+                cashu::charge(
+                    &state,
+                    req.headers(),
+                    cashu::PaidOperation::Download,
+                    serve_file_metadata.size,
+                )
+                .await?;
 
                 track_download_stats(&state, serve_file_metadata.size);
                 return serve_file_with_range(

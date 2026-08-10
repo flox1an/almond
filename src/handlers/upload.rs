@@ -18,63 +18,6 @@ use crate::helpers::{
 use crate::models::{AppState, FileLocation};
 use crate::services::{auth, cashu, file_storage, hls, upload};
 
-/// Check if payment is required and process it
-///
-/// Supports two flows:
-/// 1. Preemptive: Client sends X-Cashu with first request (validated after size known)
-/// 2. Reactive: Client gets 402, then retries with X-Cashu
-async fn check_payment(
-    state: &AppState,
-    headers: &HeaderMap,
-    size_bytes: u64,
-    feature_enabled: bool,
-) -> Result<(), AppError> {
-    if !feature_enabled {
-        return Ok(());
-    }
-
-    let required_sats = cashu::calculate_price(size_bytes, state.cashu_price_per_mb);
-
-    // Check for X-Cashu header (preemptive or retry payment)
-    let cashu_header = cashu::extract_cashu_header(headers);
-
-    match cashu_header {
-        None => {
-            // No payment provided, return 402
-            Err(AppError::PaymentRequired {
-                amount_sats: required_sats,
-                unit: "sat".to_string(),
-                mints: state.cashu_accepted_mints.clone(),
-            })
-        }
-        Some(token_str) => {
-            // Parse and verify token
-            let token = cashu::parse_token(&token_str)?;
-
-            // Verify amount is sufficient for actual size
-            cashu::verify_token_basics(&token, required_sats, &state.cashu_accepted_mints)?;
-
-            // Receive token into wallet
-            if let Some(wallet) = &state.cashu_wallet {
-                let received_sats = cashu::receive_token(wallet, &token).await?;
-                if received_sats < required_sats {
-                    return Err(AppError::PaymentRequired {
-                        amount_sats: required_sats,
-                        unit: "sat".to_string(),
-                        mints: state.cashu_accepted_mints.clone(),
-                    });
-                }
-            } else {
-                return Err(AppError::ServiceUnavailable(
-                    "Payment service is not initialized".to_string(),
-                ));
-            }
-
-            Ok(())
-        }
-    }
-}
-
 /// Handle file uploads - REFACTORED VERSION
 pub async fn upload_file(
     State(state): State<AppState>,
@@ -130,7 +73,7 @@ pub async fn upload_file(
     auth::validate_upload_auth(&auth_event, &sha256)?;
 
     // Check payment if required (after we know the size and auth is validated)
-    check_payment(&state, &headers, total_bytes, state.feature_paid_upload).await?;
+    cashu::charge(&state, &headers, cashu::PaidOperation::Upload, total_bytes).await?;
 
     // Finalize upload
     upload::finalize_upload(
@@ -222,9 +165,13 @@ pub async fn mirror_blob(
     let declared_size = content_length.ok_or_else(|| {
         AppError::BadRequest("Mirror source must provide Content-Length".to_string())
     })?;
-    if state.feature_paid_mirror {
-        check_payment(&state, &headers, declared_size, true).await?;
-    }
+    cashu::charge(
+        &state,
+        &headers,
+        cashu::PaidOperation::Mirror,
+        declared_size,
+    )
+    .await?;
     file_storage::ensure_storage_capacity(&state, declared_size).await?;
 
     // Prepare temp file
@@ -522,8 +469,13 @@ pub async fn patch_upload(
     // prior chunks only when no concurrent request started a replacement
     // session. Otherwise discard the failed upload's files without touching
     // that live reservation.
-    if let Err(payment_error) =
-        check_payment(&state, &headers, upload_length, state.feature_paid_upload).await
+    if let Err(payment_error) = cashu::charge(
+        &state,
+        &headers,
+        cashu::PaidOperation::Upload,
+        upload_length,
+    )
+    .await
     {
         let mut restored = upload_data.clone();
         restored.chunks.pop();

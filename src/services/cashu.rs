@@ -16,6 +16,118 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
+/// A request that money can be demanded for.
+///
+/// Naming the operation keeps the feature gate in one place: every caller used
+/// to read its own `feature_paid_*` flag and then re-spell the settlement
+/// sequence, and the spellings drifted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaidOperation {
+    Upload,
+    Mirror,
+    Download,
+}
+
+impl PaidOperation {
+    fn is_paid(self, state: &crate::models::AppState) -> bool {
+        match self {
+            Self::Upload => state.feature_paid_upload,
+            Self::Mirror => state.feature_paid_mirror,
+            Self::Download => state.feature_paid_download,
+        }
+    }
+}
+
+/// What this server would charge for `size_bytes`, in the BUD-07 shape.
+///
+/// Price discovery (`HEAD /upload`) and the 402 response are rendered from the
+/// same value, so a client cannot derive a price the server disagrees with.
+pub struct Quote {
+    pub amount_sats: u64,
+    pub unit: &'static str,
+    pub mints: Vec<String>,
+}
+
+/// Quote `size_bytes` against the configured price.
+///
+/// Takes the two configured values rather than the whole runtime state: a
+/// price is arithmetic, and keeping it that way makes it directly testable.
+#[must_use]
+pub fn quote(price_per_mb: u64, mints: &[String], size_bytes: u64) -> Quote {
+    Quote {
+        amount_sats: calculate_price(size_bytes, price_per_mb),
+        unit: "sat",
+        mints: mints.to_vec(),
+    }
+}
+
+impl Quote {
+    /// The 402 that asks a client to pay this quote.
+    fn payment_required(self) -> AppError {
+        AppError::PaymentRequired {
+            amount_sats: self.amount_sats,
+            unit: self.unit.to_string(),
+            mints: self.mints,
+        }
+    }
+}
+
+/// Settle payment for one operation over `size_bytes`.
+///
+/// Owns the whole BUD-07 dance: the feature gate, price derivation, header
+/// extraction, mint validation, settlement, and the 402 shape. Returns `Ok`
+/// when the operation is free, or when the mint settled at least the quoted
+/// amount into the wallet.
+///
+/// Both reactive (402, then retry with `X-Cashu`) and preemptive (`X-Cashu` on
+/// the first request) flows land here; they differ only in whether the client
+/// has already seen the 402.
+pub async fn charge(
+    state: &crate::models::AppState,
+    headers: &axum::http::HeaderMap,
+    operation: PaidOperation,
+    size_bytes: u64,
+) -> Result<(), AppError> {
+    if !operation.is_paid(state) {
+        return Ok(());
+    }
+
+    let quoted = quote(
+        state.cashu_price_per_mb,
+        &state.cashu_accepted_mints,
+        size_bytes,
+    );
+    let Some(token_str) = extract_cashu_header(headers) else {
+        return Err(quoted.payment_required());
+    };
+
+    let token = parse_token(&token_str)?;
+    verify_token_basics(&token, quoted.amount_sats, &state.cashu_accepted_mints)?;
+
+    // A configured paid feature without a wallet cannot take money, so it must
+    // not hand out the blob either.
+    let Some(wallet) = &state.cashu_wallet else {
+        return Err(AppError::ServiceUnavailable(
+            "Payment service is not initialized".to_string(),
+        ));
+    };
+
+    // The mint decides what actually settles; a token that verifies can still
+    // pay short, and short payment must not buy the operation.
+    let received_sats = receive_token(wallet, &token).await?;
+    if received_sats < quoted.amount_sats {
+        warn!(
+            required = quoted.amount_sats,
+            received = received_sats,
+            ?operation,
+            "Mint settled below the quoted amount"
+        );
+        return Err(quoted.payment_required());
+    }
+
+    Ok(())
+}
+
 /// Calculate required payment in sats for a given size
 ///
 /// Rounds up to the nearest MB, with a minimum charge of 1 sat.
@@ -319,13 +431,55 @@ pub fn get_token_mint(token: &Token) -> Result<String, AppError> {
         warn!("Failed to get mint URL from token: {}", e);
         AppError::BadRequest(format!("Invalid token: could not extract mint URL: {}", e))
     })?;
-
     Ok(mint_url.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mints() -> Vec<String> {
+        vec![
+            "https://mint.example.com".to_string(),
+            "https://other.example.com".to_string(),
+        ]
+    }
+
+    #[test]
+    fn quote_rounds_up_to_the_next_megabyte() {
+        // One byte over a megabyte is charged as two.
+        let quoted = quote(7, &mints(), 1024 * 1024 + 1);
+        assert_eq!(quoted.amount_sats, 14);
+        assert_eq!(quoted.unit, "sat");
+        assert_eq!(quoted.mints, mints());
+    }
+
+    #[test]
+    fn quote_charges_at_least_one_sat() {
+        // An empty blob is still not free, and a zero price still costs the
+        // floor rather than nothing.
+        assert_eq!(quote(10, &mints(), 0).amount_sats, 1);
+        assert_eq!(quote(0, &mints(), 50 * 1024 * 1024).amount_sats, 1);
+    }
+
+    #[test]
+    fn payment_required_carries_the_quote_a_client_must_pay() {
+        // The 402 a client sees must name the amount, the unit and the mints
+        // this server will accept, or the client cannot retry successfully.
+        let quoted = quote(3, &mints(), 4 * 1024 * 1024);
+        match quoted.payment_required() {
+            AppError::PaymentRequired {
+                amount_sats,
+                unit,
+                mints: accepted,
+            } => {
+                assert_eq!(amount_sats, 12);
+                assert_eq!(unit, "sat");
+                assert_eq!(accepted, mints());
+            }
+            other => panic!("expected a 402, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_calculate_price_zero_bytes() {
