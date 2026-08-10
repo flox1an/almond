@@ -97,7 +97,9 @@ pub fn parse(name: &str) -> Option<ParsedName> {
         // `<expiration>` is the digit run up to the following dot or end.
         let (digits, extension) = after_underscore
             .split_once('.')
-            .map_or((after_underscore, None), |(digits, ext)| (digits, Some(ext)));
+            .map_or((after_underscore, None), |(digits, ext)| {
+                (digits, Some(ext))
+            });
         if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
@@ -147,7 +149,11 @@ mod tests {
             let parsed = parse(&name).expect("constructed name must parse");
             assert_eq!(parsed.hash, hash());
             assert_eq!(parsed.expiration, expiration);
-            assert_eq!(parsed.extension, extension.map(str::to_owned), "for {name:?}");
+            assert_eq!(
+                parsed.extension,
+                extension.map(str::to_owned),
+                "for {name:?}"
+            );
         }
     }
 
@@ -217,7 +223,7 @@ mod tests {
         assert!(parse(&format!("{h}_")).is_none());
         assert!(parse(&format!("{h}_xyz")).is_none());
         assert!(parse(&format!("{h}_1_2")).is_none()); // digit run split by '_'
-        // Trailing character that is neither '.' nor '_'.
+                                                       // Trailing character that is neither '.' nor '_'.
         assert!(parse(&format!("{h}x")).is_none());
     }
 

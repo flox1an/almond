@@ -298,9 +298,11 @@ async fn build_app_state(cfg: &config::Config) -> AppState {
     // Handle HTTPS/TLS setup if enabled
     if cfg.enable_https {
         info!("🔐 HTTPS enabled");
-        if let Err(e) =
-            tls::ensure_tls_certificates(&cfg.tls_cert_path, &cfg.tls_key_path, cfg.tls_auto_generate)
-        {
+        if let Err(e) = tls::ensure_tls_certificates(
+            &cfg.tls_cert_path,
+            &cfg.tls_key_path,
+            cfg.tls_auto_generate,
+        ) {
             error!("❌ Failed to setup TLS certificates: {}", e);
             std::process::exit(1);
         }
@@ -308,7 +310,8 @@ async fn build_app_state(cfg: &config::Config) -> AppState {
         info!("⚠️  HTTPS disabled - running in HTTP mode");
     }
 
-    let any_paid_feature = cfg.feature_paid_upload || cfg.feature_paid_mirror || cfg.feature_paid_download;
+    let any_paid_feature =
+        cfg.feature_paid_upload || cfg.feature_paid_mirror || cfg.feature_paid_download;
 
     if any_paid_feature {
         info!(

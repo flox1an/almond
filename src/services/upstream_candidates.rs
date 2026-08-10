@@ -175,7 +175,10 @@ impl<'a> Walk<'a> {
         debug!("Fetching user server list for pubkey: {}", pubkey.to_hex());
         match crate::services::blossom_servers::fetch_user_server_list(self.state, pubkey).await {
             Ok(servers) if !servers.is_empty() => {
-                debug!("Fetched {} servers from the user's list (BUD-03)", servers.len());
+                debug!(
+                    "Fetched {} servers from the user's list (BUD-03)",
+                    servers.len()
+                );
                 for server in &servers {
                     for candidate in server_url_candidates(server) {
                         self.pending.push_back((Tier::UserServer, candidate));

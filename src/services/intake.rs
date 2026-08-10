@@ -49,7 +49,9 @@ const fn resolve_limit(max_blob_bytes: u64, max_upstream_bytes: u64, intake: Int
 pub fn size_limit(state: &AppState, intake: Intake) -> u64 {
     resolve_limit(
         state.max_blob_size_bytes,
-        state.max_upstream_download_size_mb.saturating_mul(1024 * 1024),
+        state
+            .max_upstream_download_size_mb
+            .saturating_mul(1024 * 1024),
         intake,
     )
 }

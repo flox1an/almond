@@ -78,26 +78,37 @@ fn parse_opt<T>(
     convert: fn(&str) -> Result<T, String>,
 ) -> Result<Option<T>, ConfigError> {
     match map.get(name) {
-        Some(raw) if !raw.trim().is_empty() => {
-            convert(raw).map(Some).map_err(|detail| ConfigError::parse(name, raw, detail))
-        }
+        Some(raw) if !raw.trim().is_empty() => convert(raw)
+            .map(Some)
+            .map_err(|detail| ConfigError::parse(name, raw, detail)),
         _ => Ok(None),
     }
 }
 
 /// Read a boolean (true/false/1/0, case-insensitive).
-fn parse_bool(map: &HashMap<String, String>, name: &'static str, default: &'static str) -> Result<bool, ConfigError> {
-    parse_into(map, name, default, |s| match s.trim().to_lowercase().as_str() {
-        "true" | "1" | "on" => Ok(true),
-        "false" | "0" | "off" => Ok(false),
-        other => Err(format!("expected true/false, got '{other}'")),
+fn parse_bool(
+    map: &HashMap<String, String>,
+    name: &'static str,
+    default: &'static str,
+) -> Result<bool, ConfigError> {
+    parse_into(map, name, default, |s| {
+        match s.trim().to_lowercase().as_str() {
+            "true" | "1" | "on" => Ok(true),
+            "false" | "0" | "off" => Ok(false),
+            other => Err(format!("expected true/false, got '{other}'")),
+        }
     })
 }
 
 /// Read a u64 whose env-var value is in mebibytes, result is in bytes.
-fn parse_mebibytes(map: &HashMap<String, String>, name: &'static str, default: &'static str) -> Result<u64, ConfigError> {
+fn parse_mebibytes(
+    map: &HashMap<String, String>,
+    name: &'static str,
+    default: &'static str,
+) -> Result<u64, ConfigError> {
     let mb: u64 = parse_into(map, name, default, |s| {
-        s.parse::<u64>().map_err(|e| format!("invalid integer: {e}"))
+        s.parse::<u64>()
+            .map_err(|e| format!("invalid integer: {e}"))
     })?;
     mb.checked_mul(1024 * 1024)
         .ok_or_else(|| ConfigError::parse(name, mb, "value too large".into()))
@@ -121,22 +132,36 @@ fn parse_list<T>(
 }
 
 /// Parse a u64 directly.
-fn parse_u64(map: &HashMap<String, String>, name: &'static str, default: &'static str) -> Result<u64, ConfigError> {
+fn parse_u64(
+    map: &HashMap<String, String>,
+    name: &'static str,
+    default: &'static str,
+) -> Result<u64, ConfigError> {
     parse_into(map, name, default, |s| {
-        s.parse::<u64>().map_err(|e| format!("invalid integer: {e}"))
+        s.parse::<u64>()
+            .map_err(|e| format!("invalid integer: {e}"))
     })
 }
 
 /// Parse a `usize` directly.
-fn parse_usize(map: &HashMap<String, String>, name: &'static str, default: &'static str) -> Result<usize, ConfigError> {
+fn parse_usize(
+    map: &HashMap<String, String>,
+    name: &'static str,
+    default: &'static str,
+) -> Result<usize, ConfigError> {
     parse_into(map, name, default, |s| {
-        s.parse::<usize>().map_err(|e| format!("invalid integer: {e}"))
+        s.parse::<usize>()
+            .map_err(|e| format!("invalid integer: {e}"))
     })
 }
 
 /// Parse the filter algorithm, falling back to `binary-fuse-16` on bad input.
 fn parse_filter_algorithm(map: &HashMap<String, String>, name: &'static str) -> String {
-    let raw = map.get(name).map(String::as_str).unwrap_or("binary-fuse-16").to_lowercase();
+    let raw = map
+        .get(name)
+        .map(String::as_str)
+        .unwrap_or("binary-fuse-16")
+        .to_lowercase();
     match raw.as_str() {
         "bloom" | "binary-fuse-8" | "binary-fuse-16" | "binary-fuse-32" => raw,
         _ => "binary-fuse-16".to_string(),
@@ -260,7 +285,11 @@ impl Config {
         let max_total_files = parse_usize(map, "MAX_TOTAL_FILES", "99999999")?;
         let bind_addr = parse_str(map, "BIND_ADDR", "127.0.0.1:3000")?;
         bind_addr.parse::<std::net::SocketAddr>().map_err(|e| {
-            ConfigError::parse("BIND_ADDR", bind_addr, format!("must be a valid IP:port socket address: {e}"))
+            ConfigError::parse(
+                "BIND_ADDR",
+                bind_addr,
+                format!("must be a valid IP:port socket address: {e}"),
+            )
         })?;
         let bind_addr = bind_addr.to_owned();
         let tls_cert_path = parse_path(map, "TLS_CERT_PATH", "./cert.pem");
@@ -272,18 +301,25 @@ impl Config {
             "http://127.0.0.1:3000"
         };
         let public_url = parse_str(map, "PUBLIC_URL", public_url_default)?.to_owned();
-        let cors_allowed_origins: Vec<String> = parse_list(map, "CORS_ALLOWED_ORIGINS", |s| Ok(s.to_owned()))?;
+        let cors_allowed_origins: Vec<String> =
+            parse_list(map, "CORS_ALLOWED_ORIGINS", |s| Ok(s.to_owned()))?;
         let storage_path = parse_str(map, "STORAGE_PATH", "./files")?.to_owned();
 
         // S3: all-or-nothing validation
         let s3_endpoint = parse_opt(map, "ALMOND_S3_ENDPOINT", |s| Ok(s.to_owned()))?;
         let s3_bucket = parse_opt(map, "ALMOND_S3_BUCKET", |s| Ok(s.to_owned()))?;
         let s3_access_key_id = parse_opt(map, "ALMOND_S3_ACCESS_KEY_ID", |s| Ok(s.to_owned()))?;
-        let s3_secret_access_key = parse_opt(map, "ALMOND_S3_SECRET_ACCESS_KEY", |s| Ok(s.to_owned()))?;
-        let s3_count = [&s3_endpoint, &s3_bucket, &s3_access_key_id, &s3_secret_access_key]
-            .iter()
-            .filter(|o| o.is_some())
-            .count();
+        let s3_secret_access_key =
+            parse_opt(map, "ALMOND_S3_SECRET_ACCESS_KEY", |s| Ok(s.to_owned()))?;
+        let s3_count = [
+            &s3_endpoint,
+            &s3_bucket,
+            &s3_access_key_id,
+            &s3_secret_access_key,
+        ]
+        .iter()
+        .filter(|o| o.is_some())
+        .count();
         match s3_count {
             0 => {} // all None → S3 disabled
             4 => {} // all Some → S3 enabled
@@ -296,9 +332,10 @@ impl Config {
             }
         }
 
-        let serve_files_path = parse_opt(map, "SERVE_FILES_PATH", |s: &str| Ok(s.trim().to_owned()))?
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from);
+        let serve_files_path =
+            parse_opt(map, "SERVE_FILES_PATH", |s: &str| Ok(s.trim().to_owned()))?
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from);
         let serve_files_manifest_name =
             parse_str(map, "SERVE_FILES_MANIFEST_NAME", "manifest-sha256.txt")?.to_owned();
         let serve_files_refresh_interval_secs =
@@ -313,11 +350,13 @@ impl Config {
 
         let max_file_age_days = parse_u64(map, "MAX_FILE_AGE_DAYS", "0")?;
         let max_upstream_cache_ttl_days = parse_u64(map, "MAX_UPSTREAM_CACHE_TTL_DAYS", "1")?;
-        let max_upstream_download_size_mb =
-            parse_u64(map, "MAX_UPSTREAM_DOWNLOAD_SIZE_MB", "100")?;
+        let max_upstream_download_size_mb = parse_u64(map, "MAX_UPSTREAM_DOWNLOAD_SIZE_MB", "100")?;
         let max_chunk_size_mb = parse_u64(map, "MAX_CHUNK_SIZE_MB", "100")?;
         let max_blob_size_bytes = parse_mebibytes(map, "MAX_BLOB_SIZE_MB", "100")?;
-        if max_chunk_size_mb.checked_mul(1024 * 1024).is_some_and(|size| size > max_blob_size_bytes) {
+        if max_chunk_size_mb
+            .checked_mul(1024 * 1024)
+            .is_some_and(|size| size > max_blob_size_bytes)
+        {
             return Err(ConfigError::validation(
                 "MAX_CHUNK_SIZE_MB cannot exceed MAX_BLOB_SIZE_MB",
             ));
@@ -327,10 +366,10 @@ impl Config {
         let max_chunk_upload_sessions = parse_usize(map, "MAX_CHUNK_UPLOAD_SESSIONS", "128")?;
         let max_chunk_upload_sessions_per_pubkey =
             parse_usize(map, "MAX_CHUNK_UPLOAD_SESSIONS_PER_PUBKEY", "8")?;
-        let chunk_cleanup_timeout_minutes =
-            parse_u64(map, "CHUNK_CLEANUP_TIMEOUT_MINUTES", "30")?;
+        let chunk_cleanup_timeout_minutes = parse_u64(map, "CHUNK_CLEANUP_TIMEOUT_MINUTES", "30")?;
 
-        let upstream_servers: Vec<String> = parse_list(map, "UPSTREAM_SERVERS", |s| Ok(s.to_owned()))?;
+        let upstream_servers: Vec<String> =
+            parse_list(map, "UPSTREAM_SERVERS", |s| Ok(s.to_owned()))?;
         let upstream_mode = parse_into(map, "UPSTREAM_MODE", "proxy", |s| {
             Ok(UpstreamMode::from_str_with_default(s))
         })?;
@@ -351,7 +390,8 @@ impl Config {
 
         let p2p_nsec = parse_opt(map, "P2P_NSEC", |s: &str| Ok(s.trim().to_owned()))?;
         let p2p_relays: Vec<String> = parse_list(map, "P2P_RELAYS", |s| Ok(s.to_owned()))?;
-        let p2p_stun_servers: Vec<String> = parse_list(map, "P2P_STUN_SERVERS", |s| Ok(s.to_owned()))?;
+        let p2p_stun_servers: Vec<String> =
+            parse_list(map, "P2P_STUN_SERVERS", |s| Ok(s.to_owned()))?;
         let p2p_request_timeout_ms = parse_u64(map, "P2P_REQUEST_TIMEOUT_MS", "10000")?;
         let p2p_hello_interval_ms = parse_u64(map, "P2P_HELLO_INTERVAL_MS", "3000")?;
         let p2p_debug = parse_bool(map, "P2P_DEBUG", "false")?;
@@ -367,7 +407,8 @@ impl Config {
         let feature_paid_mirror = parse_bool(map, "FEATURE_PAID_MIRROR", "off")?;
         let feature_paid_download = parse_bool(map, "FEATURE_PAID_DOWNLOAD", "off")?;
         let cashu_price_per_mb = parse_u64(map, "CASHU_PRICE_PER_MB", "1")?;
-        let cashu_accepted_mints: Vec<String> = parse_list(map, "CASHU_ACCEPTED_MINTS", |s| Ok(s.to_owned()))?;
+        let cashu_accepted_mints: Vec<String> =
+            parse_list(map, "CASHU_ACCEPTED_MINTS", |s| Ok(s.to_owned()))?;
         let cashu_wallet_path = parse_path(map, "CASHU_WALLET_PATH", "./cashu_wallet.db");
         let hls_mirror_concurrency: usize = parse_usize(map, "HLS_MIRROR_CONCURRENCY", "4")?;
 
@@ -384,11 +425,13 @@ impl Config {
         let filter_algorithm = parse_filter_algorithm(map, "FILTER_ALGORITHM");
 
         let dvm_allowed_kinds = parse_list(map, "DVM_ALLOWED_KINDS", |s| {
-            s.parse::<u16>().map_err(|e| format!("invalid DVM kind: {e}"))
+            s.parse::<u16>()
+                .map_err(|e| format!("invalid DVM kind: {e}"))
         })?;
 
         // Validate: if any feature uses DVM mode, kinds must be configured.
-        let needs_dvm = feature_upload_enabled.requires_dvm() || feature_mirror_enabled.requires_dvm();
+        let needs_dvm =
+            feature_upload_enabled.requires_dvm() || feature_mirror_enabled.requires_dvm();
         if needs_dvm && dvm_allowed_kinds.is_empty() {
             return Err(ConfigError::validation(
                 "DVM_ALLOWED_KINDS must be set when any feature uses 'dvm' mode",
@@ -422,8 +465,10 @@ impl Config {
         let auth_max_age_secs = parse_u64(map, "AUTH_MAX_AGE_SECS", "300")?;
         let auth_clock_skew_secs = parse_u64(map, "AUTH_CLOCK_SKEW_SECS", "30")?;
         let auth_require_server_tag = parse_bool(map, "AUTH_REQUIRE_SERVER_TAG", "false")?;
-        let metrics_bearer_token = parse_opt(map, "METRICS_BEARER_TOKEN", |s: &str| Ok(s.trim().to_owned()))?
-            .filter(|t| !t.is_empty());
+        let metrics_bearer_token = parse_opt(map, "METRICS_BEARER_TOKEN", |s: &str| {
+            Ok(s.trim().to_owned())
+        })?
+        .filter(|t| !t.is_empty());
 
         Ok(Self {
             storage_path,
@@ -517,8 +562,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use nostr_relay_pool::prelude::ToBech32;
     use crate::models::{FeatureMode, ReportAction, UpstreamMode};
+    use nostr_relay_pool::prelude::ToBech32;
 
     #[test]
     fn defaults_when_env_is_empty() {
@@ -588,7 +633,8 @@ mod tests {
         map.insert("MAX_BLOB_SIZE_MB".to_owned(), "100".to_owned());
         let err = Config::from_map(&map).unwrap_err();
         assert!(
-            err.message.contains("MAX_CHUNK_SIZE_MB cannot exceed MAX_BLOB_SIZE_MB"),
+            err.message
+                .contains("MAX_CHUNK_SIZE_MB cannot exceed MAX_BLOB_SIZE_MB"),
             "got: {}",
             err.message
         );
@@ -600,14 +646,20 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("FEATURE_PAID_UPLOAD".to_owned(), "on".to_owned());
         let err = Config::from_map(&map).unwrap_err();
-        assert!(err.message.contains("Exactly one CASHU_ACCEPTED_MINTS"), "{err}");
+        assert!(
+            err.message.contains("Exactly one CASHU_ACCEPTED_MINTS"),
+            "{err}"
+        );
 
         // Two mints → error
         let mut map2 = HashMap::new();
         map2.insert("FEATURE_PAID_MIRROR".to_owned(), "on".to_owned());
         map2.insert("CASHU_ACCEPTED_MINTS".to_owned(), "a,b".to_owned());
         let err2 = Config::from_map(&map2).unwrap_err();
-        assert!(err2.message.contains("Exactly one CASHU_ACCEPTED_MINTS"), "{err2}");
+        assert!(
+            err2.message.contains("Exactly one CASHU_ACCEPTED_MINTS"),
+            "{err2}"
+        );
     }
 
     #[test]
@@ -628,7 +680,8 @@ mod tests {
         map.insert("CLEANUP_INTERVAL_SECS".to_owned(), "0".to_owned());
         let err = Config::from_map(&map).unwrap_err();
         assert!(
-            err.message.contains("CLEANUP_INTERVAL_SECS must be greater than zero"),
+            err.message
+                .contains("CLEANUP_INTERVAL_SECS must be greater than zero"),
             "got: {}",
             err.message
         );

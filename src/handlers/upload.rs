@@ -45,13 +45,12 @@ pub async fn upload_file(
     // Stream to temp file and calculate hash.  The explicit accounting is
     // required even when a transport layer already rejects oversized bodies.
     let body_stream = req.into_body().into_data_stream();
-    let (sha256, total_bytes) =
-        upload::stream_to_temp_file(
-            body_stream,
-            temp.path(),
-            intake::size_limit(&state, intake::Intake::ClientUpload),
-        )
-        .await?;
+    let (sha256, total_bytes) = upload::stream_to_temp_file(
+        body_stream,
+        temp.path(),
+        intake::size_limit(&state, intake::Intake::ClientUpload),
+    )
+    .await?;
 
     // Validate authorization matches the hash (must come before payment check)
     authorized.bind(&state, &sha256).await?;
@@ -238,7 +237,6 @@ pub async fn patch_upload(
         X_SHA_256_HEADER,
     };
     use crate::models::{ChunkInfo, ChunkUploadKey};
-
 
     let sha256 = headers
         .get(X_SHA_256_HEADER)

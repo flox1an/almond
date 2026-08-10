@@ -86,10 +86,8 @@ async fn mirror_single_reference(
         .map_err(|error| format!("Failed to fetch segment: {error}"))?;
     let content_type = crate::helpers::extract_content_type_from_response(response.headers());
     let extension = get_extension_from_mime(&content_type);
-    let max_size_bytes = crate::services::intake::size_limit(
-        state,
-        crate::services::intake::Intake::UpstreamFetch,
-    );
+    let max_size_bytes =
+        crate::services::intake::size_limit(state, crate::services::intake::Intake::UpstreamFetch);
     file_storage::ensure_storage_capacity(
         state,
         response.content_length().unwrap_or(max_size_bytes),

@@ -28,15 +28,11 @@ impl AlmondLocalBlobStore {
 
     async fn local_path_for_hash(&self, hash: &Hash) -> Option<PathBuf> {
         let hash_hex = hex::encode(hash);
-        self.file_index
-            .get(&hash_hex)
-            .await
-            .and_then(|metadata| {
-                // Only the filesystem adapter can hand out a path to export;
-                // a natively stored blob is simply not P2P-servable.
-                crate::services::file_storage::local_path(&metadata)
-                    .map(std::path::Path::to_path_buf)
-            })
+        self.file_index.get(&hash_hex).await.and_then(|metadata| {
+            // Only the filesystem adapter can hand out a path to export;
+            // a natively stored blob is simply not P2P-servable.
+            crate::services::file_storage::local_path(&metadata).map(std::path::Path::to_path_buf)
+        })
     }
 }
 

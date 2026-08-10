@@ -11,10 +11,10 @@
 //! validators). This module owns the policy on top of it.
 
 use axum::http::{header, HeaderMap};
+use nostr_relay_pool::prelude::*;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
-use nostr_relay_pool::prelude::*;
 
 use crate::error::{AppError, AppResult};
 use crate::models::{AppState, FeatureMode};
@@ -240,11 +240,7 @@ mod tests {
     #[test]
     fn only_deletion_is_destructive_and_it_is_never_feature_gated() {
         assert!(Operation::Delete.is_destructive());
-        for operation in [
-            Operation::Upload,
-            Operation::Mirror,
-            Operation::ChunkUpload,
-        ] {
+        for operation in [Operation::Upload, Operation::Mirror, Operation::ChunkUpload] {
             assert!(!operation.is_destructive());
         }
     }

@@ -36,10 +36,9 @@ pub async fn delete_blob(
 
     // Authorization is bound to this hash and consumes its single-use nonce,
     // so the same signed event cannot delete twice.
-    let authorized =
-        authorization::authorize(&headers, &state, authorization::Operation::Delete)
-            .await
-            .map_err(StatusCode::from)?;
+    let authorized = authorization::authorize(&headers, &state, authorization::Operation::Delete)
+        .await
+        .map_err(StatusCode::from)?;
     authorized
         .bind(&state, &sha256)
         .await

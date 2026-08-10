@@ -212,19 +212,18 @@ pub async fn try_upstream_servers(
     };
 
     let client = state.upstream_client.clone();
-    let mut walk = upstream_candidates::Walk::new(
-        state,
-        filename,
-        custom_origin,
-        xs_servers,
-        author_pubkey,
-    );
+    let mut walk =
+        upstream_candidates::Walk::new(state, filename, custom_origin, xs_servers, author_pubkey);
 
     while let Some(candidate) = walk.next().await {
         let request = copy_headers_for_cold_fetch(headers, client.get(&candidate.url));
         match request.send().await {
             Ok(response) if response.status().is_success() => {
-                debug!("Found file on {}: {}", candidate.tier.label(), candidate.url);
+                debug!(
+                    "Found file on {}: {}",
+                    candidate.tier.label(),
+                    candidate.url
+                );
                 return handle_successful_upstream_response(
                     state,
                     &client,
@@ -278,13 +277,8 @@ pub async fn try_upstream_redirect(
     }
 
     let client = state.upstream_client.clone();
-    let mut walk = upstream_candidates::Walk::new(
-        state,
-        filename,
-        custom_origin,
-        xs_servers,
-        author_pubkey,
-    );
+    let mut walk =
+        upstream_candidates::Walk::new(state, filename, custom_origin, xs_servers, author_pubkey);
 
     while let Some(candidate) = walk.next().await {
         if let Some(response) = try_head_and_redirect(
@@ -729,13 +723,8 @@ async fn proxy_request_to_upstream(
     );
 
     let client = state.upstream_client.clone();
-    let mut walk = upstream_candidates::Walk::new(
-        state,
-        filename,
-        custom_origin,
-        xs_servers,
-        author_pubkey,
-    );
+    let mut walk =
+        upstream_candidates::Walk::new(state, filename, custom_origin, xs_servers, author_pubkey);
 
     while let Some(candidate) = walk.next().await {
         let request = copy_headers_to_reqwest(headers, client.get(&candidate.url));

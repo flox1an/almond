@@ -589,7 +589,10 @@ mod tests {
         // hour.
         assert!(plan(Some("https://origin.example"), None).names_specific_servers());
         assert!(plan(None, Some(&["https://xs.example"])).names_specific_servers());
-        assert!(plan(Some("https://origin.example"), Some(&["https://xs.example"]))
-            .names_specific_servers());
+        assert!(plan(
+            Some("https://origin.example"),
+            Some(&["https://xs.example"])
+        )
+        .names_specific_servers());
     }
 }

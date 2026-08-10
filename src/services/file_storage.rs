@@ -49,8 +49,8 @@ fn completed_path(
     // `publish_blob` validates the hash (via `validate_sha256_format`) before
     // calling, so the grammar owner's checks cannot fail here.
     let (h0, h1) = blob_name::fan_out(hash).expect("hash validated by publish_blob");
-    let filename = blob_name::name(hash, expiration, extension)
-        .expect("hash validated by publish_blob");
+    let filename =
+        blob_name::name(hash, expiration, extension).expect("hash validated by publish_blob");
     let root = match origin {
         BlobOrigin::Upload => &state.storage.uploads,
         BlobOrigin::UpstreamCache => &state.storage.upstream_cache,
@@ -570,10 +570,7 @@ mod tests {
     use super::*;
 
     fn scratch_path(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "almond_temp_blob_{label}_{}",
-            uuid::Uuid::new_v4()
-        ))
+        std::env::temp_dir().join(format!("almond_temp_blob_{label}_{}", uuid::Uuid::new_v4()))
     }
 
     fn written_scratch(label: &str) -> PathBuf {
