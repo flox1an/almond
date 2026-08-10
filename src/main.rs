@@ -28,6 +28,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+pub mod config;
 pub mod constants;
 pub mod error;
 pub mod handlers;
@@ -40,7 +41,7 @@ pub mod tls;
 pub mod trust_network;
 pub mod utils;
 
-use std::{collections::HashMap, env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::signal;
 
 use crate::models::AppState;
@@ -52,7 +53,6 @@ use crate::utils::{
     migrate_legacy_blobs,
 };
 use axum::Router;
-use dotenvy::dotenv;
 use nostr_relay_pool::prelude::*;
 use tokio::fs;
 use tokio::sync::RwLock;
@@ -209,75 +209,26 @@ async fn clear_temp_directory(temp_dir: &PathBuf) -> Result<(), std::io::Error> 
     Ok(())
 }
 
-async fn load_app_state() -> AppState {
-    dotenv().ok();
-
-    let max_total_size = env::var("MAX_TOTAL_SIZE")
-        .unwrap_or_else(|_| "99999".to_string())
-        .parse::<u64>()
-        .expect("Invalid value for MAX_TOTAL_SIZE")
-        .checked_mul(1024 * 1024)
-        .expect("MAX_TOTAL_SIZE value too large");
-
-    let max_total_files = env::var("MAX_TOTAL_FILES")
-        .unwrap_or_else(|_| "99999999".to_string())
-        .parse::<usize>()
-        .expect("Invalid value for MAX_TOTAL_FILES");
-
-    let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
-
-    // HTTPS/TLS configuration
-    let enable_https = env::var("ENABLE_HTTPS")
-        .unwrap_or_else(|_| "false".to_string())
-        .parse::<bool>()
-        .unwrap_or(false);
-
-    let tls_cert_path =
-        PathBuf::from(env::var("TLS_CERT_PATH").unwrap_or_else(|_| "./cert.pem".to_string()));
-
-    let tls_key_path =
-        PathBuf::from(env::var("TLS_KEY_PATH").unwrap_or_else(|_| "./key.pem".to_string()));
-
-    let tls_auto_generate = env::var("TLS_AUTO_GENERATE")
-        .unwrap_or_else(|_| "true".to_string())
-        .parse::<bool>()
-        .unwrap_or(true);
-
-    let public_url = env::var("PUBLIC_URL").unwrap_or_else(|_| {
-        if enable_https {
-            "https://127.0.0.1:3000".to_string()
-        } else {
-            "http://127.0.0.1:3000".to_string()
-        }
-    });
-    let cors_allowed_origins = env::var("CORS_ALLOWED_ORIGINS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|origin| !origin.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-
-    // Storage uses explicit roots so completed uploads and upstream cache
-    // entries cannot be reconstructed into the same namespace.
-    let storage_path = env::var("STORAGE_PATH").unwrap_or_else(|_| "./files".to_string());
-    let storage = models::StorageLayout::new(PathBuf::from(&storage_path));
+async fn build_app_state(cfg: &config::Config) -> AppState {
+    let storage = models::StorageLayout::new(PathBuf::from(&cfg.storage_path));
     initialize_storage(&storage)
         .await
         .unwrap_or_else(|error| panic!("Failed to initialize storage layout: {error}"));
     info!("⚙️ Storage path: {}", storage.root.display());
-    let native_s3 = match services::native_storage::S3Settings::from_env() {
-        Ok(Some(settings)) => {
-            info!("S3 native storage enabled for bucket {}", settings.bucket);
-            Some(Arc::new(
-                services::native_storage::NativeS3Storage::connect(settings).await,
-            ))
-        }
-        Ok(None) => None,
-        Err(message) => {
-            error!("{message}");
-            std::process::exit(1);
-        }
+
+    let native_s3 = if cfg.s3_endpoint.is_some() {
+        let settings = services::native_storage::S3Settings {
+            endpoint: cfg.s3_endpoint.clone().expect("validated"),
+            bucket: cfg.s3_bucket.clone().expect("validated"),
+            access_key_id: cfg.s3_access_key_id.clone().expect("validated"),
+            secret_access_key: cfg.s3_secret_access_key.clone().expect("validated"),
+        };
+        info!("S3 native storage enabled for bucket {}", settings.bucket);
+        Some(Arc::new(
+            services::native_storage::NativeS3Storage::connect(settings).await,
+        ))
+    } else {
+        None
     };
 
     // Clear temp directory on startup.
@@ -317,32 +268,17 @@ async fn load_app_state() -> AppState {
     }
 
     let serve_file_index = Arc::new(RwLock::new(HashMap::new()));
-    let serve_files_path = env::var("SERVE_FILES_PATH")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    let serve_files_manifest_name = env::var("SERVE_FILES_MANIFEST_NAME")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "manifest-sha256.txt".to_string());
-    let serve_files_refresh_interval_secs = env::var("SERVE_FILES_REFRESH_INTERVAL_SECS")
-        .unwrap_or_else(|_| "3600".to_string())
-        .parse()
-        .expect("Invalid value for SERVE_FILES_REFRESH_INTERVAL_SECS");
-
-    if let Some(path) = &serve_files_path {
+    if let Some(path) = &cfg.serve_files_path {
         info!(
             "📁 Serve files enabled: {} (manifest: {}, refresh: {}s)",
             path.display(),
-            serve_files_manifest_name,
-            serve_files_refresh_interval_secs
+            cfg.serve_files_manifest_name,
+            cfg.serve_files_refresh_interval_secs
         );
 
         if let Err(e) = services::serve_files::refresh_serve_file_index(
             path,
-            &serve_files_manifest_name,
+            &cfg.serve_files_manifest_name,
             &serve_file_index,
         )
         .await
@@ -355,278 +291,36 @@ async fn load_app_state() -> AppState {
         }
     }
 
-    let cleanup_interval_secs: u64 = env::var("CLEANUP_INTERVAL_SECS")
-        .unwrap_or_else(|_| "30".to_string())
-        .parse()
-        .expect("Invalid value for CLEANUP_INTERVAL_SECS");
-    assert!(
-        cleanup_interval_secs > 0,
-        "CLEANUP_INTERVAL_SECS must be greater than zero"
-    );
+    // Initialize Prometheus metrics
+    let metrics = metrics::Metrics::new();
+    info!("✅ Prometheus metrics initialized");
 
-    let max_file_age_days = env::var("MAX_FILE_AGE_DAYS")
-        .unwrap_or_else(|_| "0".to_string())
-        .parse()
-        .expect("Invalid value for MAX_FILE_AGE_DAYS");
-
-    let max_upstream_cache_ttl_days = env::var("MAX_UPSTREAM_CACHE_TTL_DAYS")
-        .unwrap_or_else(|_| "1".to_string())
-        .parse()
-        .expect("Invalid value for MAX_UPSTREAM_CACHE_TTL_DAYS");
-
-    // Parse max upstream download size in MB
-    let max_upstream_download_size_mb = env::var("MAX_UPSTREAM_DOWNLOAD_SIZE_MB")
-        .unwrap_or_else(|_| "100".to_string()) // Default: 100MB
-        .parse()
-        .expect("Invalid value for MAX_UPSTREAM_DOWNLOAD_SIZE_MB");
-
-    // Parse max chunk size in MB for chunked uploads
-    let max_chunk_size_mb: u64 = env::var("MAX_CHUNK_SIZE_MB")
-        .unwrap_or_else(|_| "100".to_string()) // Default: 100MB
-        .parse()
-        .expect("Invalid value for MAX_CHUNK_SIZE_MB");
-
-    let max_blob_size_bytes = env::var("MAX_BLOB_SIZE_MB")
-        .unwrap_or_else(|_| "100".to_string())
-        .parse::<u64>()
-        .expect("Invalid value for MAX_BLOB_SIZE_MB")
-        .checked_mul(1024 * 1024)
-        .expect("MAX_BLOB_SIZE_MB value too large");
-    let min_free_disk_bytes = env::var("MIN_FREE_DISK_MB")
-        .unwrap_or_else(|_| "256".to_string())
-        .parse::<u64>()
-        .expect("Invalid value for MIN_FREE_DISK_MB")
-        .checked_mul(1024 * 1024)
-        .expect("MIN_FREE_DISK_MB value too large");
-    let max_chunk_upload_sessions = env::var("MAX_CHUNK_UPLOAD_SESSIONS")
-        .unwrap_or_else(|_| "128".to_string())
-        .parse::<usize>()
-        .expect("Invalid value for MAX_CHUNK_UPLOAD_SESSIONS");
-    let max_chunk_upload_sessions_per_pubkey = env::var("MAX_CHUNK_UPLOAD_SESSIONS_PER_PUBKEY")
-        .unwrap_or_else(|_| "8".to_string())
-        .parse::<usize>()
-        .expect("Invalid value for MAX_CHUNK_UPLOAD_SESSIONS_PER_PUBKEY");
-    assert!(
-        max_chunk_size_mb
-            .checked_mul(1024 * 1024)
-            .is_some_and(|size| size <= max_blob_size_bytes),
-        "MAX_CHUNK_SIZE_MB cannot exceed MAX_BLOB_SIZE_MB"
-    );
-
-    // Parse chunk cleanup timeout in minutes
-    let chunk_cleanup_timeout_minutes = env::var("CHUNK_CLEANUP_TIMEOUT_MINUTES")
-        .unwrap_or_else(|_| "30".to_string()) // Default: 30 minutes
-        .parse()
-        .expect("Invalid value for CHUNK_CLEANUP_TIMEOUT_MINUTES");
-
-    // Parse upstream servers from environment variable
-    let upstream_servers: Vec<String> = env::var("UPSTREAM_SERVERS")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|server| {
-            let server = server.trim();
-            if server.is_empty() {
-                None
-            } else {
-                Some(server.to_string())
-            }
-        })
-        .collect();
-
-    // Parse upstream mode from environment variable (default: proxy)
-    let upstream_mode = models::UpstreamMode::from_str_with_default(
-        &env::var("UPSTREAM_MODE").unwrap_or_else(|_| "proxy".to_string()),
-    );
-
-    if !upstream_servers.is_empty() {
-        info!("⚙️ Upstream servers: {:?}", upstream_servers);
-        info!("⚙️ Upstream mode: {}", upstream_mode.as_str());
-        info!(
-            "⚙️ Upstream download size limit: {} MB",
-            max_upstream_download_size_mb
-        );
+    // Handle HTTPS/TLS setup if enabled
+    if cfg.enable_https {
+        info!("🔐 HTTPS enabled");
+        if let Err(e) =
+            tls::ensure_tls_certificates(&cfg.tls_cert_path, &cfg.tls_key_path, cfg.tls_auto_generate)
+        {
+            error!("❌ Failed to setup TLS certificates: {}", e);
+            std::process::exit(1);
+        }
+    } else {
+        info!("⚠️  HTTPS disabled - running in HTTP mode");
     }
 
-    // Parse feature flags
-    // Upload: default to "public" (enabled for everyone)
-    let feature_upload_enabled = models::FeatureMode::from_str_with_default(
-        &env::var("FEATURE_UPLOAD_ENABLED").unwrap_or_else(|_| "public".to_string()),
-        models::FeatureMode::Public,
-    );
-
-    // Mirror: default to "public" (enabled for everyone)
-    let feature_mirror_enabled = models::FeatureMode::from_str_with_default(
-        &env::var("FEATURE_MIRROR_ENABLED").unwrap_or_else(|_| "public".to_string()),
-        models::FeatureMode::Public,
-    );
-
-    // List: keep as boolean for now
-    let feature_list_enabled = env::var("FEATURE_LIST_ENABLED")
-        .unwrap_or_else(|_| "true".to_string())
-        .parse::<bool>()
-        .unwrap_or(true);
-
-    // Custom upstream origin: default to "off" (disabled)
-    let feature_custom_upstream_origin_enabled = models::FeatureMode::from_str_with_default(
-        &env::var("FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED").unwrap_or_else(|_| "off".to_string()),
-        models::FeatureMode::Off,
-    );
-
-    let feature_homepage_enabled = env::var("FEATURE_HOMEPAGE_ENABLED")
-        .unwrap_or_else(|_| "true".to_string())
-        .parse::<bool>()
-        .unwrap_or(true);
-
-    let feature_p2p_serve_enabled = env::var("FEATURE_P2P_SERVE_ENABLED")
-        .unwrap_or_else(|_| "false".to_string())
-        .parse::<bool>()
-        .unwrap_or(false);
-
-    let p2p_nsec = env::var("P2P_NSEC")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-
-    let p2p_relays: Vec<String> = env::var("P2P_RELAYS")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|relay| {
-            let relay = relay.trim();
-            if relay.is_empty() {
-                None
-            } else {
-                Some(relay.to_string())
-            }
-        })
-        .collect();
-
-    let p2p_stun_servers: Vec<String> = env::var("P2P_STUN_SERVERS")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|server| {
-            let server = server.trim();
-            if server.is_empty() {
-                None
-            } else {
-                Some(server.to_string())
-            }
-        })
-        .collect();
-
-    let p2p_request_timeout_ms = env::var("P2P_REQUEST_TIMEOUT_MS")
-        .unwrap_or_else(|_| "10000".to_string())
-        .parse()
-        .expect("Invalid value for P2P_REQUEST_TIMEOUT_MS");
-
-    let p2p_hello_interval_ms = env::var("P2P_HELLO_INTERVAL_MS")
-        .unwrap_or_else(|_| "3000".to_string())
-        .parse()
-        .expect("Invalid value for P2P_HELLO_INTERVAL_MS");
-
-    let p2p_debug = env::var("P2P_DEBUG")
-        .unwrap_or_else(|_| "false".to_string())
-        .parse::<bool>()
-        .unwrap_or(false);
-
-    if feature_p2p_serve_enabled {
-        info!(
-            "⚙️ Hashtree P2P serving enabled - relays: {}, STUN servers: {}",
-            if p2p_relays.is_empty() {
-                "default".to_string()
-            } else {
-                format!("{:?}", p2p_relays)
-            },
-            if p2p_stun_servers.is_empty() {
-                "default".to_string()
-            } else {
-                format!("{:?}", p2p_stun_servers)
-            }
-        );
-    }
-
-    // Report feature: default to "off" (disabled)
-    let feature_report_enabled = models::FeatureMode::from_str_with_default(
-        &env::var("FEATURE_REPORT_ENABLED").unwrap_or_else(|_| "off".to_string()),
-        models::FeatureMode::Off,
-    );
-
-    // Report action: quarantine (default) or delete
-    let report_action = models::ReportAction::from_str_with_default(
-        &env::var("REPORT_ACTION").unwrap_or_else(|_| "quarantine".to_string()),
-    );
-
-    info!("⚙️ Feature flags - Upload: {}, Mirror: {}, List: {}, CustomUpstreamOrigin: {}, Homepage: {}, Report: {}",
-          feature_upload_enabled.as_str(), feature_mirror_enabled.as_str(), feature_list_enabled,
-          feature_custom_upstream_origin_enabled.as_str(), feature_homepage_enabled, feature_report_enabled.as_str());
-
-    if feature_report_enabled.is_enabled() {
-        info!("⚙️ Report action: {}", report_action.as_str());
-    }
-
-    // Parse Cashu payment configuration (BUD-07)
-    let feature_paid_upload = env::var("FEATURE_PAID_UPLOAD")
-        .unwrap_or_else(|_| "off".to_string())
-        .to_lowercase()
-        == "on";
-
-    let feature_paid_mirror = env::var("FEATURE_PAID_MIRROR")
-        .unwrap_or_else(|_| "off".to_string())
-        .to_lowercase()
-        == "on";
-
-    let feature_paid_download = env::var("FEATURE_PAID_DOWNLOAD")
-        .unwrap_or_else(|_| "off".to_string())
-        .to_lowercase()
-        == "on";
-
-    let cashu_price_per_mb = env::var("CASHU_PRICE_PER_MB")
-        .unwrap_or_else(|_| "1".to_string())
-        .parse::<u64>()
-        .expect("Invalid value for CASHU_PRICE_PER_MB");
-
-    let cashu_accepted_mints: Vec<String> = env::var("CASHU_ACCEPTED_MINTS")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|m| {
-            let m = m.trim();
-            if m.is_empty() {
-                None
-            } else {
-                Some(m.to_string())
-            }
-        })
-        .collect();
-
-    let cashu_wallet_path = PathBuf::from(
-        env::var("CASHU_WALLET_PATH").unwrap_or_else(|_| "./cashu_wallet.db".to_string()),
-    );
-    let any_paid_feature = feature_paid_upload || feature_paid_mirror || feature_paid_download;
-
-    // Validate: if any paid feature is on, mints must be configured
-    // The wallet is intentionally single-mint.  Accepting several mints while
-    // crediting all tokens to one wallet is not a valid settlement model.
-    assert!(
-        !(any_paid_feature && cashu_accepted_mints.len() != 1),
-        "Exactly one CASHU_ACCEPTED_MINTS value is required when paid features are enabled"
-    );
+    let any_paid_feature = cfg.feature_paid_upload || cfg.feature_paid_mirror || cfg.feature_paid_download;
 
     if any_paid_feature {
         info!(
             "💰 Cashu payments enabled - Price: {} sats/MB, Mints: {:?}",
-            cashu_price_per_mb, cashu_accepted_mints
+            cfg.cashu_price_per_mb, cfg.cashu_accepted_mints
         );
     }
 
-    // Initialize Cashu wallet if any paid feature is enabled
-
-    let hls_mirror_concurrency: usize = env::var("HLS_MIRROR_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4);
-    info!("HLS mirror concurrency: {}", hls_mirror_concurrency);
+    info!("HLS mirror concurrency: {}", cfg.hls_mirror_concurrency);
 
     let cashu_wallet = if any_paid_feature {
-        match cashu::init_wallet(&cashu_wallet_path, &cashu_accepted_mints).await {
+        match cashu::init_wallet(&cfg.cashu_wallet_path, &cfg.cashu_accepted_mints).await {
             Ok(wallet) => {
                 info!("💰 Cashu wallet ready for payments");
                 Some(wallet)
@@ -643,134 +337,48 @@ async fn load_app_state() -> AppState {
         None
     };
 
-    // Parse blossom server list cache TTL in hours (default: 24 hours)
-    let blossom_server_list_cache_ttl_hours = env::var("BLOSSOM_SERVER_LIST_CACHE_TTL_HOURS")
-        .unwrap_or_else(|_| "24".to_string())
-        .parse()
-        .expect("Invalid value for BLOSSOM_SERVER_LIST_CACHE_TTL_HOURS");
-
     info!(
         "⚙️ Blossom server list cache TTL: {} hours",
-        blossom_server_list_cache_ttl_hours
+        cfg.blossom_server_list_cache_ttl_hours
     );
 
-    // Parse filter algorithm from environment variable (default: binary-fuse-16)
-    let filter_algorithm = env::var("FILTER_ALGORITHM")
-        .unwrap_or_else(|_| "binary-fuse-16".to_string())
-        .to_lowercase();
+    info!("⚙️ Filter algorithm: {}", cfg.filter_algorithm);
 
-    // Validate filter algorithm
-    let filter_algorithm = match filter_algorithm.as_str() {
-        "bloom" | "binary-fuse-8" | "binary-fuse-16" | "binary-fuse-32" => filter_algorithm,
-        _ => {
-            warn!(
-                "⚠️ Invalid FILTER_ALGORITHM '{}', defaulting to 'binary-fuse-16'",
-                filter_algorithm
-            );
-            "binary-fuse-16".to_string()
-        }
-    };
-    info!("⚙️ Filter algorithm: {}", filter_algorithm);
+    info!("⚙️ Feature flags - Upload: {}, Mirror: {}, List: {}, CustomUpstreamOrigin: {}, Homepage: {}, Report: {}",
+          cfg.feature_upload_enabled.as_str(), cfg.feature_mirror_enabled.as_str(), cfg.feature_list_enabled,
+          cfg.feature_custom_upstream_origin_enabled.as_str(), cfg.feature_homepage_enabled, cfg.feature_report_enabled.as_str());
 
-    // Parse DVM allowed kinds from environment variable
-    let dvm_allowed_kinds: Vec<u16> = env::var("DVM_ALLOWED_KINDS")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|k| {
-            let k = k.trim();
-            if k.is_empty() {
-                None
-            } else {
-                match k.parse::<u16>() {
-                    Ok(kind) => Some(kind),
-                    Err(e) => {
-                        error!("Failed to parse DVM kind '{}': {}", k, e);
-                        None
-                    }
-                }
-            }
-        })
-        .collect();
-
-    // Validate: if any feature uses DVM mode, kinds must be configured
-    let needs_dvm = feature_upload_enabled.requires_dvm() || feature_mirror_enabled.requires_dvm();
-    assert!(
-        !(needs_dvm && dvm_allowed_kinds.is_empty()),
-        "DVM_ALLOWED_KINDS must be set when any feature uses 'dvm' mode"
-    );
-
-    if !dvm_allowed_kinds.is_empty() {
-        info!("🤖 DVM allowed kinds: {:?}", dvm_allowed_kinds);
+    if cfg.feature_report_enabled.is_enabled() {
+        info!("⚙️ Report action: {}", cfg.report_action.as_str());
     }
 
-    // Parse DVM relays from environment variable
-    let dvm_relays: Vec<String> = env::var("DVM_RELAYS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    if !cfg.dvm_allowed_kinds.is_empty() {
+        info!("🤖 DVM allowed kinds: {:?}", cfg.dvm_allowed_kinds);
+    }
 
-    // Parse DVM refresh interval from environment variable (default: 5 minutes)
-    let dvm_refresh_interval_mins: u64 = env::var("DVM_REFRESH_INTERVAL_MINS")
-        .unwrap_or_else(|_| "5".to_string())
-        .parse()
-        .unwrap_or(5);
-
-    // Parse allowed pubkeys from environment variable
-    let allowed_pubkeys: Vec<PublicKey> = env::var("ALLOWED_NPUBS")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|npub| {
-            if npub.trim().is_empty() {
-                None
+    if cfg.feature_p2p_serve_enabled {
+        info!(
+            "⚙️ Hashtree P2P serving enabled - relays: {}, STUN servers: {}",
+            if cfg.p2p_relays.is_empty() {
+                "default".to_string()
             } else {
-                match PublicKey::from_bech32(npub.trim()) {
-                    Ok(pk) => Some(pk),
-                    Err(e) => {
-                        error!("Failed to parse npub {}: {}", npub, e);
-                        None
-                    }
-                }
+                format!("{:?}", cfg.p2p_relays)
+            },
+            if cfg.p2p_stun_servers.is_empty() {
+                "default".to_string()
+            } else {
+                format!("{:?}", cfg.p2p_stun_servers)
             }
-        })
-        .collect();
+        );
+    }
 
-    let auth_max_ttl_secs = env::var("AUTH_MAX_TTL_SECS")
-        .unwrap_or_else(|_| "300".to_string())
-        .parse()
-        .expect("Invalid value for AUTH_MAX_TTL_SECS");
-    let auth_max_age_secs = env::var("AUTH_MAX_AGE_SECS")
-        .unwrap_or_else(|_| "300".to_string())
-        .parse()
-        .expect("Invalid value for AUTH_MAX_AGE_SECS");
-    let auth_clock_skew_secs = env::var("AUTH_CLOCK_SKEW_SECS")
-        .unwrap_or_else(|_| "30".to_string())
-        .parse()
-        .expect("Invalid value for AUTH_CLOCK_SKEW_SECS");
-    let auth_require_server_tag = env::var("AUTH_REQUIRE_SERVER_TAG")
-        .unwrap_or_else(|_| "false".to_string())
-        .parse()
-        .expect("Invalid value for AUTH_REQUIRE_SERVER_TAG");
-    let metrics_bearer_token = env::var("METRICS_BEARER_TOKEN")
-        .ok()
-        .filter(|token| !token.is_empty());
-
-    // Initialize Prometheus metrics
-    let metrics = metrics::Metrics::new();
-    info!("✅ Prometheus metrics initialized");
-
-    // Handle HTTPS/TLS setup if enabled
-    if enable_https {
-        info!("🔐 HTTPS enabled");
-        if let Err(e) =
-            tls::ensure_tls_certificates(&tls_cert_path, &tls_key_path, tls_auto_generate)
-        {
-            error!("❌ Failed to setup TLS certificates: {}", e);
-            std::process::exit(1);
-        }
-    } else {
-        info!("⚠️  HTTPS disabled - running in HTTP mode");
+    if !cfg.upstream_servers.is_empty() {
+        info!("⚙️ Upstream servers: {:?}", cfg.upstream_servers);
+        info!("⚙️ Upstream mode: {}", cfg.upstream_mode.as_str());
+        info!(
+            "⚙️ Upstream download size limit: {} MB",
+            cfg.max_upstream_download_size_mb
+        );
     }
 
     AppState {
@@ -780,77 +388,77 @@ async fn load_app_state() -> AppState {
         superseded_blob_deletions: Arc::new(RwLock::new(Vec::new())),
         file_index,
         serve_file_index,
-        serve_files_path,
-        serve_files_manifest_name,
-        serve_files_refresh_interval_secs,
-        cors_allowed_origins,
-        max_total_size,
-        max_total_files,
-        max_blob_size_bytes,
-        min_free_disk_bytes,
-        bind_addr,
-        public_url,
-        cleanup_interval_secs,
+        serve_files_path: cfg.serve_files_path.clone(),
+        serve_files_manifest_name: cfg.serve_files_manifest_name.clone(),
+        serve_files_refresh_interval_secs: cfg.serve_files_refresh_interval_secs,
+        cors_allowed_origins: cfg.cors_allowed_origins.clone(),
+        max_total_size: cfg.max_total_size,
+        max_total_files: cfg.max_total_files,
+        max_blob_size_bytes: cfg.max_blob_size_bytes,
+        min_free_disk_bytes: cfg.min_free_disk_bytes,
+        bind_addr: cfg.bind_addr.clone(),
+        public_url: cfg.public_url.clone(),
+        cleanup_interval_secs: cfg.cleanup_interval_secs,
         changes_pending: Arc::new(RwLock::new(true)),
-        allowed_pubkeys,
+        allowed_pubkeys: cfg.allowed_pubkeys.clone(),
         trusted_pubkeys: Arc::new(RwLock::new(HashMap::new())),
         dvm_pubkeys: Arc::new(RwLock::new(std::collections::HashSet::new())),
-        dvm_allowed_kinds,
-        dvm_relays,
-        dvm_refresh_interval_mins,
-        max_file_age_days,
-        max_upstream_cache_ttl_days,
+        dvm_allowed_kinds: cfg.dvm_allowed_kinds.clone(),
+        dvm_relays: cfg.dvm_relays.clone(),
+        dvm_refresh_interval_mins: cfg.dvm_refresh_interval_mins,
+        max_file_age_days: cfg.max_file_age_days,
+        max_upstream_cache_ttl_days: cfg.max_upstream_cache_ttl_days,
         filter_cache: Arc::new(RwLock::new(None)),
-        upstream_servers,
-        upstream_mode,
-        max_upstream_download_size_mb,
+        upstream_servers: cfg.upstream_servers.clone(),
+        upstream_mode: cfg.upstream_mode,
+        max_upstream_download_size_mb: cfg.max_upstream_download_size_mb,
         upstream_client: services::upload::create_upstream_client()
             .expect("Failed to build upstream HTTP client"),
-        max_chunk_size_mb,
-        chunk_cleanup_timeout_minutes,
-        max_chunk_upload_sessions,
-        max_chunk_upload_sessions_per_pubkey,
-        feature_upload_enabled,
-        feature_mirror_enabled,
-        feature_list_enabled,
-        feature_custom_upstream_origin_enabled,
-        feature_homepage_enabled,
-        feature_p2p_serve_enabled,
-        p2p_nsec,
-        p2p_relays,
-        p2p_stun_servers,
-        p2p_request_timeout_ms,
-        p2p_hello_interval_ms,
-        p2p_debug,
+        max_chunk_size_mb: cfg.max_chunk_size_mb,
+        chunk_cleanup_timeout_minutes: cfg.chunk_cleanup_timeout_minutes,
+        max_chunk_upload_sessions: cfg.max_chunk_upload_sessions,
+        max_chunk_upload_sessions_per_pubkey: cfg.max_chunk_upload_sessions_per_pubkey,
+        feature_upload_enabled: cfg.feature_upload_enabled,
+        feature_mirror_enabled: cfg.feature_mirror_enabled,
+        feature_list_enabled: cfg.feature_list_enabled,
+        feature_custom_upstream_origin_enabled: cfg.feature_custom_upstream_origin_enabled,
+        feature_homepage_enabled: cfg.feature_homepage_enabled,
+        feature_p2p_serve_enabled: cfg.feature_p2p_serve_enabled,
+        p2p_nsec: cfg.p2p_nsec.clone(),
+        p2p_relays: cfg.p2p_relays.clone(),
+        p2p_stun_servers: cfg.p2p_stun_servers.clone(),
+        p2p_request_timeout_ms: cfg.p2p_request_timeout_ms,
+        p2p_hello_interval_ms: cfg.p2p_hello_interval_ms,
+        p2p_debug: cfg.p2p_debug,
         ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
         upstream_negotiations: Arc::new(RwLock::new(HashMap::new())),
         chunk_sessions: Arc::new(services::chunk_sessions::ChunkSessions::new(
             services::chunk_sessions::SessionLimits {
-                max_sessions: max_chunk_upload_sessions,
-                max_sessions_per_pubkey: max_chunk_upload_sessions_per_pubkey,
+                max_sessions: cfg.max_chunk_upload_sessions,
+                max_sessions_per_pubkey: cfg.max_chunk_upload_sessions_per_pubkey,
             },
         )),
         failed_upstream_lookups: Arc::new(RwLock::new(HashMap::new())),
         blossom_server_lists: Arc::new(RwLock::new(HashMap::new())),
-        blossom_server_list_cache_ttl_hours,
-        filter_algorithm,
+        blossom_server_list_cache_ttl_hours: cfg.blossom_server_list_cache_ttl_hours,
+        filter_algorithm: cfg.filter_algorithm.clone(),
         metrics,
-        report_action,
-        feature_report_enabled,
-        auth_max_ttl_secs,
-        auth_max_age_secs,
-        auth_clock_skew_secs,
-        auth_require_server_tag,
-        metrics_bearer_token,
+        report_action: cfg.report_action,
+        feature_report_enabled: cfg.feature_report_enabled,
+        auth_max_ttl_secs: cfg.auth_max_ttl_secs,
+        auth_max_age_secs: cfg.auth_max_age_secs,
+        auth_clock_skew_secs: cfg.auth_clock_skew_secs,
+        auth_require_server_tag: cfg.auth_require_server_tag,
+        metrics_bearer_token: cfg.metrics_bearer_token.clone(),
         destructive_event_replays: Arc::new(RwLock::new(HashMap::new())),
-        feature_paid_upload,
-        feature_paid_mirror,
-        feature_paid_download,
-        cashu_price_per_mb,
-        cashu_accepted_mints,
-        cashu_wallet_path,
+        feature_paid_upload: cfg.feature_paid_upload,
+        feature_paid_mirror: cfg.feature_paid_mirror,
+        feature_paid_download: cfg.feature_paid_download,
+        cashu_price_per_mb: cfg.cashu_price_per_mb,
+        cashu_accepted_mints: cfg.cashu_accepted_mints.clone(),
+        cashu_wallet_path: cfg.cashu_wallet_path.clone(),
         cashu_wallet,
-        hls_mirror_concurrency,
+        hls_mirror_concurrency: cfg.hls_mirror_concurrency,
     }
 }
 
@@ -883,16 +491,6 @@ fn start_chunk_cleanup_job(state: AppState) {
 
 fn start_trust_network_refresh_job(state: AppState) {
     tokio::spawn(async move {
-        // Only run if any feature is using WOT mode
-        let needs_wot = state.feature_upload_enabled.requires_wot()
-            || state.feature_mirror_enabled.requires_wot()
-            || state.feature_custom_upstream_origin_enabled.requires_wot();
-
-        if !needs_wot {
-            info!("⚠️ Trust network refresh disabled - no features using WOT mode");
-            return;
-        }
-
         info!("✅ Trust network refresh enabled - features using WOT mode");
 
         let mut interval = tokio::time::interval(Duration::from_secs(4 * 3600));
@@ -915,14 +513,6 @@ fn start_trust_network_refresh_job(state: AppState) {
 
 fn start_dvm_refresh_job(state: AppState) {
     tokio::spawn(async move {
-        let needs_dvm = state.feature_upload_enabled.requires_dvm()
-            || state.feature_mirror_enabled.requires_dvm();
-
-        if !needs_dvm || state.dvm_allowed_kinds.is_empty() {
-            info!("⚠️ DVM refresh disabled - no features using DVM mode");
-            return;
-        }
-
         info!(
             "✅ DVM refresh enabled - allowed kinds: {:?}, interval: {}m",
             state.dvm_allowed_kinds, state.dvm_refresh_interval_mins
@@ -954,31 +544,51 @@ async fn main() {
     // Install default crypto provider for rustls (required for HTTPS)
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let state = load_app_state().await;
-    let addr = state
+    // Parse and validate configuration — boot errors exit here.
+    let cfg = match config::Config::from_env() {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            error!("❌ Configuration error: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    let addr = cfg
         .bind_addr
         .parse::<SocketAddr>()
         .expect("Invalid address format");
 
-    // Get HTTPS configuration
-    let enable_https = env::var("ENABLE_HTTPS")
-        .unwrap_or_else(|_| "false".to_string())
-        .parse::<bool>()
-        .unwrap_or(false);
+    let state = build_app_state(&cfg).await;
 
     start_cleanup_job(state.clone());
     start_chunk_cleanup_job(state.clone());
-    start_trust_network_refresh_job(state.clone());
-    start_dvm_refresh_job(state.clone());
-    if let Some(path) = state.serve_files_path.clone() {
+
+    // Only spawn jobs whose features are enabled.
+    if cfg.feature_upload_enabled.requires_wot()
+        || cfg.feature_mirror_enabled.requires_wot()
+        || cfg.feature_custom_upstream_origin_enabled.requires_wot()
+    {
+        start_trust_network_refresh_job(state.clone());
+    }
+
+    if (cfg.feature_upload_enabled.requires_dvm() || cfg.feature_mirror_enabled.requires_dvm())
+        && !cfg.dvm_allowed_kinds.is_empty()
+    {
+        start_dvm_refresh_job(state.clone());
+    }
+
+    if let Some(path) = &cfg.serve_files_path {
         services::serve_files::start_refresh_job(
-            path,
-            state.serve_files_manifest_name.clone(),
-            state.serve_files_refresh_interval_secs,
+            path.clone(),
+            cfg.serve_files_manifest_name.clone(),
+            cfg.serve_files_refresh_interval_secs,
             state.serve_file_index.clone(),
         );
     }
-    services::p2p::start_p2p_serve_job(state.clone());
+
+    if cfg.feature_p2p_serve_enabled {
+        services::p2p::start_p2p_serve_job(state.clone());
+    }
 
     let app = create_app(state.clone()).await;
 
@@ -1014,15 +624,10 @@ async fn main() {
     });
 
     // Start server with HTTPS or HTTP
-    if enable_https {
-        let tls_cert_path =
-            PathBuf::from(env::var("TLS_CERT_PATH").unwrap_or_else(|_| "./cert.pem".to_string()));
-        let tls_key_path =
-            PathBuf::from(env::var("TLS_KEY_PATH").unwrap_or_else(|_| "./key.pem".to_string()));
-
+    if cfg.enable_https {
         info!("🎧 blossom server listening on https://{}", addr);
 
-        match tls::load_tls_config(&tls_cert_path, &tls_key_path).await {
+        match tls::load_tls_config(&cfg.tls_cert_path, &cfg.tls_key_path).await {
             Ok(config) => {
                 if let Err(e) = axum_server::bind_rustls(addr, config)
                     .serve(app.into_make_service())
