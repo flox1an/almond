@@ -290,6 +290,7 @@ pub async fn mark_changes_pending(state: &AppState) {
 }
 
 /// Create a temporary file path with an optional extension.
+#[must_use]
 pub fn create_temp_path(state: &AppState, prefix: &str, extension: Option<&str>) -> PathBuf {
     let uuid = uuid::Uuid::new_v4();
     let filename = extension.map_or_else(
@@ -358,6 +359,7 @@ pub fn validate_sha256_format(sha256: &str) -> AppResult<()> {
 }
 
 /// Extract SHA-256 hash from filename (handles both `hash` and `hash.ext`).
+#[must_use]
 pub fn extract_sha256_from_filename(filename: &str) -> Option<String> {
     let hash = filename.split('.').next()?;
     (hash.len() == 64 && hash.chars().all(|character| character.is_ascii_hexdigit()))

@@ -21,7 +21,7 @@ pub async fn get_metrics(State(state): State<AppState>, headers: HeaderMap) -> R
         return StatusCode::UNAUTHORIZED.into_response();
     }
     // Update the metrics before gathering them
-    let _ = state.get_stats().await;
+    let () = state.get_stats().await;
 
     // Gather all metrics from the registry
     let metric_families = state.metrics.registry.gather();
@@ -31,7 +31,7 @@ pub async fn get_metrics(State(state): State<AppState>, headers: HeaderMap) -> R
     let mut buffer = Vec::new();
 
     match encoder.encode(&metric_families, &mut buffer) {
-        Ok(_) => {
+        Ok(()) => {
             // Return the metrics with appropriate content type
             (
                 StatusCode::OK,

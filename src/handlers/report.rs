@@ -69,8 +69,7 @@ async fn quarantine_blob(
 
     let file_name = file_path
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| sha256.to_string());
+        .map_or_else(|| sha256.to_string(), |n| n.to_string_lossy().to_string());
 
     let quarantine_path = quarantine_dir.join(&file_name);
 
@@ -139,8 +138,8 @@ pub async fn report_blob(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let created_at = u64::try_from(report.created_at).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -206,12 +205,11 @@ pub async fn report_blob(
     // Process each reported blob
     for sha256 in &blob_hashes {
         // Check if blob exists
-        let file_metadata = match state.file_index.get(sha256).await {
-            Some(metadata) => metadata,
-            None => {
-                warn!("Reported blob not found: {}", sha256);
-                continue;
-            }
+        let file_metadata = if let Some(metadata) = state.file_index.get(sha256).await {
+            metadata
+        } else {
+            warn!("Reported blob not found: {}", sha256);
+            continue;
         };
 
         let FileLocation::Local(file_path) = &file_metadata.location else {

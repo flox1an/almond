@@ -140,7 +140,7 @@ impl From<serde_json::Error> for AppError {
     }
 }
 
-/// Convert AppError to StatusCode for backward compatibility
+/// Convert `AppError` to `StatusCode` for backward compatibility
 impl From<AppError> for StatusCode {
     fn from(err: AppError) -> Self {
         match err {

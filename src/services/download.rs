@@ -222,7 +222,9 @@ pub async fn mark_failed_lookup(state: &AppState, filename: &str) {
 pub async fn is_recently_failed(state: &AppState, filename: &str) -> bool {
     let failed_lookups = state.failed_upstream_lookups.read().await;
     if let Some(failed_time) = failed_lookups.get(filename) {
-        let one_hour_ago = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        let one_hour_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(3600))
+            .unwrap();
         return *failed_time > one_hour_ago;
     }
     false

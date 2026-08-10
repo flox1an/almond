@@ -35,7 +35,7 @@ fn analyze_events(events: &[NostrEvent]) -> ReportStats {
     let mut stats = ReportStats::default();
     stats.total_events = events.len();
 
-    for event in events.iter() {
+    for event in events {
         // Count by kind
         *stats.kind_counts.entry(event.kind).or_insert(0) += 1;
 
@@ -48,43 +48,39 @@ fn analyze_events(events: &[NostrEvent]) -> ReportStats {
             }
 
             match tag[0].as_str() {
-                "L" => {
+                "L"
                     // Label namespace
-                    if tag.len() > 1 {
+                    if tag.len() > 1 => {
                         *stats
                             .label_counts
                             .entry(format!("L:{}", tag[1]))
                             .or_insert(0) += 1;
                     }
-                }
-                "l" => {
+                "l"
                     // Label value
-                    if tag.len() > 1 {
-                        let namespace = tag.get(2).map(|s| s.as_str()).unwrap_or("unknown");
+                    if tag.len() > 1 => {
+                        let namespace = tag.get(2).map_or("unknown", String::as_str);
                         *stats
                             .label_counts
                             .entry(format!("l:{}:{}", namespace, tag[1]))
                             .or_insert(0) += 1;
                     }
-                }
-                "p" => {
+                "p"
                     // Reported pubkey
-                    if tag.len() > 1 {
+                    if tag.len() > 1 => {
                         *stats
                             .reported_pubkey_counts
                             .entry(tag[1].clone())
                             .or_insert(0) += 1;
                     }
-                }
-                "e" => {
+                "e"
                     // Reported event
-                    if tag.len() > 1 {
+                    if tag.len() > 1 => {
                         *stats
                             .reported_event_counts
                             .entry(tag[1].clone())
                             .or_insert(0) += 1;
                     }
-                }
                 _ => {}
             }
         }
@@ -107,7 +103,7 @@ fn print_top_n(title: &str, counts: &HashMap<String, usize>, n: usize) {
         let display_key = if key.len() > 64 {
             format!("{}...", &key[..61])
         } else {
-            key.to_string()
+            (*key).clone()
         };
         println!("  {} - {} reports", display_key, count);
     }
@@ -217,9 +213,10 @@ async fn main() -> Result<()> {
         println!("Reporter: {}", event.pubkey);
         println!(
             "Created: {}",
-            chrono::DateTime::from_timestamp(event.created_at, 0)
-                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                .unwrap_or_else(|| event.created_at.to_string())
+            chrono::DateTime::from_timestamp(event.created_at, 0).map_or_else(
+                || event.created_at.to_string(),
+                |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+            )
         );
         println!("Tags:");
         for tag in &event.tags {

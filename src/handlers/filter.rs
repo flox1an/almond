@@ -37,8 +37,8 @@ fn sha256_to_u64(hex: &str) -> u64 {
     }
 }
 
-/// Serialize BinaryFuse filter as MessagePack array instead of struct
-/// The JavaScript expects: [seed, segment_length, segment_length_mask, segment_count_length, fingerprints]
+/// Serialize `BinaryFuse` filter as `MessagePack` array instead of struct
+/// The JavaScript expects: [seed, `segment_length`, `segment_length_mask`, `segment_count_length`, fingerprints]
 fn serialize_binary_fuse_as_array<T>(filter: &T) -> Result<Vec<u8>, String>
 where
     T: serde::Serialize,
@@ -53,22 +53,22 @@ where
 
     let seed = obj
         .get("seed")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "Missing or invalid seed".to_string())?;
 
     let segment_length =
         obj.get("segment_length")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| "Missing or invalid segment_length".to_string())? as u32;
 
     let segment_length_mask =
         obj.get("segment_length_mask")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| "Missing or invalid segment_length_mask".to_string())? as u32;
 
     let segment_count_length =
         obj.get("segment_count_length")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| "Missing or invalid segment_count_length".to_string())? as u32;
 
     let fingerprints = obj
@@ -77,7 +77,10 @@ where
         .ok_or_else(|| "Missing or invalid fingerprints".to_string())?;
 
     // Convert fingerprints to Vec<u16> or Vec<u8> or Vec<u32> depending on filter type
-    let fingerprint_values: Vec<u64> = fingerprints.iter().filter_map(|v| v.as_u64()).collect();
+    let fingerprint_values: Vec<u64> = fingerprints
+        .iter()
+        .filter_map(serde_json::Value::as_u64)
+        .collect();
 
     // Manually encode as MessagePack array: [seed, segment_length, segment_length_mask, segment_count_length, fingerprints]
     let mut buf = Vec::new();
@@ -107,13 +110,13 @@ where
 
     for fp in fingerprint_values {
         // Write each fingerprint based on its size (u8, u16, or u32)
-        if fp <= u8::MAX as u64 {
+        if u8::try_from(fp).is_ok() {
             encode::write_u8(&mut buf, fp as u8)
                 .map_err(|e| format!("Failed to write fingerprint: {}", e))?;
-        } else if fp <= u16::MAX as u64 {
+        } else if u16::try_from(fp).is_ok() {
             encode::write_u16(&mut buf, fp as u16)
                 .map_err(|e| format!("Failed to write fingerprint: {}", e))?;
-        } else if fp <= u32::MAX as u64 {
+        } else if u32::try_from(fp).is_ok() {
             encode::write_u32(&mut buf, fp as u32)
                 .map_err(|e| format!("Failed to write fingerprint: {}", e))?;
         } else {
@@ -205,7 +208,7 @@ fn build_filter(
 /// GET /filter - Unified filter endpoint (BUD-11)
 ///
 /// Returns a JSON response containing a filter of all blob hashes.
-/// The algorithm is determined by the FILTER_ALGORITHM env var:
+/// The algorithm is determined by the `FILTER_ALGORITHM` env var:
 /// - "bloom": Bloom filter (configurable false positive rate via `fp` query param)
 /// - "binary-fuse-8": Binary Fuse8 filter (~0.4% false positive rate)
 /// - "binary-fuse-16": Binary Fuse16 filter (~0.0015% false positive rate) [default]
@@ -365,7 +368,10 @@ mod tests {
             decoded.0, decoded.1, decoded.2, decoded.3, decoded.4.len());
 
         // Verify we have data
-        assert!(decoded.4.len() > 0, "Should have fingerprints");
-        assert!(serialized.len() > 0, "Serialized data should not be empty");
+        assert!(!decoded.4.is_empty(), "Should have fingerprints");
+        assert!(
+            !serialized.is_empty(),
+            "Serialized data should not be empty"
+        );
     }
 }

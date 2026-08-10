@@ -23,6 +23,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Initialize all Prometheus metrics
+    #[must_use]
     pub fn new() -> Self {
         let registry = Registry::new();
 

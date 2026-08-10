@@ -32,7 +32,7 @@ pub async fn refresh_serve_file_index(
         let extension = path
             .extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_string());
+            .map(ToString::to_string);
         let mime_type = mime_guess::from_path(&path)
             .first()
             .map(|mime| mime.essence_str().to_string());
@@ -150,7 +150,7 @@ pub fn start_refresh_job(
     root: PathBuf,
     manifest_name: String,
     refresh_interval_secs: u64,
-    index: std::sync::Arc<RwLock<HashMap<String, Arc<ServeFileMetadata>>>>,
+    index: Arc<RwLock<HashMap<String, Arc<ServeFileMetadata>>>>,
 ) {
     if refresh_interval_secs == 0 {
         info!("📁 Serve files periodic refresh disabled");

@@ -8,7 +8,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::lookup_host;
 use tracing::{debug, error, info, warn};
 
-use crate::constants::*;
+use crate::constants::{
+    CHUNK_SIZE, DNS_LOOKUP_TIMEOUT_SECS, HTTP_CONNECT_TIMEOUT_SECS, HTTP_REQUEST_TIMEOUT_SECS,
+    LOG_INTERVAL, UPSTREAM_POOL_IDLE_TIMEOUT_SECS, UPSTREAM_POOL_MAX_IDLE_PER_HOST,
+    UPSTREAM_READ_TIMEOUT_SECS, UPSTREAM_TCP_KEEPALIVE_SECS,
+};
 use crate::error::{AppError, AppResult};
 use crate::models::AppState;
 use crate::services::file_storage;
@@ -16,6 +20,7 @@ use crate::services::file_storage;
 /// True for every address that is not globally routable enough for an
 /// untrusted fetch target.  Rejecting documentation and reserved ranges too
 /// keeps this policy fail-closed when an address is repurposed.
+#[must_use]
 pub fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
@@ -373,10 +378,10 @@ mod tests {
     #[test]
     fn non_public_ipv4_ranges_are_rejected() {
         for address in [
-            Ipv4Addr::new(0, 0, 0, 0),
+            Ipv4Addr::UNSPECIFIED,
             Ipv4Addr::new(10, 0, 0, 1),
             Ipv4Addr::new(100, 64, 0, 1),
-            Ipv4Addr::new(127, 0, 0, 1),
+            Ipv4Addr::LOCALHOST,
             Ipv4Addr::new(169, 254, 169, 254),
             Ipv4Addr::new(172, 16, 0, 1),
             Ipv4Addr::new(192, 168, 0, 1),

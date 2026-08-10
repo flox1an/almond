@@ -1,11 +1,11 @@
-/// Binary to inspect the serialization format of BinaryFuse16
-/// Usage: cargo run --bin inspect_filter
+/// Binary to inspect the serialization format of `BinaryFuse16`
+/// Usage: cargo run --bin `inspect_filter`
 use base64::Engine;
 use xorf::{BinaryFuse16, Filter};
 
 fn main() {
     // Create a simple test filter with known values
-    let test_hashes = vec![
+    let test_hashes = [
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
     ];

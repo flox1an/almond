@@ -37,13 +37,13 @@ pub async fn create_pool(custom_relays: &[String]) -> Result<RelayPool> {
     });
 
     // Use custom relays if provided, otherwise use seed relays
-    if !custom_relays.is_empty() {
-        for relay in custom_relays {
-            pool.add_relay(relay, relay_options.clone()).await?;
-        }
-    } else {
+    if custom_relays.is_empty() {
         for seed_relay in SEED_RELAYS.iter().copied() {
             pool.add_relay(seed_relay, relay_options.clone()).await?;
+        }
+    } else {
+        for relay in custom_relays {
+            pool.add_relay(relay, relay_options.clone()).await?;
         }
     }
 
@@ -161,7 +161,7 @@ pub async fn refresh_dvm_pubkeys(
 ) -> Result<HashSet<PublicKey>> {
     let pool = create_pool(custom_relays).await?;
 
-    let k_values: Vec<String> = allowed_kinds.iter().map(|k| k.to_string()).collect();
+    let k_values: Vec<String> = allowed_kinds.iter().map(ToString::to_string).collect();
 
     println!(
         "🤖 Fetching DVM announcements for kinds: {:?}",
@@ -195,7 +195,7 @@ pub async fn check_dvm_announcement(
 ) -> Result<bool> {
     let pool = create_pool(custom_relays).await?;
 
-    let k_values: Vec<String> = allowed_kinds.iter().map(|k| k.to_string()).collect();
+    let k_values: Vec<String> = allowed_kinds.iter().map(ToString::to_string).collect();
 
     let filter = Filter::new()
         .kind(Kind::Custom(31990))

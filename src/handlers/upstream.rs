@@ -18,8 +18,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::services::upload::validate_upstream_url;
 
-use crate::constants::*;
-use crate::helpers::*;
+use crate::constants::CACHE_CONTROL_IMMUTABLE;
+use crate::helpers::{
+    copy_headers_to_reqwest, copy_headers_without_range, extract_content_type_from_response,
+    get_extension_from_mime, server_url_candidates,
+};
 use crate::models::{
     AppState, DownloadHandle, DownloadPhase, DownloadProgress, NegotiationPhase,
     UpstreamNegotiation,
@@ -125,7 +128,7 @@ pub async fn get_upstream(
 }
 
 /// Try to fetch file from upstream servers, stream it to client and save locally
-/// Prioritization: custom_origin → xs_servers → UPSTREAM_SERVERS → user servers (lazy fetch)
+/// Prioritization: `custom_origin` → `xs_servers` → `UPSTREAM_SERVERS` → user servers (lazy fetch)
 pub async fn try_upstream_servers(
     state: &AppState,
     filename: &str,
@@ -487,7 +490,7 @@ pub async fn try_upstream_servers(
 }
 
 /// Try to find file on upstream servers and return a 302 redirect response
-/// Prioritization: custom_origin → xs_servers → UPSTREAM_SERVERS → user servers (lazy fetch)
+/// Prioritization: `custom_origin` → `xs_servers` → `UPSTREAM_SERVERS` → user servers (lazy fetch)
 /// Uses HEAD requests to verify file exists before redirecting
 pub async fn try_upstream_redirect(
     state: &AppState,
@@ -722,7 +725,12 @@ async fn try_head_and_redirect(
                 let already_downloading =
                     state.ongoing_downloads.read().await.contains_key(file_hash);
 
-                if !already_downloading {
+                if already_downloading {
+                    debug!(
+                        "File {} already being downloaded, skipping duplicate background download",
+                        file_hash
+                    );
+                } else {
                     // Check size limit before starting background download
                     let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
                     let should_cache = match content_length {
@@ -753,11 +761,6 @@ async fn try_head_and_redirect(
                             .await;
                         });
                     }
-                } else {
-                    debug!(
-                        "File {} already being downloaded, skipping duplicate background download",
-                        file_hash
-                    );
                 }
             }
 
@@ -1110,7 +1113,7 @@ async fn serve_range_download(
 }
 
 /// Proxy request to upstream server while download is in progress
-/// Uses the same prioritization as try_upstream_servers
+/// Uses the same prioritization as `try_upstream_servers`
 async fn proxy_request_to_upstream(
     state: &AppState,
     filename: &str,
@@ -1336,8 +1339,7 @@ async fn proxy_upstream_response(
         .headers()
         .get(reqwest_header::CONTENT_RANGE)
         .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "none".to_string());
+        .map_or_else(|| "none".to_string(), ToString::to_string);
 
     debug!(
         "Proxying upstream response for: {} (content-type: {}, range: {})",

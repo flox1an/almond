@@ -2,6 +2,7 @@
 name = "almond"
 version = "0.4.0"
 edition = "2021"
+rust-version = "1.85"
 
 [[bin]]
 name = "inspect_filter"
@@ -13,22 +14,19 @@ path = "src/bin/analyze_reports.rs"
 
 [dependencies]
 axum = "0.8.9"
-headers = "0.4.1"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6.11", features = ["fs", "limit", "timeout", "catch-panic"] }
-tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6.11", features = ["limit", "timeout"] }
+tower = { version = "0.5", features = ["limit", "util"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio-util = { version = "0.7.18", features = ["io"] }
+tokio-util = { version = "0.7.18", features = ["io", "rt"] }
 regex = "1"
-once_cell = "1.21"
 mime_guess = "2.0.5"
 futures-util = "0.3.32"
 sha2 = "0.11.0"
 reqwest = { version = "0.13", features = ["json", "stream", "gzip", "brotli", "deflate"] }
-hyper = "1.9.0"
 dotenvy = "0.15.7"
 uuid = { version = "1.23.1", features = ["v4"] }
 base64 = "0.22.1"
@@ -36,16 +34,13 @@ hex = "0.4"
 nostr = "0.44.3"
 nostr-relay-pool = "0.44.1"
 chrono = "0.4.44"
-tokio-stream = "0.1"
 bytes = "1"
 async-stream = "0.3"
 async-trait = "0.1"
 bloomfilter = "3.0"
 xorf = { version = "0.12", features = ["serde"] }
 rmp-serde = "1.3"
-serde_urlencoded = "0.7.1"
 axum-extra = { version = "0.12.6", features = ["query"] }
-serde_html_form = "0.4.0"
 prometheus = "0.14"
 fs2 = "0.4"
 rmp = "0.8.15"
@@ -83,3 +78,33 @@ codegen-units = 1
 # NOTE: deliberately NOT setting panic = "abort". Handlers are not wrapped in
 # CatchPanicLayer, so aborting would turn a single bad request into a full
 # node outage.
+
+[lints.rust]
+unsafe_code = "forbid"
+# Zero `unsafe` in src/ — lock that in for free.
+unused_qualifications = "warn"
+# Would have caught dead handlers.
+unreachable_pub = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# metrics.rs:182-202 — u64 → i64 gauges silently go negative
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+# handful of dropped JoinHandles — no silent subsystem death
+let_underscore_must_use = "warn"
+# main.rs:101, upstream.rs:1329
+unused_async = "warn"
+# list.rs:154, p2p_webrtc.rs:33
+redundant_clone = "warn"
+# Deliberately not enforcing across 500+ tracing calls
+uninlined_format_args = "allow"
+# All panics are boot-only — revisit once Config::from_env lands
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+
+[dev-dependencies]
+serde_html_form = "0.4.0"

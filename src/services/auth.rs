@@ -12,15 +12,15 @@ use crate::models::AppState;
 /// Authentication mode for different operations
 #[derive(Debug, Clone, Copy)]
 pub enum AuthMode {
-    /// Standard mode - allows WoT (Web of Trust) for uploads if allowed_pubkeys is set
+    /// Standard mode - allows `WoT` (Web of Trust) for uploads if `allowed_pubkeys` is set
     Standard,
     /// Strict mode - only allows explicit whitelist (for delete operations)
     Strict,
     /// Unrestricted mode - only validates signature, no pubkey authorization checks (for public features)
     Unrestricted,
-    /// WoT-only mode - requires WoT check, enforces trusted_pubkeys validation
+    /// WoT-only mode - requires `WoT` check, enforces `trusted_pubkeys` validation
     WotOnly,
-    /// DVM-only mode - requires DVM announcement check, enforces dvm_pubkeys validation
+    /// DVM-only mode - requires DVM announcement check, enforces `dvm_pubkeys` validation
     DvmOnly,
 }
 
@@ -47,7 +47,7 @@ pub fn parse_auth_header(auth_header: &str) -> AppResult<Event> {
     Ok(event)
 }
 
-/// Verify event signature, created_at, and expiration (BUD-11)
+/// Verify event signature, `created_at`, and expiration (BUD-11)
 pub fn verify_event(event: &Event) -> AppResult<()> {
     // Verify the event signature
     event
@@ -302,8 +302,7 @@ pub fn validate_server_tags(event: &Event, public_url: &str) -> AppResult<()> {
 
     let matches = server_tags.iter().any(|tag| {
         tag.content()
-            .map(|content| content.to_lowercase() == server_domain)
-            .unwrap_or(false)
+            .is_some_and(|content| content.to_lowercase() == server_domain)
     });
 
     if !matches {
@@ -315,7 +314,7 @@ pub fn validate_server_tags(event: &Event, public_url: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Extract lowercase domain from a URL string (e.g. "https://example.com:3000/path" -> "example.com")
+/// Extract lowercase domain from a URL string (e.g. "<https://example.com:3000/path>" -> "example.com")
 fn extract_domain(url: &str) -> String {
     let without_scheme = url
         .strip_prefix("https://")
@@ -348,8 +347,7 @@ pub fn validate_upload_auth(event: &Event, expected_sha256: &str) -> AppResult<(
 
     let has_matching_hash = x_tags.iter().any(|tag| {
         tag.content()
-            .map(|content| content == expected_sha256)
-            .unwrap_or(false)
+            .is_some_and(|content| content == expected_sha256)
     });
 
     if !has_matching_hash {
@@ -381,11 +379,9 @@ pub fn validate_delete_auth(event: &Event, sha256: &str) -> AppResult<()> {
     }
 
     // Verify at least one x tag matches the SHA-256
-    let has_matching_hash = x_tags.iter().any(|tag| {
-        tag.content()
-            .map(|content| content == sha256)
-            .unwrap_or(false)
-    });
+    let has_matching_hash = x_tags
+        .iter()
+        .any(|tag| tag.content().is_some_and(|content| content == sha256));
 
     if !has_matching_hash {
         return Err(AppError::Unauthorized(format!(
@@ -419,11 +415,9 @@ pub fn validate_chunk_upload_auth(
     }
 
     // Verify final blob hash is present
-    let has_final_hash = x_tags.iter().any(|tag| {
-        tag.content()
-            .map(|content| content == sha256)
-            .unwrap_or(false)
-    });
+    let has_final_hash = x_tags
+        .iter()
+        .any(|tag| tag.content().is_some_and(|content| content == sha256));
 
     if !has_final_hash {
         return Err(AppError::Unauthorized(format!(
@@ -455,8 +449,8 @@ pub fn extract_sha256_from_event(event: &Event) -> Option<String> {
     None
 }
 
-/// Check if a pubkey is authorized (in whitelist or WoT)
-/// Returns true if the pubkey is in allowed_pubkeys or trusted_pubkeys
+/// Check if a pubkey is authorized (in whitelist or `WoT`)
+/// Returns true if the pubkey is in `allowed_pubkeys` or `trusted_pubkeys`
 pub async fn is_pubkey_authorized(pubkey: &PublicKey, state: &AppState) -> bool {
     // Check whitelist first
     if !state.allowed_pubkeys.is_empty() && state.allowed_pubkeys.contains(pubkey) {
@@ -469,7 +463,7 @@ pub async fn is_pubkey_authorized(pubkey: &PublicKey, state: &AppState) -> bool 
 }
 
 /// Check if a pubkey is in the Web of Trust
-/// Returns true only if the pubkey is in trusted_pubkeys (WoT)
+/// Returns true only if the pubkey is in `trusted_pubkeys` (`WoT`)
 pub async fn is_pubkey_in_wot(pubkey: &PublicKey, state: &AppState) -> bool {
     let trusted_pubkeys = state.trusted_pubkeys.read().await;
     trusted_pubkeys.contains_key(pubkey)
@@ -488,7 +482,7 @@ mod tests {
             .as_secs()
     }
 
-    /// Build a signed event with given tags, kind 24242, created_at = now
+    /// Build a signed event with given tags, kind 24242, `created_at` = now
     fn build_event(keys: &Keys, tags: Vec<Tag>) -> Event {
         EventBuilder::new(Kind::Custom(24242), "test auth event")
             .tags(tags)
@@ -496,7 +490,7 @@ mod tests {
             .unwrap()
     }
 
-    /// Build a signed event with a custom created_at timestamp
+    /// Build a signed event with a custom `created_at` timestamp
     fn build_event_with_created_at(keys: &Keys, tags: Vec<Tag>, created_at: u64) -> Event {
         EventBuilder::new(Kind::Custom(24242), "test auth event")
             .tags(tags)

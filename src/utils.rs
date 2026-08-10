@@ -428,6 +428,7 @@ async fn delete_cleanup_candidate(
 ///
 /// Hand-rolled rather than regex-backed: this runs on every blob request, and
 /// the borrowed return keeps the hot path allocation-free.
+#[must_use]
 pub fn get_sha256_hash_from_filename(filename: &str) -> Option<&str> {
     let (hash, extension) = match filename.split_once('.') {
         Some((hash, extension)) => (hash, Some(extension)),
@@ -469,6 +470,7 @@ pub enum RangeSpec {
 /// `bytes=START-` (open ended) and `bytes=-SUFFIX` (final N bytes). The suffix
 /// form matters in practice: MP4 players probe the trailing `moov` atom with
 /// it, and treating it as unparseable means shipping the entire blob instead.
+#[must_use]
 pub fn parse_range_header(header_value: &str, total_size: u64) -> RangeSpec {
     let Some(spec) = header_value.trim().strip_prefix("bytes=") else {
         return RangeSpec::Ignore;
@@ -526,7 +528,9 @@ pub fn parse_range_header(header_value: &str, total_size: u64) -> RangeSpec {
 /// Clean up abandoned chunked uploads and their associated files
 pub async fn cleanup_abandoned_chunks(state: &AppState) {
     let timeout_duration = std::time::Duration::from_secs(state.chunk_cleanup_timeout_minutes * 60);
-    let cutoff_time = std::time::Instant::now() - timeout_duration;
+    let cutoff_time = std::time::Instant::now()
+        .checked_sub(timeout_duration)
+        .unwrap();
 
     // Get chunk uploads that are older than the timeout
     let mut chunk_uploads = state.chunk_uploads.write().await;
@@ -573,7 +577,7 @@ async fn cleanup_orphaned_chunk_files(state: &AppState) {
     }
 
     let timeout_duration = std::time::Duration::from_secs(state.chunk_cleanup_timeout_minutes * 60);
-    let cutoff_time = std::time::SystemTime::now() - timeout_duration;
+    let cutoff_time = SystemTime::now() - timeout_duration;
 
     let mut entries = match fs::read_dir(&chunks_dir).await {
         Ok(entries) => entries,
@@ -613,7 +617,9 @@ async fn cleanup_orphaned_chunk_files(state: &AppState) {
 
 /// Clean up expired failed upstream lookups (older than 1 hour)
 pub async fn cleanup_expired_failed_lookups(state: &AppState) {
-    let one_hour_ago = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+    let one_hour_ago = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(3600))
+        .unwrap();
     let mut failed_lookups = state.failed_upstream_lookups.write().await;
     let initial_count = failed_lookups.len();
 
@@ -632,7 +638,9 @@ pub async fn cleanup_expired_failed_lookups(state: &AppState) {
 pub async fn cleanup_expired_blossom_server_lists(state: &AppState) {
     let cache_ttl_duration =
         std::time::Duration::from_secs(state.blossom_server_list_cache_ttl_hours * 3600);
-    let cutoff_time = std::time::Instant::now() - cache_ttl_duration;
+    let cutoff_time = std::time::Instant::now()
+        .checked_sub(cache_ttl_duration)
+        .unwrap();
 
     let mut cache = state.blossom_server_lists.write().await;
     let initial_count = cache.len();

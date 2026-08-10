@@ -57,7 +57,7 @@ pub async fn get_wot(
                 .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
             return Ok(resp);
         }
-        let maybe = bloom.check(&probe.as_bytes().to_vec());
+        let maybe = bloom.check(probe.as_bytes());
         let payload = serde_json::json!({
             "test": probe,
             "maybe": maybe,
@@ -77,8 +77,7 @@ pub async fn get_wot(
     let want_json = q
         .format
         .as_deref()
-        .map(|f| f.eq_ignore_ascii_case("json"))
-        .unwrap_or(true);
+        .is_none_or(|f| f.eq_ignore_ascii_case("json"));
 
     if want_json {
         // Structure: { n, fp, k, m, bits (base64) }
@@ -87,7 +86,7 @@ pub async fn get_wot(
             "fp": fp,
             "k": bloom.number_of_hash_functions(),
             "m": bits.len() * 8,
-            "bits_b64": BASE64.encode(&bits),
+            "bits_b64": BASE64.encode(bits),
         });
         let body = serde_json::to_vec(&payload)
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;

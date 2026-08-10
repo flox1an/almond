@@ -39,7 +39,7 @@ pub async fn list_blobs(
     Query(params): Query<ListQuery>,
     headers: HeaderMap,
     req: Request,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<Value>, StatusCode> {
     // Check if list feature is enabled
     if !state.feature_list_enabled {
         warn!("List feature is disabled");
@@ -96,7 +96,7 @@ pub async fn list_blobs(
 
     // Log all headers for debugging
     debug!("📋 Request headers:");
-    for (name, value) in headers.iter() {
+    for (name, value) in &headers {
         if let Ok(value_str) = value.to_str() {
             // Mask sensitive Authorization header content for logging
             if name == header::AUTHORIZATION {
@@ -148,15 +148,11 @@ pub async fn list_blobs(
                                     );
                                     debug!(
                                         "🔐 JSON preview (first 200 chars): {}",
-                                        if json_str.len() > 200 {
-                                            format!("{}...", &json_str[..200])
-                                        } else {
-                                            json_str.clone()
-                                        }
+                                        &json_str[..(200.min(json_str.len()))]
                                     );
 
                                     // Try to parse as Nostr event
-                                    match serde_json::from_str::<serde_json::Value>(&json_str) {
+                                    match serde_json::from_str::<Value>(&json_str) {
                                         Ok(json_value) => {
                                             debug!("✅ JSON parsing successful");
                                             if let Some(kind) = json_value.get("kind") {
@@ -242,7 +238,7 @@ pub async fn list_blobs(
         "📋 Query parameters: since={} (unix timestamp), until={} (unix timestamp), author={:?}",
         since,
         until,
-        filter_author.as_ref().map(|pk| pk.to_hex())
+        filter_author.as_ref().map(PublicKey::to_hex)
     );
 
     let limit = params
@@ -307,5 +303,5 @@ pub async fn list_blobs(
     );
 
     // Return just the array of blobs
-    Ok(Json(serde_json::Value::Array(paginated_blobs)))
+    Ok(Json(Value::Array(paginated_blobs)))
 }

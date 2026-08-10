@@ -26,9 +26,10 @@ use tracing::{error, info, warn};
 ///
 /// # Returns
 /// The required payment amount in satoshis
+#[must_use]
 pub fn calculate_price(size_bytes: u64, price_per_mb: u64) -> u64 {
     // Round up to nearest MB, minimum 1 sat
-    let size_mb = (size_bytes + 1024 * 1024 - 1) / (1024 * 1024);
+    let size_mb = size_bytes.div_ceil(1024 * 1024);
     std::cmp::max(1, size_mb.saturating_mul(price_per_mb))
 }
 
@@ -149,7 +150,7 @@ fn write_seed_0600(path: &std::path::Path, seed: &[u8; 64]) -> Result<(), AppErr
             AppError::InternalError(format!("Failed to create wallet seed: {error}"))
         })?;
     file.write_all(seed)
-        .and_then(|_| file.sync_all())
+        .and_then(|()| file.sync_all())
         .map_err(|error| {
             AppError::InternalError(format!("Failed to write wallet seed: {error}"))
         })?;
@@ -169,7 +170,7 @@ fn write_seed_0600(path: &std::path::Path, seed: &[u8; 64]) -> Result<(), AppErr
 /// The wallet is used to swap incoming tokens for fresh proofs.
 ///
 /// # Arguments
-/// * `wallet_path` - Path to the SQLite database file
+/// * `wallet_path` - Path to the `SQLite` database file
 /// * `accepted_mints` - List of accepted mint URLs (first one is used for wallet)
 ///
 /// # Returns
@@ -281,12 +282,13 @@ pub async fn receive_token(
 ///
 /// # Returns
 /// The token string if the header is present and valid UTF-8, None otherwise
+#[must_use]
 pub fn extract_cashu_header(headers: &axum::http::HeaderMap) -> Option<String> {
     headers
         .get("X-Cashu")
         .or_else(|| headers.get("x-cashu"))
         .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
 }
 
 /// Get the total amount from a token

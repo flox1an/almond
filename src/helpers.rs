@@ -9,10 +9,11 @@ use std::sync::{LazyLock, RwLock};
 use std::time::{Duration, Instant};
 use tracing::info;
 
-use crate::constants::*;
+use crate::constants::{DEFAULT_CONTENT_TYPE, DEFAULT_MIME_TYPE, X_EXPIRATION_HEADER};
 use crate::models::AppState;
 
 /// Get MIME type from file path with proper handling for HLS and other media types
+#[must_use]
 pub fn get_mime_type(path: &Path) -> String {
     // Check for extensions that need explicit handling
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -28,13 +29,14 @@ pub fn get_mime_type(path: &Path) -> String {
     }
 
     // Fall back to mime_guess for other types
-    mime_guess::from_path(path)
-        .first()
-        .map(|m| m.essence_str().to_string())
-        .unwrap_or_else(|| DEFAULT_MIME_TYPE.to_string())
+    mime_guess::from_path(path).first().map_or_else(
+        || DEFAULT_MIME_TYPE.to_string(),
+        |m| m.essence_str().to_string(),
+    )
 }
 
 /// Get file extension from MIME type with proper handling for HLS and other media types
+#[must_use]
 pub fn get_extension_from_mime(content_type: &str) -> Option<String> {
     // Strip any parameters (e.g., charset, codecs)
     let mime_type = content_type
@@ -64,7 +66,7 @@ pub fn get_extension_from_mime(content_type: &str) -> Option<String> {
 
     // Fall back to mime_guess for other types
     mime_guess::get_mime_extensions_str(mime_type)
-        .and_then(|exts| exts.first().map(|ext| ext.to_string()))
+        .and_then(|exts| exts.first().map(ToString::to_string))
 }
 
 /// Extract content type from headers with fallback
@@ -77,7 +79,7 @@ pub fn extract_content_type(headers: &HeaderMap) -> String {
 }
 
 /// Extract content type from reqwest response headers
-pub fn extract_content_type_from_response(headers: &reqwest::header::HeaderMap) -> String {
+pub fn extract_content_type_from_response(headers: &HeaderMap) -> String {
     headers
         .get(reqwest_header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -86,6 +88,7 @@ pub fn extract_content_type_from_response(headers: &reqwest::header::HeaderMap) 
 }
 
 /// Extract expiration timestamp from X-Expiration header
+#[must_use]
 pub fn extract_expiration(headers: &HeaderMap) -> Option<u64> {
     headers
         .get(X_EXPIRATION_HEADER)
@@ -113,13 +116,17 @@ fn render_immutable_expires() -> HeaderValue {
 /// `Bytes`-backed, so the returned clone is a refcount bump.
 pub fn immutable_expires_header() -> HeaderValue {
     {
-        let cached = EXPIRES_CACHE.read().unwrap_or_else(|e| e.into_inner());
+        let cached = EXPIRES_CACHE
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if cached.0.elapsed() < EXPIRES_REFRESH {
             return cached.1.clone();
         }
     }
 
-    let mut cached = EXPIRES_CACHE.write().unwrap_or_else(|e| e.into_inner());
+    let mut cached = EXPIRES_CACHE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if cached.0.elapsed() >= EXPIRES_REFRESH {
         *cached = (Instant::now(), render_immutable_expires());
     }
@@ -157,7 +164,7 @@ pub fn create_json_response<T: serde::Serialize>(data: T) -> Result<Response<Bod
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// Copy relevant headers from one HeaderMap to a reqwest request builder
+/// Copy relevant headers from one `HeaderMap` to a reqwest request builder
 pub fn copy_headers_to_reqwest(
     headers: &HeaderMap,
     mut request: reqwest::RequestBuilder,
@@ -193,7 +200,7 @@ pub fn copy_headers_to_reqwest(
     request
 }
 
-/// Copy relevant headers from one HeaderMap to a reqwest request builder, excluding the Range header
+/// Copy relevant headers from one `HeaderMap` to a reqwest request builder, excluding the Range header
 pub fn copy_headers_without_range(
     headers: &HeaderMap,
     mut request: reqwest::RequestBuilder,
@@ -251,6 +258,7 @@ pub fn copy_headers_from_reqwest(
 }
 
 /// Normalize server URL by adding https:// if no protocol is specified
+#[must_use]
 pub fn normalize_server_url(url: &str) -> String {
     let url = url.trim();
 
@@ -267,6 +275,7 @@ pub fn normalize_server_url(url: &str) -> String {
 ///
 /// BUD-10 says `xs` SHOULD be a domain name only and clients SHOULD prefer HTTPS
 /// but fall back to HTTP. An explicit scheme is an instruction, not a fallback.
+#[must_use]
 pub fn server_url_candidates(url: &str) -> Vec<String> {
     let url = url.trim();
 
@@ -278,6 +287,7 @@ pub fn server_url_candidates(url: &str) -> Vec<String> {
 }
 
 /// Build a public blob URL without duplicating the separator slash.
+#[must_use]
 pub fn build_public_blob_url(public_url: &str, sha256: &str, extension: Option<&str>) -> String {
     let base_url = public_url.trim_end_matches('/');
 
@@ -288,10 +298,11 @@ pub fn build_public_blob_url(public_url: &str, sha256: &str, extension: Option<&
 }
 
 /// Combine and normalize server lists from multiple sources
-/// Priority order: xs_servers (highest) -> as_servers -> default_servers (lowest)
+/// Priority order: `xs_servers` (highest) -> `as_servers` -> `default_servers` (lowest)
 /// Returns a deduplicated, normalized list of servers
 /// URLs are normalized (https:// prefix added if missing) and deduplicated
 /// Deduplication is case-insensitive and ignores trailing slashes
+#[must_use]
 pub fn combine_server_lists(
     xs_servers: Option<&[String]>,
     as_servers: Option<&[String]>,

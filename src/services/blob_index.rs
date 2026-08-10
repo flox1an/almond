@@ -84,6 +84,7 @@ pub struct BlobIndex {
 }
 
 impl BlobIndex {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -156,8 +157,7 @@ impl BlobIndex {
         let matches = entries
             .map
             .get(sha256)
-            .map(|metadata| metadata.location == *location)
-            .unwrap_or(false);
+            .is_some_and(|metadata| metadata.location == *location);
         if matches {
             entries.remove(sha256);
         }

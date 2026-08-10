@@ -21,6 +21,7 @@ static HLS_REF_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^([0-9a-fA-F]{64})(?:\.(\w+))?$").unwrap());
 
 /// Check if a MIME type indicates an HLS playlist
+#[must_use]
 pub fn is_hls_playlist(mime_type: &str) -> bool {
     let mime = mime_type.split(';').next().unwrap_or(mime_type).trim();
     matches!(
@@ -34,10 +35,11 @@ pub fn is_hls_playlist(mime_type: &str) -> bool {
 
 /// Parse an HLS playlist and extract all Blossom-style references (sha256[.ext])
 /// Only non-comment, non-empty lines matching the expected pattern are returned.
+#[must_use]
 pub fn parse_playlist_references(content: &str) -> Vec<HlsReference> {
     content
         .lines()
-        .map(|line| line.trim())
+        .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .filter_map(|line| {
             HLS_REF_RE.captures(line).map(|caps| HlsReference {
@@ -49,7 +51,8 @@ pub fn parse_playlist_references(content: &str) -> Vec<HlsReference> {
 }
 
 /// Extract the base URL (scheme + host) from a full URL.
-/// Example: "https://cdn.example.com/abc123.m3u8" -> "https://cdn.example.com"
+/// Example: "<https://cdn.example.com/abc123.m3u8>" -> "<https://cdn.example.com>"
+#[must_use]
 pub fn extract_origin_base_url(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url).ok()?;
     let scheme = parsed.scheme();
@@ -275,13 +278,13 @@ mod tests {
 
     #[test]
     fn test_parse_master_playlist() {
-        let content = r#"#EXTM3U
+        let content = r"#EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-STREAM-INF:BANDWIDTH=1280000,RESOLUTION=854x480
 a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=2560000,RESOLUTION=1280x720
 f6e5d4c3b2a1098765432109876543210987654321fedcba0987654321fedcba.m3u8
-"#;
+";
         let refs = parse_playlist_references(content);
         assert_eq!(refs.len(), 2);
         assert_eq!(
@@ -298,7 +301,7 @@ f6e5d4c3b2a1098765432109876543210987654321fedcba0987654321fedcba.m3u8
 
     #[test]
     fn test_parse_variant_playlist_ts_segments() {
-        let content = r#"#EXTM3U
+        let content = r"#EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-TARGETDURATION:10
 #EXT-X-MEDIA-SEQUENCE:0
@@ -307,7 +310,7 @@ b82fcf4dbcec2d8fab7d94bdd48b070aa6e74d7240b1965a0b28c128d6858477.ts
 #EXTINF:10.000,
 cd2a98d055eef5ec3aca73bd136a40340539138da73144d589d9de5a3a52149a.ts
 #EXT-X-ENDLIST
-"#;
+";
         let refs = parse_playlist_references(content);
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].extension, Some("ts".to_string()));
@@ -316,11 +319,11 @@ cd2a98d055eef5ec3aca73bd136a40340539138da73144d589d9de5a3a52149a.ts
 
     #[test]
     fn test_parse_m4s_segments() {
-        let content = r#"#EXTM3U
+        let content = r"#EXTM3U
 #EXTINF:6.000,
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.m4s
 #EXT-X-ENDLIST
-"#;
+";
         let refs = parse_playlist_references(content);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].extension, Some("m4s".to_string()));
@@ -328,11 +331,11 @@ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.m4s
 
     #[test]
     fn test_parse_hash_without_extension() {
-        let content = r#"#EXTM3U
+        let content = r"#EXTM3U
 #EXTINF:10.000,
 b82fcf4dbcec2d8fab7d94bdd48b070aa6e74d7240b1965a0b28c128d6858477
 #EXT-X-ENDLIST
-"#;
+";
         let refs = parse_playlist_references(content);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].extension, None);
@@ -340,12 +343,12 @@ b82fcf4dbcec2d8fab7d94bdd48b070aa6e74d7240b1965a0b28c128d6858477
 
     #[test]
     fn test_parse_ignores_non_hash_lines() {
-        let content = r#"#EXTM3U
+        let content = r"#EXTM3U
 #EXT-X-VERSION:3
 not-a-hash.ts
 short.ts
 b82fcf4dbcec2d8fab7d94bdd48b070aa6e74d7240b1965a0b28c128d6858477.ts
-"#;
+";
         let refs = parse_playlist_references(content);
         assert_eq!(refs.len(), 1);
     }

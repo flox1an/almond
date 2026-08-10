@@ -11,7 +11,10 @@ use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
 use crate::error::AppError;
-use crate::helpers::*;
+use crate::helpers::{
+    extract_content_type, extract_content_type_from_response, extract_expiration,
+    get_extension_from_mime, track_upload_stats,
+};
 use crate::models::{AppState, FileLocation};
 use crate::services::{auth, cashu, file_storage, hls, upload};
 
@@ -339,7 +342,10 @@ pub async fn patch_upload(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, AppError> {
-    use crate::constants::*;
+    use crate::constants::{
+        DEFAULT_CONTENT_TYPE, UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER, UPLOAD_TYPE_HEADER,
+        X_SHA_256_HEADER,
+    };
     use crate::models::{ChunkInfo, ChunkUpload, ChunkUploadKey};
 
     let auth_mode = match state.feature_upload_enabled {
@@ -424,7 +430,7 @@ pub async fn patch_upload(
         let uploads = state.chunk_uploads.read().await;
         uploads
             .get(&key)
-            .map(|upload| {
+            .map_or(content_length == upload_length, |upload| {
                 upload
                     .chunks
                     .iter()
@@ -433,7 +439,6 @@ pub async fn patch_upload(
                     })
                     == Some(upload_length)
             })
-            .unwrap_or(content_length == upload_length)
     };
     if completes_upload {
         check_payment(&state, &headers, upload_length, state.feature_paid_upload).await?;
@@ -474,7 +479,9 @@ pub async fn patch_upload(
     let expiration = extract_expiration(&headers);
     let completion = {
         let mut uploads = state.chunk_uploads.write().await;
-        if !uploads.contains_key(&key) {
+        if uploads.contains_key(&key) {
+            Some(false)
+        } else {
             let owner_sessions = uploads
                 .keys()
                 .filter(|existing| existing.pubkey == auth_event.pubkey)
@@ -502,8 +509,6 @@ pub async fn patch_upload(
                 );
                 Some(false)
             }
-        } else {
-            Some(false)
         }
         .and_then(|_| {
             let upload = uploads.get_mut(&key)?;

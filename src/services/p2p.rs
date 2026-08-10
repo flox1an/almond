@@ -86,12 +86,11 @@ pub fn start_p2p_serve_job(state: AppState) {
 }
 
 async fn run_p2p_serve(state: AppState) -> Result<(), String> {
-    let keys = match &state.p2p_nsec {
-        Some(secret) => Keys::parse(secret).map_err(|err| format!("invalid P2P_NSEC: {err}"))?,
-        None => {
-            warn!("FEATURE_P2P_SERVE_ENABLED is on but P2P_NSEC is not set; P2P serving disabled");
-            return Ok(());
-        }
+    let keys = if let Some(secret) = &state.p2p_nsec {
+        Keys::parse(secret).map_err(|err| format!("invalid P2P_NSEC: {err}"))?
+    } else {
+        warn!("FEATURE_P2P_SERVE_ENABLED is on but P2P_NSEC is not set; P2P serving disabled");
+        return Ok(());
     };
 
     let relays = if state.p2p_relays.is_empty() {

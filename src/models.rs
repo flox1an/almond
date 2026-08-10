@@ -28,6 +28,7 @@ pub enum FeatureMode {
 impl FeatureMode {
     /// Parse from string value (off/wot/public, case-insensitive)
     /// Falls back to a default if the string doesn't match
+    #[must_use]
     pub fn from_str_with_default(s: &str, default: FeatureMode) -> Self {
         match s.to_lowercase().as_str() {
             "off" | "false" => FeatureMode::Off,
@@ -39,6 +40,7 @@ impl FeatureMode {
     }
 
     /// Check if feature is enabled (wot, dvm, or public)
+    #[must_use]
     pub fn is_enabled(&self) -> bool {
         matches!(
             self,
@@ -47,16 +49,19 @@ impl FeatureMode {
     }
 
     /// Check if feature requires WOT validation
+    #[must_use]
     pub fn requires_wot(&self) -> bool {
         matches!(self, FeatureMode::Wot)
     }
 
     /// Check if feature requires DVM validation
+    #[must_use]
     pub fn requires_dvm(&self) -> bool {
         matches!(self, FeatureMode::Dvm)
     }
 
     /// Convert to string for metrics/logging
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             FeatureMode::Off => "off",
@@ -106,13 +111,14 @@ pub enum UpstreamMode {
     Proxy,
     /// Redirect: Issue 302 redirect to upstream, no local caching
     Redirect,
-    /// RedirectAndCache: Issue 302 redirect to upstream, download in background for future requests
+    /// `RedirectAndCache`: Issue 302 redirect to upstream, download in background for future requests
     RedirectAndCache,
 }
 
 impl UpstreamMode {
-    /// Parse from string value (proxy/redirect/redirect_and_cache, case-insensitive)
+    /// Parse from string value (`proxy/redirect/redirect_and_cache`, case-insensitive)
     /// Falls back to Proxy if the string doesn't match
+    #[must_use]
     pub fn from_str_with_default(s: &str) -> Self {
         match s.to_lowercase().replace('-', "_").as_str() {
             "proxy" => UpstreamMode::Proxy,
@@ -123,6 +129,7 @@ impl UpstreamMode {
     }
 
     /// Check if this mode uses redirect (vs proxy)
+    #[must_use]
     pub fn is_redirect(&self) -> bool {
         matches!(
             self,
@@ -131,11 +138,13 @@ impl UpstreamMode {
     }
 
     /// Check if this mode caches in background after redirect
+    #[must_use]
     pub fn caches_in_background(&self) -> bool {
         matches!(self, UpstreamMode::RedirectAndCache)
     }
 
     /// Convert to string for logging
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             UpstreamMode::Proxy => "proxy",
@@ -157,6 +166,7 @@ pub enum ReportAction {
 impl ReportAction {
     /// Parse from string value (quarantine/delete, case-insensitive)
     /// Falls back to Quarantine if the string doesn't match
+    #[must_use]
     pub fn from_str_with_default(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "delete" => ReportAction::Delete,
@@ -165,6 +175,7 @@ impl ReportAction {
     }
 
     /// Convert to string for logging
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             ReportAction::Quarantine => "quarantine",
@@ -226,8 +237,9 @@ pub enum FileLocation {
 }
 
 /// The reason Almond retains a completed local blob.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BlobOrigin {
+    #[default]
     Upload,
     UpstreamCache,
 }
@@ -243,6 +255,7 @@ pub struct StorageLayout {
 }
 
 impl StorageLayout {
+    #[must_use]
     pub fn new(root: PathBuf) -> Self {
         Self {
             uploads: root.join("uploads"),
@@ -276,12 +289,6 @@ impl BlobMutationLocks {
                 })
         };
         lock.lock_owned().await
-    }
-}
-
-impl Default for BlobOrigin {
-    fn default() -> Self {
-        Self::Upload
     }
 }
 
@@ -413,6 +420,7 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[must_use]
     pub fn create_blob_descriptor(
         &self,
         sha256: &str,

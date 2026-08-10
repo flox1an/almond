@@ -16,6 +16,12 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Rustup show
+      run: rustup show
+    - name: Format check
+      run: cargo fmt --check --verbose
+    - name: Clippy (lint as errors)
+      run: cargo clippy --all-targets -- -D warnings
     - name: Build
       run: cargo build --verbose
     - name: Run tests

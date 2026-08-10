@@ -30,7 +30,7 @@ impl RealDataChannel {
     fn new(dc: Arc<RTCDataChannel>) -> Arc<Self> {
         let (msg_tx, msg_rx) = mpsc::channel(100);
 
-        let tx = msg_tx.clone();
+        let tx = msg_tx;
         dc.on_message(Box::new(move |msg: DataChannelMessage| {
             let tx = tx.clone();
             let data = msg.data.to_vec();
@@ -88,6 +88,7 @@ pub struct RealPeerConnectionFactory {
 }
 
 impl RealPeerConnectionFactory {
+    #[must_use]
     pub fn with_stun_servers(stun_servers: Vec<String>) -> Self {
         Self {
             pending: RwLock::new(HashMap::new()),

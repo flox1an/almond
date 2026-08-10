@@ -75,7 +75,7 @@ pub async fn fetch_user_server_list(
     {
         let cache = state.blossom_server_lists.read().await;
         if let Some((servers, cached_at)) = cache.get(pubkey) {
-            let age = std::time::Instant::now().duration_since(*cached_at);
+            let age = Instant::now().duration_since(*cached_at);
             if age < cache_ttl_duration {
                 info!(
                     "Using cached server list for pubkey: {} (age: {:?}, TTL: {}h)",
@@ -84,14 +84,13 @@ pub async fn fetch_user_server_list(
                     cache_ttl_hours
                 );
                 return Ok(servers.clone());
-            } else {
-                info!(
-                    "Cache expired for pubkey: {} (age: {:?}, TTL: {}h), fetching from Nostr",
-                    pubkey.to_hex(),
-                    age,
-                    cache_ttl_hours
-                );
             }
+            info!(
+                "Cache expired for pubkey: {} (age: {:?}, TTL: {}h), fetching from Nostr",
+                pubkey.to_hex(),
+                age,
+                cache_ttl_hours
+            );
         }
     }
 
@@ -117,46 +116,43 @@ pub async fn fetch_user_server_list(
     pool.disconnect().await;
 
     // Get the most recent event (should only be one due to limit=1)
-    let servers = match events.iter().next() {
-        Some(event) => {
-            info!(
-                "Found server list event for pubkey: {} (id: {})",
-                pubkey.to_hex(),
-                event.id
-            );
+    let servers = if let Some(event) = events.iter().next() {
+        info!(
+            "Found server list event for pubkey: {} (id: {})",
+            pubkey.to_hex(),
+            event.id
+        );
 
-            // Extract server tags from the event
-            // Server tags have the format: ["server", "https://cdn.example.com"]
-            let server_tags: Vec<_> = event
-                .tags
-                .iter()
-                .filter(|tag| tag.kind() == TagKind::Custom("server".into()))
-                .collect();
+        // Extract server tags from the event
+        // Server tags have the format: ["server", "https://cdn.example.com"]
+        let server_tags: Vec<_> = event
+            .tags
+            .iter()
+            .filter(|tag| tag.kind() == TagKind::Custom("server".into()))
+            .collect();
 
-            let mut servers = Vec::new();
+        let mut servers = Vec::new();
 
-            for tag in server_tags {
-                if let Some(server_url) = tag.content() {
-                    // Validate that it's a proper URL (starts with http:// or https://)
-                    if server_url.starts_with("http://") || server_url.starts_with("https://") {
-                        let server_url_str = server_url.to_string();
-                        info!("Found server in user list: {}", server_url_str);
-                        servers.push(server_url_str);
-                    } else {
-                        warn!(
-                            "Invalid server URL (missing http:// or https://): {}",
-                            server_url
-                        );
-                    }
+        for tag in server_tags {
+            if let Some(server_url) = tag.content() {
+                // Validate that it's a proper URL (starts with http:// or https://)
+                if server_url.starts_with("http://") || server_url.starts_with("https://") {
+                    let server_url_str = server_url.to_string();
+                    info!("Found server in user list: {}", server_url_str);
+                    servers.push(server_url_str);
+                } else {
+                    warn!(
+                        "Invalid server URL (missing http:// or https://): {}",
+                        server_url
+                    );
                 }
             }
+        }
 
-            servers
-        }
-        None => {
-            info!("No server list found for pubkey: {}", pubkey.to_hex());
-            Vec::new()
-        }
+        servers
+    } else {
+        info!("No server list found for pubkey: {}", pubkey.to_hex());
+        Vec::new()
     };
 
     info!(
@@ -168,7 +164,7 @@ pub async fn fetch_user_server_list(
     // Update cache (even if empty, to avoid repeated queries)
     {
         let mut cache = state.blossom_server_lists.write().await;
-        cache.insert(*pubkey, (servers.clone(), std::time::Instant::now()));
+        cache.insert(*pubkey, (servers.clone(), Instant::now()));
         info!(
             "Cached server list for pubkey: {} ({} servers, TTL: {}h)",
             pubkey.to_hex(),

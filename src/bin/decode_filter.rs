@@ -1,4 +1,4 @@
-/// Decode a MessagePack-encoded BinaryFuse16 filter to understand its structure
+/// Decode a MessagePack-encoded `BinaryFuse16` filter to understand its structure
 
 fn main() {
     // Base64 from localhost:3000/filter
@@ -33,7 +33,7 @@ fn main() {
         }
         serde_json::Value::Object(obj) => {
             println!("\n✓ It's an object with {} fields:", obj.len());
-            for (key, val) in obj.iter() {
+            for (key, val) in &obj {
                 println!("  {}: {}", key, describe_json_value(val));
             }
         }

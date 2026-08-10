@@ -1,3 +1,30 @@
+// Crate-level lint overrides. Deliberate casting choices acknowledged;
+// promote cast lints back to `deny` once all refactors are complete.
+// `uninlined_format_args`: 500+ tracing calls with emoji prefixes — a bulk
+// clippy --fix would produce a 2000-line diff with zero behavioural change.
+#![allow(
+    clippy::uninlined_format_args,
+    clippy::let_underscore_must_use,
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::large_enum_variant,
+    clippy::type_complexity,
+    clippy::struct_excessive_bools,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::module_name_repetitions,
+    clippy::implicit_hasher,
+    clippy::needless_pass_by_value,
+    clippy::significant_drop_tightening,
+    clippy::significant_drop_in_scrutinee,
+    clippy::doc_markdown,
+    clippy::must_use_candidate
+)]
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -36,7 +63,10 @@ use axum::{
     middleware::from_fn_with_state,
     routing::{delete, get, put},
 };
-use handlers::*;
+use handlers::{
+    delete_blob, get_filter, get_metrics, get_upstream, get_wot, handle_file_request, list_blobs,
+    mirror_blob, patch_upload, report_blob, upload_file,
+};
 use middleware::cors_middleware;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -228,11 +258,11 @@ async fn load_app_state() -> AppState {
         .await
         .unwrap_or_else(|error| panic!("Failed to initialize storage layout: {error}"));
     info!("⚙️ Storage path: {}", storage.root.display());
-    let native_s3 = match crate::services::native_storage::S3Settings::from_env() {
+    let native_s3 = match services::native_storage::S3Settings::from_env() {
         Ok(Some(settings)) => {
             info!("S3 native storage enabled for bucket {}", settings.bucket);
             Some(Arc::new(
-                crate::services::native_storage::NativeS3Storage::connect(settings).await,
+                services::native_storage::NativeS3Storage::connect(settings).await,
             ))
         }
         Ok(None) => None,
@@ -261,7 +291,7 @@ async fn load_app_state() -> AppState {
     migrate_legacy_blobs(&storage)
         .await
         .unwrap_or_else(|error| panic!("Failed to migrate legacy storage: {error}"));
-    let file_index = Arc::new(crate::services::blob_index::BlobIndex::new());
+    let file_index = Arc::new(services::blob_index::BlobIndex::new());
     build_file_index(&storage, &file_index)
         .await
         .unwrap_or_else(|error| panic!("Failed to reconstruct blob index: {error}"));
@@ -302,7 +332,7 @@ async fn load_app_state() -> AppState {
             serve_files_refresh_interval_secs
         );
 
-        if let Err(e) = crate::services::serve_files::refresh_serve_file_index(
+        if let Err(e) = services::serve_files::refresh_serve_file_index(
             path,
             &serve_files_manifest_name,
             &serve_file_index,
@@ -567,9 +597,10 @@ async fn load_app_state() -> AppState {
     // Validate: if any paid feature is on, mints must be configured
     // The wallet is intentionally single-mint.  Accepting several mints while
     // crediting all tokens to one wallet is not a valid settlement model.
-    if any_paid_feature && cashu_accepted_mints.len() != 1 {
-        panic!("Exactly one CASHU_ACCEPTED_MINTS value is required when paid features are enabled");
-    }
+    assert!(
+        !(any_paid_feature && cashu_accepted_mints.len() != 1),
+        "Exactly one CASHU_ACCEPTED_MINTS value is required when paid features are enabled"
+    );
 
     if any_paid_feature {
         info!(
@@ -587,7 +618,7 @@ async fn load_app_state() -> AppState {
     info!("HLS mirror concurrency: {}", hls_mirror_concurrency);
 
     let cashu_wallet = if any_paid_feature {
-        match crate::services::cashu::init_wallet(&cashu_wallet_path, &cashu_accepted_mints).await {
+        match services::cashu::init_wallet(&cashu_wallet_path, &cashu_accepted_mints).await {
             Ok(wallet) => {
                 info!("💰 Cashu wallet ready for payments");
                 Some(wallet)
@@ -655,9 +686,10 @@ async fn load_app_state() -> AppState {
 
     // Validate: if any feature uses DVM mode, kinds must be configured
     let needs_dvm = feature_upload_enabled.requires_dvm() || feature_mirror_enabled.requires_dvm();
-    if needs_dvm && dvm_allowed_kinds.is_empty() {
-        panic!("DVM_ALLOWED_KINDS must be set when any feature uses 'dvm' mode");
-    }
+    assert!(
+        !(needs_dvm && dvm_allowed_kinds.is_empty()),
+        "DVM_ALLOWED_KINDS must be set when any feature uses 'dvm' mode"
+    );
 
     if !dvm_allowed_kinds.is_empty() {
         info!("🤖 DVM allowed kinds: {:?}", dvm_allowed_kinds);
@@ -717,14 +749,14 @@ async fn load_app_state() -> AppState {
         .filter(|token| !token.is_empty());
 
     // Initialize Prometheus metrics
-    let metrics = crate::metrics::Metrics::new();
+    let metrics = metrics::Metrics::new();
     info!("✅ Prometheus metrics initialized");
 
     // Handle HTTPS/TLS setup if enabled
     if enable_https {
         info!("🔐 HTTPS enabled");
         if let Err(e) =
-            crate::tls::ensure_tls_certificates(&tls_cert_path, &tls_key_path, tls_auto_generate)
+            tls::ensure_tls_certificates(&tls_cert_path, &tls_key_path, tls_auto_generate)
         {
             error!("❌ Failed to setup TLS certificates: {}", e);
             std::process::exit(1);
@@ -764,7 +796,7 @@ async fn load_app_state() -> AppState {
         upstream_servers,
         upstream_mode,
         max_upstream_download_size_mb,
-        upstream_client: crate::services::upload::create_upstream_client()
+        upstream_client: services::upload::create_upstream_client()
             .expect("Failed to build upstream HTTP client"),
         max_chunk_size_mb,
         chunk_cleanup_timeout_minutes,
@@ -811,9 +843,7 @@ async fn load_app_state() -> AppState {
 
 fn start_cleanup_job(state: AppState) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
-            state.cleanup_interval_secs,
-        ));
+        let mut interval = tokio::time::interval(Duration::from_secs(state.cleanup_interval_secs));
         loop {
             interval.tick().await;
             // Expiry must run even during idle periods so cache TTL is bounded
@@ -830,7 +860,7 @@ fn start_cleanup_job(state: AppState) {
 fn start_chunk_cleanup_job(state: AppState) {
     tokio::spawn(async move {
         // Run chunk cleanup every 5 minutes
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5 * 60));
+        let mut interval = tokio::time::interval(Duration::from_secs(5 * 60));
         loop {
             interval.tick().await;
             cleanup_abandoned_chunks(&state).await;
@@ -852,7 +882,7 @@ fn start_trust_network_refresh_job(state: AppState) {
 
         info!("✅ Trust network refresh enabled - features using WOT mode");
 
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(4 * 3600));
+        let mut interval = tokio::time::interval(Duration::from_secs(4 * 3600));
         loop {
             interval.tick().await;
             if !state.allowed_pubkeys.is_empty() {
@@ -886,9 +916,8 @@ fn start_dvm_refresh_job(state: AppState) {
         );
 
         // Refresh periodically
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
-            state.dvm_refresh_interval_mins * 60,
-        ));
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(state.dvm_refresh_interval_mins * 60));
         loop {
             interval.tick().await;
             match refresh_dvm_pubkeys(&state.dvm_allowed_kinds, &state.dvm_relays).await {
@@ -960,11 +989,11 @@ async fn main() {
         let terminate = std::future::pending::<()>();
 
         tokio::select! {
-            _ = ctrl_c => {
+            () = ctrl_c => {
                 info!("🛑 Received SIGINT (Ctrl+C) - exiting immediately");
                 std::process::exit(0);
             },
-            _ = terminate => {
+            () = terminate => {
                 info!("🛑 Received SIGTERM - exiting immediately");
                 std::process::exit(0);
             },
@@ -980,7 +1009,7 @@ async fn main() {
 
         info!("🎧 blossom server listening on https://{}", addr);
 
-        match crate::tls::load_tls_config(&tls_cert_path, &tls_key_path).await {
+        match tls::load_tls_config(&tls_cert_path, &tls_key_path).await {
             Ok(config) => {
                 if let Err(e) = axum_server::bind_rustls(addr, config)
                     .serve(app.into_make_service())
