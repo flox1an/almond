@@ -13,7 +13,7 @@ pub mod tls;
 pub mod trust_network;
 pub mod utils;
 
-use std::{collections::HashMap, env, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::signal;
 
 use crate::models::AppState;
@@ -30,13 +30,16 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use axum::{
-    extract::{DefaultBodyLimit, State},
+    extract::State,
     http::StatusCode,
-    middleware::from_fn,
+    middleware::from_fn_with_state,
     routing::{delete, get, put},
 };
 use handlers::*;
 use middleware::cors_middleware;
+use tower::limit::ConcurrencyLimitLayer;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 
 // HEAD /upload handler for price discovery (BUD-07)
 async fn head_upload(
@@ -95,9 +98,8 @@ async fn serve_filter_test() -> Result<axum::response::Response<axum::body::Body
 }
 
 pub async fn create_app(state: AppState) -> Router {
-    // Calculate max chunk size in bytes
-    let max_chunk_size_bytes = (state.max_chunk_size_mb * 1024 * 1024) as usize;
-
+    let max_blob_size = usize::try_from(state.max_blob_size_bytes)
+        .expect("MAX_BLOB_SIZE_MB does not fit the platform request-body limit");
     Router::new()
         .route(
             "/upload",
@@ -108,7 +110,10 @@ pub async fn create_app(state: AppState) -> Router {
         )
         .route("/list", get(list_blobs))
         .route("/list/{id}", get(list_blobs))
-        .route("/mirror", put(mirror_blob))
+        .route(
+            "/mirror",
+            put(mirror_blob).layer(RequestBodyLimitLayer::new(64 * 1024)),
+        )
         .route("/_wot", get(get_wot))
         .route("/report", put(report_blob))
         .route("/filter", get(get_filter))
@@ -123,8 +128,13 @@ pub async fn create_app(state: AppState) -> Router {
             "/{filename}",
             get(handle_file_request).head(handle_file_request),
         )
-        .layer(DefaultBodyLimit::max(max_chunk_size_bytes))
-        .layer(from_fn(cors_middleware))
+        .layer(RequestBodyLimitLayer::new(max_blob_size))
+        .layer(from_fn_with_state(state.clone(), cors_middleware))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(60),
+        ))
+        .layer(ConcurrencyLimitLayer::new(256))
         .with_state(state)
 }
 
@@ -201,6 +211,13 @@ async fn load_app_state() -> AppState {
             "http://127.0.0.1:3000".to_string()
         }
     });
+    let cors_allowed_origins = env::var("CORS_ALLOWED_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
 
     // Parse storage path from environment variable
     let storage_path = env::var("STORAGE_PATH").unwrap_or_else(|_| "./files".to_string());
@@ -298,10 +315,14 @@ async fn load_app_state() -> AppState {
         }
     }
 
-    let cleanup_interval_secs = env::var("CLEANUP_INTERVAL_SECS")
+    let cleanup_interval_secs: u64 = env::var("CLEANUP_INTERVAL_SECS")
         .unwrap_or_else(|_| "30".to_string())
         .parse()
         .expect("Invalid value for CLEANUP_INTERVAL_SECS");
+    assert!(
+        cleanup_interval_secs > 0,
+        "CLEANUP_INTERVAL_SECS must be greater than zero"
+    );
 
     let max_file_age_days = env::var("MAX_FILE_AGE_DAYS")
         .unwrap_or_else(|_| "0".to_string())
@@ -315,10 +336,37 @@ async fn load_app_state() -> AppState {
         .expect("Invalid value for MAX_UPSTREAM_DOWNLOAD_SIZE_MB");
 
     // Parse max chunk size in MB for chunked uploads
-    let max_chunk_size_mb = env::var("MAX_CHUNK_SIZE_MB")
+    let max_chunk_size_mb: u64 = env::var("MAX_CHUNK_SIZE_MB")
         .unwrap_or_else(|_| "100".to_string()) // Default: 100MB
         .parse()
         .expect("Invalid value for MAX_CHUNK_SIZE_MB");
+
+    let max_blob_size_bytes = env::var("MAX_BLOB_SIZE_MB")
+        .unwrap_or_else(|_| "100".to_string())
+        .parse::<u64>()
+        .expect("Invalid value for MAX_BLOB_SIZE_MB")
+        .checked_mul(1024 * 1024)
+        .expect("MAX_BLOB_SIZE_MB value too large");
+    let min_free_disk_bytes = env::var("MIN_FREE_DISK_MB")
+        .unwrap_or_else(|_| "256".to_string())
+        .parse::<u64>()
+        .expect("Invalid value for MIN_FREE_DISK_MB")
+        .checked_mul(1024 * 1024)
+        .expect("MIN_FREE_DISK_MB value too large");
+    let max_chunk_upload_sessions = env::var("MAX_CHUNK_UPLOAD_SESSIONS")
+        .unwrap_or_else(|_| "128".to_string())
+        .parse::<usize>()
+        .expect("Invalid value for MAX_CHUNK_UPLOAD_SESSIONS");
+    let max_chunk_upload_sessions_per_pubkey = env::var("MAX_CHUNK_UPLOAD_SESSIONS_PER_PUBKEY")
+        .unwrap_or_else(|_| "8".to_string())
+        .parse::<usize>()
+        .expect("Invalid value for MAX_CHUNK_UPLOAD_SESSIONS_PER_PUBKEY");
+    assert!(
+        max_chunk_size_mb
+            .checked_mul(1024 * 1024)
+            .is_some_and(|size| size <= max_blob_size_bytes),
+        "MAX_CHUNK_SIZE_MB cannot exceed MAX_BLOB_SIZE_MB"
+    );
 
     // Parse chunk cleanup timeout in minutes
     let chunk_cleanup_timeout_minutes = env::var("CHUNK_CLEANUP_TIMEOUT_MINUTES")
@@ -507,11 +555,13 @@ async fn load_app_state() -> AppState {
     let cashu_wallet_path = PathBuf::from(
         env::var("CASHU_WALLET_PATH").unwrap_or_else(|_| "./cashu_wallet.db".to_string()),
     );
+    let any_paid_feature = feature_paid_upload || feature_paid_mirror || feature_paid_download;
 
     // Validate: if any paid feature is on, mints must be configured
-    let any_paid_feature = feature_paid_upload || feature_paid_mirror || feature_paid_download;
-    if any_paid_feature && cashu_accepted_mints.is_empty() {
-        panic!("CASHU_ACCEPTED_MINTS must be set when paid features are enabled");
+    // The wallet is intentionally single-mint.  Accepting several mints while
+    // crediting all tokens to one wallet is not a valid settlement model.
+    if any_paid_feature && cashu_accepted_mints.len() != 1 {
+        panic!("Exactly one CASHU_ACCEPTED_MINTS value is required when paid features are enabled");
     }
 
     if any_paid_feature {
@@ -639,6 +689,26 @@ async fn load_app_state() -> AppState {
         })
         .collect();
 
+    let auth_max_ttl_secs = env::var("AUTH_MAX_TTL_SECS")
+        .unwrap_or_else(|_| "300".to_string())
+        .parse()
+        .expect("Invalid value for AUTH_MAX_TTL_SECS");
+    let auth_max_age_secs = env::var("AUTH_MAX_AGE_SECS")
+        .unwrap_or_else(|_| "300".to_string())
+        .parse()
+        .expect("Invalid value for AUTH_MAX_AGE_SECS");
+    let auth_clock_skew_secs = env::var("AUTH_CLOCK_SKEW_SECS")
+        .unwrap_or_else(|_| "30".to_string())
+        .parse()
+        .expect("Invalid value for AUTH_CLOCK_SKEW_SECS");
+    let auth_require_server_tag = env::var("AUTH_REQUIRE_SERVER_TAG")
+        .unwrap_or_else(|_| "false".to_string())
+        .parse()
+        .expect("Invalid value for AUTH_REQUIRE_SERVER_TAG");
+    let metrics_bearer_token = env::var("METRICS_BEARER_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
+
     // Initialize Prometheus metrics
     let metrics = crate::metrics::Metrics::new();
     info!("✅ Prometheus metrics initialized");
@@ -664,8 +734,11 @@ async fn load_app_state() -> AppState {
         serve_files_path,
         serve_files_manifest_name,
         serve_files_refresh_interval_secs,
+        cors_allowed_origins,
         max_total_size,
         max_total_files,
+        max_blob_size_bytes,
+        min_free_disk_bytes,
         bind_addr,
         public_url,
         cleanup_interval_secs,
@@ -685,6 +758,8 @@ async fn load_app_state() -> AppState {
             .expect("Failed to build upstream HTTP client"),
         max_chunk_size_mb,
         chunk_cleanup_timeout_minutes,
+        max_chunk_upload_sessions,
+        max_chunk_upload_sessions_per_pubkey,
         feature_upload_enabled,
         feature_mirror_enabled,
         feature_list_enabled,
@@ -707,6 +782,12 @@ async fn load_app_state() -> AppState {
         metrics,
         report_action,
         feature_report_enabled,
+        auth_max_ttl_secs,
+        auth_max_age_secs,
+        auth_clock_skew_secs,
+        auth_require_server_tag,
+        metrics_bearer_token,
+        destructive_event_replays: Arc::new(RwLock::new(HashMap::new())),
         feature_paid_upload,
         feature_paid_mirror,
         feature_paid_download,

@@ -160,11 +160,11 @@ async fn cleanup_empty_dirs(root_dir: &Path) {
 }
 
 pub async fn enforce_storage_limits(state: &AppState) {
-    let mut total_size = 0;
+    let mut total_size = 0u64;
     let mut files = state.file_index.snapshot().await;
 
-    // Sort files by creation date (oldest first)
-    files.sort_by_key(|a| a.1.created_at);
+    // Retain newest blobs; once the quota is full, evict the oldest ones.
+    files.sort_by(|left, right| right.1.created_at.cmp(&left.1.created_at));
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -194,7 +194,7 @@ pub async fn enforce_storage_limits(state: &AppState) {
         }
 
         // Check storage limits
-        if total_size + metadata.size > state.max_total_size
+        if total_size.saturating_add(metadata.size) > state.max_total_size
             || retained_files >= state.max_total_files
         {
             deletion_candidates.push((sha256, metadata, "limits"));
@@ -373,16 +373,16 @@ pub async fn cleanup_abandoned_chunks(state: &AppState) {
     let mut chunk_uploads = state.chunk_uploads.write().await;
     let mut to_remove = Vec::new();
 
-    for (sha256, chunk_upload) in chunk_uploads.iter() {
+    for (key, chunk_upload) in chunk_uploads.iter() {
         if chunk_upload.created_at < cutoff_time {
-            info!("Cleaning up abandoned chunked upload: {}", sha256);
-            to_remove.push(sha256.clone());
+            info!("Cleaning up abandoned chunked upload: {}", key.sha256);
+            to_remove.push(key.clone());
         }
     }
 
     // Remove abandoned uploads and clean up their files
-    for sha256 in to_remove {
-        if let Some(chunk_upload) = chunk_uploads.remove(&sha256) {
+    for key in to_remove {
+        if let Some(chunk_upload) = chunk_uploads.remove(&key) {
             let chunk_count = chunk_upload.chunks.len();
             // Clean up all chunk files for this upload
             for chunk in chunk_upload.chunks {
@@ -396,7 +396,7 @@ pub async fn cleanup_abandoned_chunks(state: &AppState) {
             }
             info!(
                 "🗑 Cleaned up {} chunk files for abandoned upload: {}",
-                chunk_count, sha256
+                chunk_count, key.sha256
             );
         }
     }

@@ -108,24 +108,10 @@ pub async fn report_blob(
         StatusCode::BAD_REQUEST
     })?;
 
-    // Check if reporter is allowed
-    let is_allowed = if state.allowed_pubkeys.contains(&reporter_pubkey) {
-        true
-    } else if state.feature_report_enabled == FeatureMode::Wot {
-        // Check trusted pubkeys for WOT mode
-        let trusted = state.trusted_pubkeys.read().await;
-        trusted.contains_key(&reporter_pubkey)
-    } else {
-        state.feature_report_enabled == FeatureMode::Public
-    };
-
-    if !is_allowed {
-        error!(
-            "Reporter {} not authorized to submit reports",
-            report.pubkey
-        );
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    // Reports can only perform a destructive state transition under the same
+    // explicit whitelist required by DELETE.  Public reports are accepted as
+    // non-destructive signals after signature validation below.
+    let is_allowed = state.allowed_pubkeys.contains(&reporter_pubkey);
 
     // Parse the full event and verify signature
     let event_json = serde_json::to_string(&serde_json::json!({
@@ -150,6 +136,46 @@ pub async fn report_blob(
     // Verify event signature
     if let Err(e) = event.verify() {
         error!("Invalid event signature: {}", e);
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let created_at = u64::try_from(report.created_at).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if created_at > now.saturating_add(state.auth_clock_skew_secs)
+        || now.saturating_sub(created_at) > state.auth_max_age_secs
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    {
+        let mut seen = state.destructive_event_replays.write().await;
+        seen.retain(|_, expires_at| *expires_at >= now);
+        if seen
+            .insert(
+                report.id.clone(),
+                now.saturating_add(state.auth_max_ttl_secs),
+            )
+            .is_some()
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+    if state.feature_report_enabled == FeatureMode::Public {
+        let body = serde_json::to_string(&ReportResponse {
+            message: "Report accepted for moderation".to_string(),
+            processed: Vec::new(),
+            action: "none".to_string(),
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    if !is_allowed {
         return Err(StatusCode::UNAUTHORIZED);
     }
 

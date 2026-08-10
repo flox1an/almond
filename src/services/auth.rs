@@ -1,4 +1,7 @@
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use nostr_relay_pool::prelude::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info};
@@ -30,8 +33,9 @@ pub fn parse_auth_header(auth_header: &str) -> AppResult<Event> {
     }
 
     let base64_str = &auth_header[6..]; // Remove "Nostr " prefix
-    let decoded_bytes = STANDARD
+    let decoded_bytes = URL_SAFE_NO_PAD
         .decode(base64_str)
+        .or_else(|_| STANDARD.decode(base64_str))
         .map_err(|e| AppError::Unauthorized(format!("Failed to decode base64: {}", e)))?;
 
     let json_str = String::from_utf8(decoded_bytes)
@@ -77,6 +81,71 @@ pub fn verify_event(event: &Event) -> AppResult<()> {
         return Err(AppError::Unauthorized("Event expired".to_string()));
     }
 
+    Ok(())
+}
+
+/// Apply the deployment's freshness and server-binding policy after signature
+/// verification.  The BUD-11 signature alone is intentionally not reusable
+/// indefinitely.
+pub fn verify_event_with_policy(event: &Event, state: &AppState) -> AppResult<u64> {
+    verify_event(event)?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let created_at = event.created_at.as_secs();
+    if created_at > now.saturating_add(state.auth_clock_skew_secs)
+        || now.saturating_sub(created_at) > state.auth_max_age_secs
+    {
+        return Err(AppError::Unauthorized(
+            "Authorization event is outside the allowed clock window".to_string(),
+        ));
+    }
+
+    let expiration = event
+        .tags
+        .find(TagKind::Expiration)
+        .and_then(|tag| tag.content())
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| AppError::Unauthorized("Invalid expiration tag value".to_string()))?;
+    if expiration.saturating_sub(created_at) > state.auth_max_ttl_secs {
+        return Err(AppError::Unauthorized(
+            "Authorization event TTL exceeds the server policy".to_string(),
+        ));
+    }
+    if state.auth_require_server_tag
+        && !event
+            .tags
+            .iter()
+            .any(|tag| tag.kind() == TagKind::Custom("server".into()))
+    {
+        return Err(AppError::Unauthorized(
+            "Authorization event requires a server tag".to_string(),
+        ));
+    }
+    validate_server_tags(event, &state.public_url)?;
+    Ok(expiration)
+}
+
+/// Reject a destructive authorization event more than once until it expires.
+pub async fn consume_destructive_event(
+    event: &Event,
+    state: &AppState,
+    expiration: u64,
+) -> AppResult<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut seen = state.destructive_event_replays.write().await;
+    seen.retain(|_, expires_at| *expires_at >= now);
+    let id = event.id.to_string();
+    if seen.insert(id, expiration).is_some() {
+        return Err(AppError::Conflict(
+            "Authorization event was already used".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -197,9 +266,8 @@ pub async fn validate_nostr_auth(
     mode: AuthMode,
 ) -> AppResult<Event> {
     let event = parse_auth_header(auth_header)?;
-    verify_event(&event)?;
+    let _expiration = verify_event_with_policy(&event, state)?;
     validate_event_kind(&event, 24242)?;
-    validate_server_tags(&event, &state.public_url)?;
     check_pubkey_authorization(&event, state, mode).await?;
     Ok(event)
 }

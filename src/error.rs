@@ -24,6 +24,7 @@ pub enum AppError {
     /// Resource errors
     NotFound(String),
     Conflict(String),
+    InsufficientStorage(String),
 
     /// I/O errors
     IoError(String),
@@ -60,6 +61,7 @@ impl fmt::Display for AppError {
             AppError::PayloadTooLarge(msg) => write!(f, "Payload too large: {}", msg),
             AppError::NotFound(msg) => write!(f, "Not found: {}", msg),
             AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
+            AppError::InsufficientStorage(msg) => write!(f, "Insufficient storage: {}", msg),
             AppError::IoError(msg) => write!(f, "I/O error: {}", msg),
             AppError::NetworkError(msg) => write!(f, "Network error: {}", msg),
             AppError::Timeout(msg) => write!(f, "Timeout: {}", msg),
@@ -111,6 +113,7 @@ impl IntoResponse for AppError {
             AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::InsufficientStorage(_) => StatusCode::INSUFFICIENT_STORAGE,
             AppError::IoError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::NetworkError(_) => StatusCode::BAD_REQUEST,
             AppError::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
@@ -148,6 +151,7 @@ impl From<AppError> for StatusCode {
             AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::InsufficientStorage(_) => StatusCode::INSUFFICIENT_STORAGE,
             AppError::IoError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::NetworkError(_) => StatusCode::BAD_REQUEST,
             AppError::Timeout(_) => StatusCode::REQUEST_TIMEOUT,

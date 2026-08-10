@@ -27,7 +27,11 @@ pub async fn get_wot(
     // Collect all pubkeys from trusted_pubkeys (the WOT)
     let trusted_pubkeys = state.trusted_pubkeys.read().await;
     let num_items = trusted_pubkeys.len().max(1);
-    let fp = q.fp.unwrap_or(0.01).clamp(1e-6, 0.2);
+    let fp = match q.fp {
+        None => 0.01,
+        Some(rate) if rate.is_finite() && matches!(rate, 0.001 | 0.01 | 0.1) => rate,
+        Some(_) => return Err(axum::http::StatusCode::BAD_REQUEST),
+    };
     let mut bloom = Bloom::new_for_fp_rate(num_items, fp)
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     for pubkey in trusted_pubkeys.keys() {

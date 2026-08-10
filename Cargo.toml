@@ -15,7 +15,8 @@ path = "src/bin/analyze_reports.rs"
 axum = "0.8.9"
 headers = "0.4.1"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6.11", features = ["fs"] }
+tower-http = { version = "0.6.11", features = ["fs", "limit", "timeout", "catch-panic"] }
+tower = { version = "0.5", features = ["limit"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 serde = { version = "1.0", features = ["derive"] }

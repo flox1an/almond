@@ -1,6 +1,8 @@
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
 use futures_util::stream::{self, StreamExt as FuturesStreamExt};
 use regex::Regex;
-use std::sync::LazyLock;
 use tracing::{error, info, warn};
 
 use crate::helpers::get_extension_from_mime;
@@ -60,85 +62,65 @@ pub fn extract_origin_base_url(url: &str) -> Option<String> {
 
 /// Maximum recursion depth for nested HLS playlists (master -> variant -> segments)
 const MAX_HLS_RECURSION_DEPTH: usize = 10;
+const MAX_HLS_REFERENCES_PER_ROUND: usize = 128;
+const MAX_HLS_REFERENCES_TOTAL: usize = 1024;
 
-/// Mirror a single Blossom reference from the origin server.
-/// Returns Ok(true) if fetched, Ok(false) if skipped (already exists), Err on failure.
+/// Mirror one reference with the same pinned SSRF policy as the playlist.
 async fn mirror_single_reference(
     state: &AppState,
-    client: &reqwest::Client,
     origin_base_url: &str,
     reference: &HlsReference,
 ) -> Result<bool, String> {
-    // Check if already in index
-    let exists = state.file_index.contains(&reference.sha256).await;
-
-    if exists {
+    if state.file_index.contains(&reference.sha256).await {
         return Ok(false);
     }
-
-    // Build fetch URL
     let fetch_url = match &reference.extension {
-        Some(ext) => format!("{}/{}.{}", origin_base_url, reference.sha256, ext),
+        Some(extension) => format!("{}/{}.{}", origin_base_url, reference.sha256, extension),
         None => format!("{}/{}", origin_base_url, reference.sha256),
     };
-
-    info!("[HLS] Fetching segment: {}", fetch_url);
-
-    // Fetch (no SSRF check needed - origin was already validated during the playlist mirror)
-    let response = client
-        .get(&fetch_url)
-        .send()
+    let response = upload::fetch_from_url(&fetch_url)
         .await
-        .map_err(|e| format!("Failed to fetch {}: {}", fetch_url, e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("HTTP {} for {}", response.status(), fetch_url));
-    }
-
-    // Extract content type from response
+        .map_err(|error| format!("Failed to fetch segment: {error}"))?;
     let content_type = crate::helpers::extract_content_type_from_response(response.headers());
     let extension = get_extension_from_mime(&content_type);
-    let max_size_bytes = state.max_upstream_download_size_mb * 1024 * 1024;
-
-    // Stream to temp file
+    let max_size_bytes =
+        (state.max_upstream_download_size_mb * 1024 * 1024).min(state.max_blob_size_bytes);
+    file_storage::ensure_storage_capacity(
+        state,
+        response.content_length().unwrap_or(max_size_bytes),
+    )
+    .await
+    .map_err(|error| format!("Insufficient storage for segment: {error}"))?;
     file_storage::ensure_temp_dir(state)
         .await
-        .map_err(|e| format!("Failed to ensure temp dir: {}", e))?;
+        .map_err(|error| format!("Failed to ensure temp dir: {error}"))?;
     let temp_path = file_storage::create_temp_path(state, "hls_segment", extension.as_deref());
-
     let (calculated_sha256, body_size) =
-        upload::stream_response_to_temp_file(response, &temp_path, max_size_bytes)
-            .await
-            .map_err(|e| {
-                let _ = tokio::fs::remove_file(&temp_path);
-                format!("Failed to stream {}: {}", fetch_url, e)
-            })?;
-
-    // Verify hash
+        match upload::stream_response_to_temp_file(response, &temp_path, max_size_bytes).await {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(format!("Failed to stream segment: {error}"));
+            }
+        };
     if calculated_sha256 != reference.sha256 {
         let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(format!(
-            "SHA256 mismatch for {}: expected {}, got {}",
-            fetch_url, reference.sha256, calculated_sha256
-        ));
+        return Err(format!("SHA256 mismatch for segment {}", reference.sha256));
     }
-
-    // Finalize
-    upload::finalize_upload(
+    if let Err(error) = upload::finalize_upload(
         state,
         &temp_path,
         &reference.sha256,
         body_size,
         extension,
         Some(content_type),
-        None, // no expiration for background-fetched segments
+        None,
     )
     .await
-    .map_err(|e| {
-        let _ = tokio::fs::remove_file(&temp_path);
-        format!("Failed to finalize {}: {}", reference.sha256, e)
-    })?;
-
+    {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(format!("Failed to finalize {}: {error}", reference.sha256));
+    }
     Ok(true)
 }
 
@@ -190,79 +172,61 @@ pub async fn mirror_hls_references(
         concurrency
     );
 
-    let client = match upload::create_hardened_http_client() {
-        Ok(c) => c,
-        Err(e) => {
-            error!("[HLS] Failed to create HTTP client: {}", e);
-            return;
-        }
-    };
-
     let mut all_references = references;
+    let mut seen = HashSet::new();
+    all_references.retain(|reference| seen.insert(reference.sha256.clone()));
+    all_references.truncate(MAX_HLS_REFERENCES_PER_ROUND);
     let mut total_fetched = 0usize;
     let mut total_skipped = 0usize;
     let mut total_failed = 0usize;
 
-    // Process in rounds to handle recursive m3u8 discovery
-    let mut round = 0;
-    while !all_references.is_empty() {
-        round += 1;
-        if round > MAX_HLS_RECURSION_DEPTH {
-            warn!(
-                "[HLS] Reached max recursion depth ({}), stopping with {} references remaining",
-                MAX_HLS_RECURSION_DEPTH,
-                all_references.len()
-            );
+    for round in 1..=MAX_HLS_RECURSION_DEPTH {
+        if all_references.is_empty() || seen.len() > MAX_HLS_REFERENCES_TOTAL {
             break;
         }
-        info!(
-            "[HLS] Round {}: processing {} references",
-            round,
-            all_references.len()
-        );
-
+        all_references.truncate(MAX_HLS_REFERENCES_PER_ROUND);
         let results: Vec<(HlsReference, Result<bool, String>)> =
             stream::iter(all_references.iter().cloned())
                 .map(|reference| {
                     let state = state.clone();
                     let origin = origin_base_url.clone();
-                    let client = client.clone();
                     async move {
-                        let result =
-                            mirror_single_reference(&state, &client, &origin, &reference).await;
+                        let result = mirror_single_reference(&state, &origin, &reference).await;
                         (reference, result)
                     }
                 })
-                .buffer_unordered(concurrency)
+                .buffer_unordered(concurrency.max(1))
                 .collect()
                 .await;
 
-        // Collect newly discovered m3u8 playlists for recursive processing
-        let mut next_round_references = Vec::new();
-
-        for (reference, result) in &results {
+        let mut next_round = Vec::new();
+        for (reference, result) in results {
             match result {
-                Ok(fetched) => {
-                    if *fetched {
-                        total_fetched += 1;
-                    } else {
-                        total_skipped += 1;
-                    }
-                    // Whether newly fetched or already existing, recurse into m3u8 playlists
-                    if reference.extension.as_deref() == Some("m3u8") {
-                        let child_refs =
-                            try_collect_child_references(&state, &reference.sha256).await;
-                        next_round_references.extend(child_refs);
-                    }
-                }
-                Err(e) => {
+                Ok(true) => total_fetched += 1,
+                Ok(false) => total_skipped += 1,
+                Err(error) => {
                     total_failed += 1;
-                    error!("[HLS] Failed to mirror {}: {}", reference.sha256, e);
+                    error!("[HLS] Failed to mirror {}: {}", reference.sha256, error);
+                    continue;
+                }
+            }
+            if reference.extension.as_deref() == Some("m3u8") {
+                for child in try_collect_child_references(&state, &reference.sha256).await {
+                    if seen.len() >= MAX_HLS_REFERENCES_TOTAL {
+                        break;
+                    }
+                    if seen.insert(child.sha256.clone()) {
+                        next_round.push(child);
+                    }
                 }
             }
         }
-
-        all_references = next_round_references;
+        info!(
+            "[HLS] Completed round {} with {} queued references",
+            round,
+            next_round.len()
+        );
+        all_references = next_round;
     }
 
     info!(

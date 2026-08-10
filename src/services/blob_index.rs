@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -19,16 +20,23 @@ pub struct IndexStats {
 struct Entries {
     map: HashMap<String, Arc<FileMetadata>>,
     total_bytes: u64,
+    /// Newest-first `(created_at, sha256)` ordering.  This avoids cloning and
+    /// sorting the entire catalogue for every `/list` page.
+    order: BTreeSet<(Reverse<u64>, Reverse<String>)>,
     generation: u64,
 }
 
 impl Entries {
     fn insert(&mut self, key: String, metadata: Arc<FileMetadata>) -> Option<Arc<FileMetadata>> {
         self.total_bytes += metadata.size;
-        let previous = self.map.insert(key, metadata);
+        let previous = self.map.insert(key.clone(), metadata.clone());
         if let Some(previous) = &previous {
             self.total_bytes = self.total_bytes.saturating_sub(previous.size);
+            self.order
+                .remove(&(Reverse(previous.created_at), Reverse(key.clone())));
         }
+        self.order
+            .insert((Reverse(metadata.created_at), Reverse(key)));
         self.generation += 1;
         previous
     }
@@ -37,6 +45,8 @@ impl Entries {
         let removed = self.map.remove(key);
         if let Some(removed) = &removed {
             self.total_bytes = self.total_bytes.saturating_sub(removed.size);
+            self.order
+                .remove(&(Reverse(removed.created_at), Reverse(key.to_owned())));
             self.generation += 1;
         }
         removed
@@ -70,16 +80,19 @@ impl BlobIndex {
     /// Replace the entire contents, e.g. after the startup filesystem scan.
     pub async fn replace(&self, map: HashMap<String, FileMetadata>) {
         let mut total_bytes = 0u64;
+        let mut order = BTreeSet::new();
         let map: HashMap<String, Arc<FileMetadata>> = map
             .into_iter()
             .map(|(key, metadata)| {
                 total_bytes += metadata.size;
+                order.insert((Reverse(metadata.created_at), Reverse(key.clone())));
                 (key, Arc::new(metadata))
             })
             .collect();
 
         let mut entries = self.entries.write().await;
         entries.map = map;
+        entries.order = order;
         entries.total_bytes = total_bytes;
         entries.generation += 1;
     }
@@ -141,6 +154,49 @@ impl BlobIndex {
             .iter()
             .map(|(key, metadata)| (key.clone(), Arc::clone(metadata)))
             .collect()
+    }
+
+    /// Return a newest-first page without allocating a full index snapshot.
+    pub async fn page(
+        &self,
+        since: u64,
+        until: u64,
+        author: Option<&nostr_relay_pool::prelude::PublicKey>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Vec<(String, Arc<FileMetadata>)> {
+        let entries = self.entries.read().await;
+        let cursor_is_in_result = cursor
+            .and_then(|sha256| entries.map.get(sha256).map(|metadata| (sha256, metadata)))
+            .is_some_and(|(_, metadata)| {
+                metadata.created_at >= since
+                    && metadata.created_at <= until
+                    && author.is_none_or(|author| metadata.pubkey.as_ref() == Some(author))
+            });
+        let mut after_cursor = !cursor_is_in_result;
+        let mut page = Vec::with_capacity(limit);
+        for (_, Reverse(sha256)) in &entries.order {
+            if !after_cursor {
+                if cursor.is_some_and(|cursor| cursor == sha256) {
+                    after_cursor = true;
+                }
+                continue;
+            }
+            let Some(metadata) = entries.map.get(sha256) else {
+                continue;
+            };
+            if metadata.created_at < since
+                || metadata.created_at > until
+                || author.is_some_and(|author| metadata.pubkey.as_ref() != Some(author))
+            {
+                continue;
+            }
+            page.push((sha256.clone(), Arc::clone(metadata)));
+            if page.len() == limit {
+                break;
+            }
+        }
+        page
     }
 
     /// The well-formed 64-character SHA-256 keys, for filter construction.
@@ -277,5 +333,30 @@ mod tests {
 
         let (keys, _) = index.hash_keys().await;
         assert_eq!(keys, vec![sha]);
+    }
+
+    #[tokio::test]
+    async fn page_is_newest_first_without_snapshot_sorting() {
+        let index = BlobIndex::new();
+        let mut oldest = meta(1);
+        oldest.created_at = 1;
+        let mut newest = meta(1);
+        newest.created_at = 3;
+        let mut middle = meta(1);
+        middle.created_at = 2;
+        index.insert("a".into(), oldest).await;
+        index.insert("c".into(), newest).await;
+        index.insert("b".into(), middle).await;
+
+        let first = index.page(0, u64::MAX, None, None, 1).await;
+        assert_eq!(first[0].0, "c");
+        let second = index.page(0, u64::MAX, None, Some("c"), 2).await;
+        assert_eq!(
+            second
+                .into_iter()
+                .map(|(sha256, _)| sha256)
+                .collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
     }
 }

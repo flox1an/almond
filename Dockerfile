@@ -1,10 +1,6 @@
 # Build stage
-# Base on debian:bullseye-slim (matches the runtime image's glibc) and install
-# the Rust nightly toolchain explicitly. The floating rustlang/rust:nightly-bullseye-slim
-# tag rolled forward to a nightly (2026-07-24+) that hits an internal compiler error
-# (rust-lang/rust#159815) compiling tokio 1.53.x at opt-level=3. rustlang/rust does not
-# publish dated bullseye-slim tags, so we pin the toolchain via rustup instead.
-FROM debian:bullseye-slim AS builder
+# Bookworm is a supported Debian release and provides the current OpenSSL ABI.
+FROM debian:bookworm-slim AS builder
 
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo
@@ -36,13 +32,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp /usr/src/app/target/release/almond /tmp/almond
 
 # Runtime stage
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 WORKDIR /app
 
 # Install runtime dependencies
 RUN apt-get update && \
-    apt-get install -y ca-certificates libssl1.1 && \
+    apt-get install -y --no-install-recommends ca-certificates libssl3 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the binary from builder (copied to /tmp during build to escape cache mount)
@@ -51,12 +47,12 @@ COPY --from=builder /tmp/almond /app/almond
 # Copy entrypoint script
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
-# Ensure binary and entrypoint are executable and verify binary exists
+# The runtime only needs its binary and the explicitly writable blob volume.
 RUN chmod +x /app/almond /app/docker-entrypoint.sh && \
-    ls -lah /app/almond
-
-# Create directory for files
-RUN mkdir -p /app/files
+    addgroup --system almond && \
+    adduser --system --ingroup almond --home /app --no-create-home almond && \
+    mkdir -p /app/files && \
+    chown -R almond:almond /app
 
 # Set environment variables
 ENV RUST_LOG=info
@@ -69,6 +65,7 @@ ENV MAX_FILE_AGE_DAYS=0
 
 # Expose the port
 EXPOSE 3000
+USER almond
 
 # Use entrypoint script for better logging and debugging
 ENTRYPOINT ["/app/docker-entrypoint.sh"] 

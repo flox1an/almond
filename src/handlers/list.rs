@@ -260,57 +260,19 @@ pub async fn list_blobs(
         None
     };
 
-    let files = {
-        let snapshot = state.file_index.snapshot().await;
-        debug!("📋 Total files in index: {}", snapshot.len());
-
-        snapshot
-            .into_iter()
-            .filter(|(_, metadata)| {
-                // Filter by uploaded timestamp (created_at)
-                if metadata.created_at < since || metadata.created_at > until {
-                    return false;
-                }
-                // Filter by author if specified
-                match (&filter_author, &metadata.pubkey) {
-                    (Some(filter_pk), Some(metadata_pk)) => metadata_pk == filter_pk,
-                    // No pubkey in metadata, skip if filtering by author
-                    (Some(_), None) => false,
-                    (None, _) => true,
-                }
-            })
-            .collect::<Vec<_>>()
-    };
-
-    info!(
-        "📋 Collected {} files from index (filtered by since/until)",
-        files.len()
-    );
-
-    // Sort by uploaded descending (newest first)
-    let mut files = files;
-    files.sort_by(|a, b| {
-        b.1.created_at
-            .cmp(&a.1.created_at)
-            .then_with(|| b.0.cmp(&a.0))
-    });
-
-    info!("📋 Files sorted by uploaded (newest first)");
-
-    let start = cursor
-        .as_ref()
-        .and_then(|cursor| {
-            files
-                .iter()
-                .position(|(sha256, _)| sha256.eq_ignore_ascii_case(cursor))
-        })
-        .map(|position| position + 1)
-        .unwrap_or(0);
+    let files = state
+        .file_index
+        .page(
+            since,
+            until,
+            filter_author.as_ref(),
+            cursor.as_deref(),
+            limit,
+        )
+        .await;
 
     let paginated_blobs = files
         .into_iter()
-        .skip(start)
-        .take(limit)
         .map(|(sha256, metadata)| {
             let url =
                 build_public_blob_url(&state.public_url, &sha256, metadata.extension.as_deref());

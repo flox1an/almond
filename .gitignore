@@ -5,5 +5,9 @@
 # Local dev artifacts / secrets
 cert.pem
 key.pem
+fips.pem
+fips-key.pem
 storage5/
 *.bak
+node_modules/
+todelete.txt

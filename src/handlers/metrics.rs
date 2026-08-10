@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use prometheus::{Encoder, TextEncoder};
@@ -8,7 +8,18 @@ use prometheus::{Encoder, TextEncoder};
 use crate::models::AppState;
 
 /// Handle Prometheus metrics requests
-pub async fn get_metrics(State(state): State<AppState>) -> Response {
+pub async fn get_metrics(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(token) = state.metrics_bearer_token.as_deref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let authorized = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|provided| provided == token);
+    if !authorized {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     // Update the metrics before gathering them
     let _ = state.get_stats().await;
 

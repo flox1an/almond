@@ -215,36 +215,39 @@ pub async fn get_filter(
     Query(q): Query<FilterQuery>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let fp_rate = q.fp.unwrap_or(0.01).clamp(1e-6, 0.2);
-    let fp_rate_bits = fp_rate.to_bits();
+    let fp_rate = match q.fp {
+        None => 0.01,
+        Some(rate) if rate.is_finite() && matches!(rate, 0.001 | 0.01 | 0.1) => rate,
+        Some(_) => return Err(StatusCode::BAD_REQUEST),
+    };
+    // Binary Fuse has a fixed false-positive rate: request-controlled `fp`
+    // must not turn into an unbounded cache-key space.
+    let fp_rate_bits = if state.filter_algorithm == "bloom" {
+        fp_rate.to_bits()
+    } else {
+        0.01f64.to_bits()
+    };
     let generation = state.file_index.generation().await;
-
-    // Fast path: the index has not moved since the last render, so the cached
-    // body is still exactly what we would produce.
     if let Some(cached) = state.filter_cache.read().await.as_ref() {
         if cached.generation == generation && cached.fp_rate_bits == fp_rate_bits {
             return filter_response(&headers, &cached.etag, cached.body.clone());
         }
     }
 
-    let rendered = match render_filter(&state, fp_rate).await {
-        Ok(rendered) => rendered,
-        Err(msg) => {
-            let payload = serde_json::json!({
-                "error": format!("failed to construct filter: {}", msg),
-            });
-            let body =
-                serde_json::to_vec(&payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(body))
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+    // Hold this small state lock only while one builder renders a cache miss.
+    // Concurrent identical misses wait and reuse its output instead of each
+    // allocating a complete filter.
+    let mut cache = state.filter_cache.write().await;
+    if let Some(cached) = cache.as_ref() {
+        if cached.generation == generation && cached.fp_rate_bits == fp_rate_bits {
+            return filter_response(&headers, &cached.etag, cached.body.clone());
         }
-    };
-
+    }
+    let rendered = render_filter(&state, fp_rate)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let response = filter_response(&headers, &rendered.etag, rendered.body.clone());
-    *state.filter_cache.write().await = Some(rendered);
+    *cache = Some(rendered);
     response
 }
 
@@ -299,11 +302,7 @@ async fn render_filter(state: &AppState, fp_rate: f64) -> Result<CachedFilter, S
     })
 }
 
-fn filter_response(
-    headers: &HeaderMap,
-    etag: &str,
-    body: Bytes,
-) -> Result<Response, StatusCode> {
+fn filter_response(headers: &HeaderMap, etag: &str, body: Bytes) -> Result<Response, StatusCode> {
     let matched = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())

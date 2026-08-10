@@ -7,6 +7,9 @@ use crate::error::AppError;
 use cashu::nuts::nut00::token::Token;
 use cdk::wallet::Wallet as CdkWallet;
 use cdk_sqlite::wallet::WalletSqliteDatabase;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -123,6 +126,43 @@ pub fn verify_token_basics(
     Ok(())
 }
 
+/// Persist a newly generated wallet seed without ever exposing it under
+/// process-default permissions.  The rename makes a completed seed appear
+/// atomically to another process.
+fn write_seed_0600(path: &std::path::Path, seed: &[u8; 64]) -> Result<(), AppError> {
+    let temporary = path.with_extension(format!("seed.tmp.{}", uuid::Uuid::new_v4()));
+    #[cfg(unix)]
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .map_err(|error| {
+            AppError::InternalError(format!("Failed to create wallet seed: {error}"))
+        })?;
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| {
+            AppError::InternalError(format!("Failed to create wallet seed: {error}"))
+        })?;
+    file.write_all(seed)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| {
+            AppError::InternalError(format!("Failed to write wallet seed: {error}"))
+        })?;
+    std::fs::rename(&temporary, path).map_err(|error| {
+        AppError::InternalError(format!("Failed to install wallet seed: {error}"))
+    })?;
+    #[cfg(unix)]
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
+        AppError::InternalError(format!("Failed to secure wallet seed: {error}"))
+    })?;
+    Ok(())
+}
+
 /// Initialize the CDK wallet for receiving payments
 ///
 /// Creates or opens a SQLite-backed wallet configured for the first accepted mint.
@@ -161,7 +201,12 @@ pub async fn init_wallet(
     let seed_path = wallet_path.with_extension("seed");
 
     let seed: [u8; 64] = if seed_path.exists() {
-        // Load existing seed
+        #[cfg(unix)]
+        {
+            std::fs::set_permissions(&seed_path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |error| AppError::InternalError(format!("Failed to secure wallet seed: {error}")),
+            )?;
+        }
         let seed_bytes = std::fs::read(&seed_path)
             .map_err(|e| AppError::InternalError(format!("Failed to read wallet seed: {}", e)))?;
         if seed_bytes.len() != 64 {
@@ -171,20 +216,11 @@ pub async fn init_wallet(
         }
         let mut seed = [0u8; 64];
         seed.copy_from_slice(&seed_bytes);
-        info!("Loaded existing wallet seed from {}", seed_path.display());
         seed
     } else {
-        // Generate new cryptographically secure seed
         let mut seed = [0u8; 64];
         rand::fill(&mut seed);
-
-        // Save seed to file
-        std::fs::write(&seed_path, &seed)
-            .map_err(|e| AppError::InternalError(format!("Failed to save wallet seed: {}", e)))?;
-        info!(
-            "Generated and saved new wallet seed to {}",
-            seed_path.display()
-        );
+        write_seed_0600(&seed_path, &seed)?;
         seed
     };
 
@@ -227,7 +263,7 @@ pub async fn receive_token(
         .await
         .map_err(|e| {
             error!("Failed to receive token: {}", e);
-            AppError::BadRequest(format!("Failed to receive token: {}", e))
+            AppError::BadGateway("Cashu wallet settlement failed".to_string())
         })?;
 
     let amount_sats: u64 = amount.into();

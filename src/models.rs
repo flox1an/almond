@@ -263,6 +263,12 @@ pub struct AppState {
     pub serve_files_refresh_interval_secs: u64,
     pub max_total_size: u64,
     pub max_total_files: usize,
+    /// Absolute ceiling for one blob, including streaming and chunked uploads.
+    pub max_blob_size_bytes: u64,
+    /// Disk space that must remain available after accepting a write.
+    pub min_free_disk_bytes: u64,
+    /// Origins permitted to read non-blob API and diagnostic responses.
+    pub cors_allowed_origins: Vec<String>,
     pub bind_addr: String,
     pub public_url: String,
     pub cleanup_interval_secs: u64,
@@ -288,6 +294,10 @@ pub struct AppState {
     pub upstream_client: reqwest::Client,
     pub max_chunk_size_mb: u64,
     pub chunk_cleanup_timeout_minutes: u64,
+    /// Maximum active resumable upload sessions across all identities.
+    pub max_chunk_upload_sessions: usize,
+    /// Maximum active resumable upload sessions per authenticated pubkey.
+    pub max_chunk_upload_sessions_per_pubkey: usize,
     pub feature_upload_enabled: FeatureMode,
     pub feature_mirror_enabled: FeatureMode,
     pub feature_list_enabled: bool,
@@ -302,7 +312,7 @@ pub struct AppState {
     pub p2p_debug: bool,
     pub ongoing_downloads: OngoingDownloadsMap,
     pub upstream_negotiations: UpstreamNegotiationsMap,
-    pub chunk_uploads: Arc<RwLock<HashMap<String, ChunkUpload>>>,
+    pub chunk_uploads: Arc<RwLock<HashMap<ChunkUploadKey, ChunkUpload>>>,
     pub failed_upstream_lookups: Arc<RwLock<HashMap<String, Instant>>>,
     pub blossom_server_lists: Arc<RwLock<HashMap<PublicKey, (Vec<String>, Instant)>>>,
     pub blossom_server_list_cache_ttl_hours: u64,
@@ -314,6 +324,16 @@ pub struct AppState {
     pub report_action: ReportAction,
     /// Whether reports feature is enabled
     pub feature_report_enabled: FeatureMode,
+    /// Maximum acceptable authorization event age, expiration window, and clock skew.
+    pub auth_max_ttl_secs: u64,
+    pub auth_max_age_secs: u64,
+    pub auth_clock_skew_secs: u64,
+    /// Reject authorization events without a matching `server` tag.
+    pub auth_require_server_tag: bool,
+    /// Metrics are disabled unless an administrator configures this bearer token.
+    pub metrics_bearer_token: Option<String>,
+    /// Event IDs accepted for destructive operations, retained until their expiry.
+    pub destructive_event_replays: Arc<RwLock<HashMap<String, u64>>>,
     // Cashu payment configuration (BUD-07)
     pub feature_paid_upload: bool,
     pub feature_paid_mirror: bool,
@@ -412,9 +432,17 @@ pub struct FileRequestQuery {
     pub author_pubkey: Option<String>,
 }
 
+/// A resumable upload is owned by exactly one authenticated Nostr key.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ChunkUploadKey {
+    pub pubkey: PublicKey,
+    pub sha256: String,
+}
+
 #[derive(Clone)]
 pub struct ChunkUpload {
     pub sha256: String,
+    pub owner: PublicKey,
     pub upload_type: String,
     pub upload_length: u64,
     pub temp_path: PathBuf,

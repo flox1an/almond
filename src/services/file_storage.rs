@@ -168,13 +168,47 @@ pub async fn ensure_temp_dir(state: &AppState) -> AppResult<PathBuf> {
     Ok(temp_dir)
 }
 
-/// Validate SHA-256 hash format
-pub fn validate_sha256_format(sha256: &str) -> AppResult<()> {
-    if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(AppError::BadRequest(format!(
-            "Invalid SHA-256 hash format: {}",
-            sha256
+/// Reject a write before it can consume disk or make a successful response
+/// impossible to retain.  The file index tracks final blobs; filesystem free
+/// space covers chunk, reconstruction, and other temporary files.
+pub async fn ensure_storage_capacity(state: &AppState, bytes: u64) -> AppResult<()> {
+    if bytes > state.max_blob_size_bytes {
+        return Err(AppError::PayloadTooLarge(format!(
+            "Blob size {bytes} exceeds configured maximum {}",
+            state.max_blob_size_bytes
         )));
+    }
+
+    let stats = state.file_index.stats().await;
+    if stats.total_bytes.saturating_add(bytes) > state.max_total_size
+        || stats.count >= state.max_total_files
+    {
+        return Err(AppError::InsufficientStorage(
+            "Storage quota would be exceeded".to_string(),
+        ));
+    }
+
+    let available = fs2::available_space(&state.upload_dir).map_err(|error| {
+        AppError::IoError(format!("Failed to inspect available disk space: {error}"))
+    })?;
+    if available < state.min_free_disk_bytes.saturating_add(bytes) {
+        return Err(AppError::InsufficientStorage(
+            "Configured free-disk reserve would be violated".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate SHA-256 hash format.
+pub fn validate_sha256_format(sha256: &str) -> AppResult<()> {
+    if sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(AppError::BadRequest(
+            "SHA-256 must be exactly 64 lowercase hexadecimal characters".to_string(),
+        ));
     }
     Ok(())
 }

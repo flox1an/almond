@@ -135,6 +135,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -5345,6 +5346,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -5375,6 +5377,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 

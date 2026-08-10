@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use reqwest::{redirect, Client};
 use sha2::{Digest, Sha256};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
@@ -13,161 +13,103 @@ use crate::error::{AppError, AppResult};
 use crate::models::AppState;
 use crate::services::file_storage;
 
-/// Check if an IP address is in a private/local range
+/// True for every address that is not globally routable enough for an
+/// untrusted fetch target.  Rejecting documentation and reserved ranges too
+/// keeps this policy fail-closed when an address is repurposed.
 pub fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ipv4) => {
-            let octets = ipv4.octets();
-            octets[0] == 10
-                || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
-                || (octets[0] == 192 && octets[1] == 168)
-                || (octets[0] == 169 && octets[1] == 254)
-                || octets[0] == 127
+        IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            a == 0
+                || a == 10
+                || a == 127
+                || a >= 224
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && (b == 0 || b == 168))
+                || (a == 192 && b == 0 && c == 2)
+                || (a == 198 && (b == 18 || b == 19 || b == 51))
+                || (a == 203 && b == 0 && c == 113)
         }
-        IpAddr::V6(ipv6) => {
-            let segments = ipv6.segments();
-            ipv6.is_loopback()
-                || (segments[0] & 0xffc0 == 0xfe80)
-                || (segments[0] & 0xfe00 == 0xfc00)
+        IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_private_ip(IpAddr::V4(v4));
+            }
+            let segments = ip.segments();
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || (segments[0] & 0xffc0 == 0xfe80) // link-local
+                || (segments[0] & 0xfe00 == 0xfc00) // unique-local
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8) // documentation
         }
     }
 }
 
-fn is_fips_hostname(host: &str) -> bool {
-    host.trim_end_matches('.')
-        .to_ascii_lowercase()
-        .ends_with(".fips")
+struct ResolvedTarget {
+    url: reqwest::Url,
+    host: String,
+    addresses: Vec<SocketAddr>,
 }
 
-fn is_fips_overlay_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(_) => false,
-        IpAddr::V6(ipv6) => ipv6.segments()[0] & 0xff00 == 0xfd00,
-    }
-}
-
-fn is_allowed_private_upstream_ip(host: &str, ip: IpAddr) -> bool {
-    is_fips_hostname(host) && is_fips_overlay_ip(ip)
-}
-
-/// Validate URL is safe to fetch (HTTPS only, no private IPs) - SSRF protection
-pub async fn validate_url_for_ssrf(url: &str) -> AppResult<()> {
+/// Parse and resolve a fetch URL exactly once.  The resulting addresses are
+/// installed into the request client, so the connection cannot be rebound to
+/// a different address after validation.
+async fn resolve_public_target(url: &str) -> AppResult<ResolvedTarget> {
     let parsed = reqwest::Url::parse(url)
-        .map_err(|e| AppError::BadRequest(format!("Invalid URL format: {}", e)))?;
-
-    // Allow HTTP for .fips hostnames (FIPS mesh provides transport encryption)
+        .map_err(|_| AppError::BadRequest("Invalid URL format".to_string()))?;
     if parsed.scheme() != "https" {
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| AppError::BadRequest("URL has no hostname".to_string()))?;
-        if parsed.scheme() != "http" || !is_fips_hostname(host) {
-            return Err(AppError::BadRequest(format!(
-                "Only HTTPS URLs are allowed, got: {}",
-                parsed.scheme()
-            )));
-        }
+        return Err(AppError::BadRequest(
+            "Only HTTPS URLs are allowed".to_string(),
+        ));
     }
-
     let host = parsed
         .host_str()
-        .ok_or_else(|| AppError::BadRequest("URL has no hostname".to_string()))?;
-
-    debug!(
-        "🔍 Resolving DNS for hostname: {} (timeout: {}s)",
-        host, DNS_LOOKUP_TIMEOUT_SECS
-    );
-
-    // Resolve DNS with timeout
-    let dns_future = lookup_host((host, 443));
-    let dns_timeout = tokio::time::sleep(Duration::from_secs(DNS_LOOKUP_TIMEOUT_SECS));
-
-    let addrs = tokio::select! {
-        result = dns_future => {
-            result.map_err(|e| {
-                error!("❌ DNS resolution failed for {}: {}", host, e);
-                AppError::BadRequest(format!("DNS resolution failed: {}", e))
-            })?
-        }
-        _ = dns_timeout => {
-            error!("❌ DNS resolution timeout after {}s for hostname: {}", DNS_LOOKUP_TIMEOUT_SECS, host);
-            return Err(AppError::Timeout(format!("DNS resolution timeout for {}", host)));
-        }
-    };
-
-    let mut has_valid_ip = false;
-    let mut resolved_ips = Vec::new();
-    for addr in addrs {
-        let ip = addr.ip();
-        resolved_ips.push(ip);
-        if is_private_ip(ip) && !is_allowed_private_upstream_ip(host, ip) {
-            error!(
-                "❌ URL resolves to private/local IP: {} (from hostname: {})",
-                ip, host
-            );
-            return Err(AppError::BadRequest(format!(
-                "URL resolves to private/local IP: {}",
-                ip
-            )));
-        }
-        if is_allowed_private_upstream_ip(host, ip) {
-            debug!(
-                "✅ Resolved {} -> {} (allowed FIPS overlay address)",
-                host, ip
-            );
-        }
-        has_valid_ip = true;
-        debug!("✅ Resolved {} -> {} (allowed)", host, ip);
+        .ok_or_else(|| AppError::BadRequest("URL has no hostname".to_string()))?
+        .to_owned();
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let addresses = tokio::time::timeout(
+        Duration::from_secs(DNS_LOOKUP_TIMEOUT_SECS),
+        lookup_host((host.as_str(), port)),
+    )
+    .await
+    .map_err(|_| AppError::Timeout(format!("DNS resolution timeout for {host}")))?
+    .map_err(|_| AppError::BadRequest(format!("DNS resolution failed for {host}")))?
+    .filter(|address| !is_private_ip(address.ip()))
+    .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        return Err(AppError::BadRequest(
+            "URL does not resolve to a publicly routable address".to_string(),
+        ));
     }
-
-    if !has_valid_ip {
-        return Err(AppError::BadRequest(format!(
-            "No valid IP addresses resolved for hostname: {}",
-            host
-        )));
-    }
-
-    debug!(
-        "✅ DNS validation passed for {} ({} IP(s) resolved)",
+    Ok(ResolvedTarget {
+        url: parsed,
         host,
-        resolved_ips.len()
-    );
-    Ok(())
+        addresses,
+    })
 }
 
-/// Create HTTP client with hardened security settings
-pub fn create_hardened_http_client() -> AppResult<Client> {
-    let redirect_policy = if HTTP_REQUEST_MAX_REDIRECTS == 0 {
-        redirect::Policy::none()
-    } else {
-        redirect::Policy::limited(HTTP_REQUEST_MAX_REDIRECTS as usize)
-    };
+/// Validate a URL under the same strict policy used by the pinned fetch path.
+pub async fn validate_url_for_ssrf(url: &str) -> AppResult<()> {
+    resolve_public_target(url).await.map(|_| ())
+}
 
+/// Create HTTP client with hardened security settings.
+pub fn create_hardened_http_client() -> AppResult<Client> {
     Client::builder()
-        .redirect(redirect_policy)
+        .redirect(redirect::Policy::none())
         .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
         .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
         .build()
-        .map_err(|e| AppError::InternalError(format!("Failed to create HTTP client: {}", e)))
+        .map_err(|error| AppError::InternalError(format!("Failed to create HTTP client: {error}")))
 }
 
-/// Build the single, process-wide client used for upstream blob fetches.
-///
-/// Constructing a `Client` per request throws away the connection pool, so
-/// every cache miss paid for a fresh TCP + TLS handshake. This one is built
-/// once and cloned (the handle is an `Arc` internally).
-///
-/// Note the absence of a total request timeout: upstream bodies are blobs that
-/// can legitimately stream for minutes. Stalls are caught by `read_timeout`,
-/// which fires on inactivity rather than on total elapsed time.
+/// Build the pooled client for configured upstreams.  Redirects remain
+/// disabled: each URL must be independently validated before it is fetched.
 pub fn create_upstream_client() -> AppResult<Client> {
-    let redirect_policy = if HTTP_REQUEST_MAX_REDIRECTS == 0 {
-        redirect::Policy::none()
-    } else {
-        redirect::Policy::limited(HTTP_REQUEST_MAX_REDIRECTS as usize)
-    };
-
     Client::builder()
-        .redirect(redirect_policy)
+        .redirect(redirect::Policy::none())
         .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
         .read_timeout(Duration::from_secs(UPSTREAM_READ_TIMEOUT_SECS))
         .pool_max_idle_per_host(UPSTREAM_POOL_MAX_IDLE_PER_HOST)
@@ -175,8 +117,8 @@ pub fn create_upstream_client() -> AppResult<Client> {
         .tcp_keepalive(Duration::from_secs(UPSTREAM_TCP_KEEPALIVE_SECS))
         .tcp_nodelay(true)
         .build()
-        .map_err(|e| {
-            AppError::InternalError(format!("Failed to create upstream HTTP client: {}", e))
+        .map_err(|error| {
+            AppError::InternalError(format!("Failed to create upstream HTTP client: {error}"))
         })
 }
 
@@ -184,6 +126,7 @@ pub fn create_upstream_client() -> AppResult<Client> {
 pub async fn stream_to_temp_file(
     mut body_stream: impl futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Unpin,
     temp_path: &std::path::Path,
+    max_bytes: u64,
 ) -> AppResult<(String, u64)> {
     let mut temp_file = File::create(temp_path).await.map_err(|e| {
         error!("Failed to create temp file: {}", e);
@@ -195,18 +138,27 @@ pub async fn stream_to_temp_file(
     let mut last_log_time = std::time::Instant::now();
 
     while let Some(chunk) = body_stream.next().await {
-        let data = chunk.map_err(|e| {
-            error!("Failed to read chunk: {}", e);
-            AppError::BadRequest(format!("Failed to read chunk: {}", e))
+        let data = chunk.map_err(|_| {
+            AppError::PayloadTooLarge(
+                "Request body exceeded the configured upload limit".to_string(),
+            )
         })?;
 
         for chunk in data.chunks(CHUNK_SIZE) {
+            let next_total = total_bytes
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| AppError::PayloadTooLarge("Upload size overflow".to_string()))?;
+            if next_total > max_bytes {
+                return Err(AppError::PayloadTooLarge(format!(
+                    "Upload exceeds configured maximum of {max_bytes} bytes"
+                )));
+            }
             hasher.update(chunk);
             temp_file.write_all(chunk).await.map_err(|e| {
                 error!("Failed to write to temp file: {}", e);
                 AppError::IoError(format!("Failed to write to temp file: {}", e))
             })?;
-            total_bytes += chunk.len() as u64;
+            total_bytes = next_total;
         }
 
         if last_log_time.elapsed() >= LOG_INTERVAL {
@@ -264,7 +216,9 @@ pub async fn stream_response_to_temp_file(
 
         chunk_count += 1;
 
-        let new_size = body_size + chunk.len() as u64;
+        let new_size = body_size
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| AppError::PayloadTooLarge("Download size overflow".to_string()))?;
         if new_size > max_size_bytes {
             error!(
                 "❌ Download exceeded size limit: {} bytes > {} bytes",
@@ -360,41 +314,36 @@ pub async fn finalize_upload(
     Ok(())
 }
 
-/// Fetch file from URL and return response (with SSRF protection)
+/// Fetch a URL using the exact public address set that passed validation.
 pub async fn fetch_from_url(url: &str) -> AppResult<reqwest::Response> {
-    validate_url_for_ssrf(url).await?;
-
-    let client = create_hardened_http_client()?;
-
-    debug!("📡 Sending HTTP GET request to: {}", url);
-    let response = client.get(url).send().await.map_err(|e| {
-        let error_msg = e.to_string();
-        if error_msg.contains("timeout") || error_msg.contains("timed out") {
-            error!("⏱️  Request timeout after {}s", HTTP_REQUEST_TIMEOUT_SECS);
-            AppError::Timeout(format!("Request timeout for URL: {}", url))
-        } else if error_msg.contains("connection") || error_msg.contains("connect") {
-            error!("🔌 Connection error: {}", error_msg);
-            AppError::BadGateway(format!("Connection error: {}", error_msg))
-        } else {
-            error!("❌ Failed to fetch URL: {}", error_msg);
-            AppError::NetworkError(format!("Failed to fetch URL: {}", error_msg))
-        }
+    let target = resolve_public_target(url).await?;
+    let mut builder = Client::builder()
+        .redirect(redirect::Policy::none())
+        .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS));
+    for address in &target.addresses {
+        builder = builder.resolve(&target.host, *address);
+    }
+    let client = builder.build().map_err(|error| {
+        AppError::InternalError(format!("Failed to build pinned HTTP client: {error}"))
     })?;
-
-    let status = response.status();
-    debug!("📥 Received HTTP response: {} for URL: {}", status, url);
-
-    if !status.is_success() {
-        warn!(
-            "⚠️  HTTP request failed with status {} for URL: {}",
-            status, url
-        );
-        return Err(AppError::BadRequest(format!(
-            "Upstream returned status: {}",
-            status
+    let response = client
+        .get(target.url.clone())
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                AppError::Timeout("Upstream request timed out".to_string())
+            } else {
+                AppError::BadGateway("Failed to fetch upstream URL".to_string())
+            }
+        })?;
+    if !response.status().is_success() {
+        return Err(AppError::BadGateway(format!(
+            "Upstream returned status {}",
+            response.status()
         )));
     }
-
     Ok(response)
 }
 
@@ -443,40 +392,40 @@ pub fn check_size_limit(content_length: Option<u64>, max_size_bytes: u64) -> App
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv6Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
-    fn test_fips_hostname_detection() {
-        assert!(is_fips_hostname("npub123.fips"));
-        assert!(is_fips_hostname("NPUB123.FIPS."));
-        assert!(!is_fips_hostname("example.com"));
-        assert!(!is_fips_hostname("evil-fips.example.com"));
+    fn non_public_ipv4_ranges_are_rejected() {
+        for address in [
+            Ipv4Addr::new(0, 0, 0, 0),
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(100, 64, 0, 1),
+            Ipv4Addr::new(127, 0, 0, 1),
+            Ipv4Addr::new(169, 254, 169, 254),
+            Ipv4Addr::new(172, 16, 0, 1),
+            Ipv4Addr::new(192, 168, 0, 1),
+            Ipv4Addr::new(198, 18, 0, 1),
+        ] {
+            assert!(is_private_ip(IpAddr::V4(address)), "{address}");
+        }
     }
 
     #[test]
-    fn test_fips_overlay_ip_detection() {
-        assert!(is_fips_overlay_ip(IpAddr::V6(Ipv6Addr::new(
-            0xfd00, 0, 0, 0, 0, 0, 0, 1
-        ))));
-        assert!(is_fips_overlay_ip(IpAddr::V6(Ipv6Addr::new(
-            0xfdff, 0, 0, 0, 0, 0, 0, 1
-        ))));
-        assert!(!is_fips_overlay_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
-        assert!(!is_fips_overlay_ip(IpAddr::V6(Ipv6Addr::new(
-            0xfc00, 0, 0, 0, 0, 0, 0, 1
-        ))));
-        assert!(!is_fips_overlay_ip(IpAddr::V4("10.0.0.1".parse().unwrap())));
+    fn loopback_and_mapped_ipv6_are_rejected() {
+        assert!(is_private_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert!(is_private_ip(IpAddr::V6(
+            "::ffff:127.0.0.1".parse().unwrap()
+        )));
+        assert!(is_private_ip(IpAddr::V6("fe80::1".parse().unwrap())));
     }
-
-    #[test]
-    fn test_allowed_private_upstream_ip_is_limited_to_fips_overlay() {
-        let fips_ip = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
-        let normal_ula = IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1));
-        let private_v4 = IpAddr::V4("10.0.0.1".parse().unwrap());
-
-        assert!(is_allowed_private_upstream_ip("npub123.fips", fips_ip));
-        assert!(!is_allowed_private_upstream_ip("example.com", fips_ip));
-        assert!(!is_allowed_private_upstream_ip("npub123.fips", normal_ula));
-        assert!(!is_allowed_private_upstream_ip("npub123.fips", private_v4));
+    #[tokio::test]
+    async fn streaming_upload_stops_at_its_explicit_byte_limit() {
+        let path = std::env::temp_dir().join(format!("almond-limit-{}", uuid::Uuid::new_v4()));
+        let stream = futures_util::stream::iter(vec![Ok::<_, axum::Error>(
+            axum::body::Bytes::from_static(b"oversized"),
+        )]);
+        let result = stream_to_temp_file(stream, &path, 4).await;
+        assert!(matches!(result, Err(AppError::PayloadTooLarge(_))));
+        let _ = tokio::fs::remove_file(path).await;
     }
 }
