@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 use crate::error::{AppError, AppResult};
 use crate::models::{AppState, BlobOrigin, FileLocation, FileMetadata, StorageLayout};
 use crate::services::blob_index::BlobIndex;
-use crate::services::file_storage;
+use crate::services::{blob_name, file_storage};
 
 /// Create all explicitly managed storage roots.
 pub async fn initialize_storage(layout: &StorageLayout) -> AppResult<()> {
@@ -267,13 +267,8 @@ async fn scan_blob_root(
 
 /// Parse `<hash>[_<expiration>][.<extension>]` only when the hash is valid.
 fn parse_filename_for_hash_and_expiration(filename: &str) -> Option<(String, Option<u64>)> {
-    let stem = filename.split_once('.').map_or(filename, |(stem, _)| stem);
-    let (hash, expiration) = match stem.split_once('_') {
-        Some((hash, expiration)) => (hash, Some(expiration.parse::<u64>().ok()?)),
-        None => (stem, None),
-    };
-    (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then(|| (hash.to_owned(), expiration))
+    let parsed = blob_name::parse(filename)?;
+    Some((parsed.hash, parsed.expiration))
 }
 
 async fn cleanup_empty_dirs(root_dir: &Path) {

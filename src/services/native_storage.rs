@@ -13,6 +13,7 @@ use tokio::fs;
 use crate::{
     error::{AppError, AppResult},
     models::{BlobOrigin, FileLocation, FileMetadata},
+    services::blob_name,
 };
 
 const REQUIRED_S3_ENV: [&str; 4] = [
@@ -285,23 +286,14 @@ pub fn object_key(
     extension: Option<&str>,
     expiration: Option<u64>,
 ) -> AppResult<String> {
-    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(AppError::BadRequest("Invalid SHA-256 hash".to_owned()));
-    }
-    let filename = match (expiration, extension) {
-        (Some(expiration), Some(extension)) => format!("{sha256}_{expiration}.{extension}"),
-        (Some(expiration), None) => format!("{sha256}_{expiration}"),
-        (None, Some(extension)) => format!("{sha256}.{extension}"),
-        (None, None) => sha256.to_owned(),
-    };
-    Ok(format!("{}/{}/{}", &sha256[..1], &sha256[1..2], filename))
+    let (h0, h1) = blob_name::fan_out(sha256)?;
+    let filename = blob_name::name(sha256, expiration, extension)?;
+    Ok(format!("{h0}/{h1}/{filename}"))
 }
 
 fn hash_prefix(sha256: &str) -> AppResult<String> {
-    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(AppError::BadRequest("Invalid SHA-256 hash".to_owned()));
-    }
-    Ok(format!("{}/{}/{sha256}", &sha256[..1], &sha256[1..2]))
+    let (h0, h1) = blob_name::fan_out(sha256)?;
+    Ok(format!("{h0}/{h1}/{sha256}"))
 }
 
 fn parse_object_key(key: &str) -> Option<(String, Option<u64>, Option<String>)> {
@@ -310,21 +302,9 @@ fn parse_object_key(key: &str) -> Option<(String, Option<u64>, Option<String>)> 
     if path.next().is_some() {
         return None;
     }
-    let (base, extension) = filename
-        .rsplit_once('.')
-        .map_or((filename, None), |(base, extension)| {
-            (base, Some(extension.to_owned()))
-        });
-    let (hash, expiration) = base
-        .rsplit_once('_')
-        .map_or((base, None), |(hash, expiration)| {
-            (hash, expiration.parse().ok())
-        });
-    (hash.len() == 64
-        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && first == &hash[..1]
-        && second == &hash[1..2])
-        .then(|| (hash.to_owned(), expiration, extension))
+    let parsed = blob_name::parse(filename)?;
+    (first == &parsed.hash[..1] && second == &parsed.hash[1..2])
+        .then(|| (parsed.hash, parsed.expiration, parsed.extension))
 }
 
 fn now_secs() -> u64 {

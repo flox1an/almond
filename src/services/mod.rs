@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod blob_index;
+pub mod blob_name;
 pub mod blossom_servers;
 pub mod cashu;
 pub mod chunk_sessions;

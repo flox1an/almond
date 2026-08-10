@@ -8,6 +8,7 @@ use tracing::{debug, warn};
 use crate::error::{AppError, AppResult};
 use crate::models::{AppState, BlobOrigin, FileLocation, FileMetadata};
 use crate::services::blob_index::PublishResult;
+use crate::services::blob_name;
 
 /// The caller-provided properties of one completed blob.
 pub struct BlobPublication {
@@ -45,17 +46,16 @@ fn completed_path(
     extension: Option<&str>,
     expiration: Option<u64>,
 ) -> PathBuf {
+    // `publish_blob` validates the hash (via `validate_sha256_format`) before
+    // calling, so the grammar owner's checks cannot fail here.
+    let (h0, h1) = blob_name::fan_out(hash).expect("hash validated by publish_blob");
+    let filename = blob_name::name(hash, expiration, extension)
+        .expect("hash validated by publish_blob");
     let root = match origin {
         BlobOrigin::Upload => &state.storage.uploads,
         BlobOrigin::UpstreamCache => &state.storage.upstream_cache,
     };
-    let filename = match (expiration, extension) {
-        (Some(expiration), Some(extension)) => format!("{hash}_{expiration}.{extension}"),
-        (Some(expiration), None) => format!("{hash}_{expiration}"),
-        (None, Some(extension)) => format!("{hash}.{extension}"),
-        (None, None) => hash.to_owned(),
-    };
-    root.join(&hash[..1]).join(&hash[1..2]).join(filename)
+    root.join(h0).join(h1).join(filename)
 }
 
 /// Create parent directories for a file path.
@@ -346,11 +346,7 @@ pub async fn ensure_storage_capacity(state: &AppState, bytes: u64) -> AppResult<
 
 /// Validate SHA-256 hash format.
 pub fn validate_sha256_format(sha256: &str) -> AppResult<()> {
-    if sha256.len() != 64
-        || !sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if !blob_name::is_valid_hash(sha256) {
         return Err(AppError::BadRequest(
             "SHA-256 must be exactly 64 lowercase hexadecimal characters".to_string(),
         ));
@@ -361,7 +357,5 @@ pub fn validate_sha256_format(sha256: &str) -> AppResult<()> {
 /// Extract SHA-256 hash from filename (handles both `hash` and `hash.ext`).
 #[must_use]
 pub fn extract_sha256_from_filename(filename: &str) -> Option<String> {
-    let hash = filename.split('.').next()?;
-    (hash.len() == 64 && hash.chars().all(|character| character.is_ascii_hexdigit()))
-        .then(|| hash.to_string())
+    Some(blob_name::parse(filename)?.hash)
 }
