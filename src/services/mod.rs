@@ -2,6 +2,7 @@ pub mod auth;
 pub mod blob_index;
 pub mod blossom_servers;
 pub mod cashu;
+pub mod chunk_sessions;
 pub mod download;
 pub mod file_storage;
 pub mod hls;

@@ -529,36 +529,27 @@ pub fn parse_range_header(header_value: &str, total_size: u64) -> RangeSpec {
 pub async fn cleanup_abandoned_chunks(state: &AppState) {
     let timeout_duration = std::time::Duration::from_secs(state.chunk_cleanup_timeout_minutes * 60);
 
-    // Get chunk uploads that are older than the timeout
-    let mut chunk_uploads = state.chunk_uploads.write().await;
-    let mut to_remove = Vec::new();
-
-    for (key, chunk_upload) in chunk_uploads.iter() {
-        if chunk_upload.created_at.elapsed() >= timeout_duration {
-            info!("Cleaning up abandoned chunked upload: {}", key.sha256);
-            to_remove.push(key.clone());
-        }
-    }
-
     // Remove abandoned uploads and clean up their files
-    for key in to_remove {
-        if let Some(chunk_upload) = chunk_uploads.remove(&key) {
-            let chunk_count = chunk_upload.chunks.len();
-            // Clean up all chunk files for this upload
-            for chunk in chunk_upload.chunks {
-                if let Err(e) = fs::remove_file(&chunk.chunk_path).await {
-                    warn!(
-                        "Failed to clean up chunk file {}: {}",
-                        chunk.chunk_path.display(),
-                        e
-                    );
-                }
+    for chunk_upload in state.chunk_sessions.evict_older_than(timeout_duration).await {
+        let chunk_count = chunk_upload.chunks.len();
+        info!(
+            "Cleaning up abandoned chunked upload: {} ({} chunks)",
+            chunk_upload.sha256, chunk_count
+        );
+        // Clean up all chunk files for this upload
+        for chunk in chunk_upload.chunks {
+            if let Err(e) = fs::remove_file(&chunk.chunk_path).await {
+                warn!(
+                    "Failed to clean up chunk file {}: {}",
+                    chunk.chunk_path.display(),
+                    e
+                );
             }
-            info!(
-                "🗑 Cleaned up {} chunk files for abandoned upload: {}",
-                chunk_count, key.sha256
-            );
         }
+        info!(
+            "🗑 Cleaned up {} chunk files for abandoned upload: {}",
+            chunk_count, chunk_upload.sha256
+        );
     }
 
     // Also clean up orphaned chunk files in the temp/chunks directory

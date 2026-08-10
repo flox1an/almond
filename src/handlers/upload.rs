@@ -346,7 +346,7 @@ pub async fn patch_upload(
         DEFAULT_CONTENT_TYPE, UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER, UPLOAD_TYPE_HEADER,
         X_SHA_256_HEADER,
     };
-    use crate::models::{ChunkInfo, ChunkUpload, ChunkUploadKey};
+    use crate::models::{ChunkInfo, ChunkUploadKey};
 
     let auth_mode = match state.feature_upload_enabled {
         crate::models::FeatureMode::Off => {
@@ -424,25 +424,25 @@ pub async fn patch_upload(
         sha256: sha256.clone(),
     };
 
-    // Pay before a potentially final chunk reaches disk.  No await occurs
-    // while the session map is locked.
-    let completes_upload = {
-        let uploads = state.chunk_uploads.read().await;
-        uploads
-            .get(&key)
-            .map_or(content_length == upload_length, |upload| {
-                upload
-                    .chunks
-                    .iter()
-                    .try_fold(content_length, |total, chunk| {
-                        total.checked_add(chunk.length)
-                    })
-                    == Some(upload_length)
-            })
+    let session_params = crate::services::chunk_sessions::SessionParams {
+        sha256: sha256.clone(),
+        owner: auth_event.pubkey,
+        upload_type: upload_type.clone(),
+        upload_length,
+        expiration: extract_expiration(&headers),
     };
-    if completes_upload {
-        check_payment(&state, &headers, upload_length, state.feature_paid_upload).await?;
+
+    // Session capacity is checked BEFORE any bytes hit disk, so concurrent
+    // requests cannot exceed the limit with partially-written chunks.
+    match state.chunk_sessions.reserve(&key, &session_params).await {
+        crate::services::chunk_sessions::Reservation::Granted => {}
+        _ => {
+            return Err(AppError::Conflict(
+                "Session capacity exhausted".to_string(),
+            ));
+        }
     }
+
     file_storage::ensure_storage_capacity(&state, content_length).await?;
     file_storage::ensure_temp_dir(&state).await?;
     let chunk_temp_dir = state.storage.temp.join("chunks");
@@ -476,75 +476,55 @@ pub async fn patch_upload(
         ));
     }
 
-    let expiration = extract_expiration(&headers);
-    let completion = {
-        let mut uploads = state.chunk_uploads.write().await;
-        if uploads.contains_key(&key) {
-            Some(false)
-        } else {
-            let owner_sessions = uploads
-                .keys()
-                .filter(|existing| existing.pubkey == auth_event.pubkey)
-                .count();
-            if uploads.len() >= state.max_chunk_upload_sessions
-                || owner_sessions >= state.max_chunk_upload_sessions_per_pubkey
-            {
-                None
-            } else {
-                uploads.insert(
-                    key.clone(),
-                    ChunkUpload {
-                        sha256: sha256.clone(),
-                        owner: auth_event.pubkey,
-                        upload_type: upload_type.clone(),
-                        upload_length,
-                        temp_path: state
-                            .storage
-                            .temp
-                            .join(format!("chunk_upload_{}", uuid::Uuid::new_v4())),
-                        chunks: Vec::new(),
-                        created_at: std::time::Instant::now(),
-                        expiration,
-                    },
-                );
-                Some(false)
-            }
+    let chunk_info = ChunkInfo {
+        offset: upload_offset,
+        length: content_length,
+        chunk_path: chunk_path.clone(),
+    };
+    // The completion decision is atomic with the chunk insertion: exactly one
+    // caller observes Commit::Complete, so payment is charged exactly once
+    // even when two concurrent requests both carry the final chunk.
+    let committed = state
+        .chunk_sessions
+        .commit(&key, chunk_info, &upload_type, upload_length)
+        .await;
+
+    let upload_data = match committed {
+        crate::services::chunk_sessions::Commit::Incomplete => {
+            return Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(Body::empty())
+                .map_err(|error| {
+                    AppError::InternalError(format!("Failed to build response: {error}"))
+                });
         }
-        .and_then(|_| {
-            let upload = uploads.get_mut(&key)?;
-            if upload.upload_type != upload_type || upload.upload_length != upload_length {
-                return None;
-            }
-            let overlaps = upload.chunks.iter().any(|chunk| {
-                chunk.offset < chunk_end
-                    && upload_offset < chunk.offset.saturating_add(chunk.length)
-            });
-            if overlaps {
-                return None;
-            }
-            upload.chunks.push(ChunkInfo {
-                offset: upload_offset,
-                length: content_length,
-                chunk_path: chunk_path.clone(),
-            });
-            let total = upload
-                .chunks
-                .iter()
-                .try_fold(0u64, |sum, chunk| sum.checked_add(chunk.length))?;
-            if total == upload.upload_length {
-                uploads.remove(&key)
-            } else {
-                Some(upload.clone())
-            }
-        })
+        crate::services::chunk_sessions::Commit::Overlap
+        | crate::services::chunk_sessions::Commit::ParamMismatch => {
+            let _ = tokio::fs::remove_file(&chunk_path).await;
+            return Err(AppError::Conflict(
+                "Chunk conflicts with an existing session".to_string(),
+            ));
+        }
+        crate::services::chunk_sessions::Commit::Complete(upload_data) => upload_data,
     };
 
-    let Some(upload_data) = completion else {
+    // Charge on the completion transition. If payment is rejected, restore the
+    // session minus the completing chunk so the client can retry the final
+    // chunk with payment attached (reactive BUD-07 flow).
+    if let Err(payment_error) = check_payment(
+        &state,
+        &headers,
+        upload_length,
+        state.feature_paid_upload,
+    )
+    .await
+    {
+        let mut restored = upload_data.clone();
+        restored.chunks.pop();
+        state.chunk_sessions.reinsert(&key, restored).await;
         let _ = tokio::fs::remove_file(&chunk_path).await;
-        return Err(AppError::Conflict(
-            "Chunk conflicts with an existing session or session capacity is exhausted".to_string(),
-        ));
-    };
+        return Err(payment_error);
+    }
     if upload_data.chunks.len() == 1 && upload_data.chunks[0].length != upload_length {
         return Response::builder()
             .status(StatusCode::NO_CONTENT)
