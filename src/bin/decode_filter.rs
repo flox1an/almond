@@ -1,4 +1,4 @@
-/// Decode a MessagePack-encoded `BinaryFuse16` filter to understand its structure
+//! Decode a MessagePack-encoded `BinaryFuse16` filter to understand its structure
 
 fn main() {
     // Base64 from localhost:3000/filter

@@ -1,6 +1,6 @@
 [package]
 name = "almond"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 rust-version = "1.85"
 
@@ -88,16 +88,14 @@ unreachable_pub = "warn"
 unused_lifetimes = "warn"
 
 [lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-# metrics.rs:182-202 — u64 → i64 gauges silently go negative
+# Keep the CI baseline actionable. Pedantic is intentionally not enabled
+# wholesale: it reports style preferences in existing production paths that
+# are not correctness defects.
 cast_possible_truncation = "warn"
 cast_possible_wrap = "warn"
 cast_sign_loss = "warn"
-# handful of dropped JoinHandles — no silent subsystem death
+# Flag discarded JoinHandles and similar must-use values.
 let_underscore_must_use = "warn"
-# main.rs:101, upstream.rs:1329
-unused_async = "warn"
-# list.rs:154, p2p_webrtc.rs:33
 redundant_clone = "warn"
 # Deliberately not enforcing across 500+ tracing calls
 uninlined_format_args = "allow"

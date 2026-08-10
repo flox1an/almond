@@ -432,23 +432,31 @@ pub async fn patch_upload(
         expiration: extract_expiration(&headers),
     };
 
-    // Session capacity is checked BEFORE any bytes hit disk, so concurrent
-    // requests cannot exceed the limit with partially-written chunks.
-    match state.chunk_sessions.reserve(&key, &session_params).await {
-        crate::services::chunk_sessions::Reservation::Granted => {}
-        _ => {
-            return Err(AppError::Conflict(
-                "Session capacity exhausted".to_string(),
-            ));
+    // Reserve capacity before writing the body. The ticket is released on
+    // every pre-commit error, so failed requests cannot retain empty sessions.
+    let reservation = match state.chunk_sessions.reserve(&key).await {
+        crate::services::chunk_sessions::Reservation::Granted(ticket) => ticket,
+        crate::services::chunk_sessions::Reservation::GlobalLimit
+        | crate::services::chunk_sessions::Reservation::PerPubkeyLimit => {
+            return Err(AppError::Conflict("Session capacity exhausted".to_string()));
         }
-    }
+    };
 
-    file_storage::ensure_storage_capacity(&state, content_length).await?;
-    file_storage::ensure_temp_dir(&state).await?;
+    if let Err(error) = file_storage::ensure_storage_capacity(&state, content_length).await {
+        state.chunk_sessions.release(reservation).await;
+        return Err(error);
+    }
+    if let Err(error) = file_storage::ensure_temp_dir(&state).await {
+        state.chunk_sessions.release(reservation).await;
+        return Err(error);
+    }
     let chunk_temp_dir = state.storage.temp.join("chunks");
-    tokio::fs::create_dir_all(&chunk_temp_dir)
-        .await
-        .map_err(|error| AppError::IoError(format!("Failed to create chunk directory: {error}")))?;
+    if let Err(error) = tokio::fs::create_dir_all(&chunk_temp_dir).await {
+        state.chunk_sessions.release(reservation).await;
+        return Err(AppError::IoError(format!(
+            "Failed to create chunk directory: {error}"
+        )));
+    }
     let chunk_path = chunk_temp_dir.join(format!(
         "chunk_{}_{}_{}",
         sha256,
@@ -456,21 +464,23 @@ pub async fn patch_upload(
         uuid::Uuid::new_v4()
     ));
 
-    let write_result = upload::stream_to_temp_file(
+    let (_, written) = match upload::stream_to_temp_file(
         req.into_body().into_data_stream(),
         &chunk_path,
         content_length,
     )
-    .await;
-    let (_, written) = match write_result {
+    .await
+    {
         Ok(result) => result,
         Err(error) => {
             let _ = tokio::fs::remove_file(&chunk_path).await;
+            state.chunk_sessions.release(reservation).await;
             return Err(error);
         }
     };
     if written != content_length {
         let _ = tokio::fs::remove_file(&chunk_path).await;
+        state.chunk_sessions.release(reservation).await;
         return Err(AppError::BadRequest(
             "Chunk body does not match Content-Length".to_string(),
         ));
@@ -486,7 +496,7 @@ pub async fn patch_upload(
     // even when two concurrent requests both carry the final chunk.
     let committed = state
         .chunk_sessions
-        .commit(&key, chunk_info, &upload_type, upload_length)
+        .commit(reservation, &session_params, chunk_info)
         .await;
 
     let upload_data = match committed {
@@ -509,20 +519,21 @@ pub async fn patch_upload(
     };
 
     // Charge on the completion transition. If payment is rejected, restore the
-    // session minus the completing chunk so the client can retry the final
-    // chunk with payment attached (reactive BUD-07 flow).
-    if let Err(payment_error) = check_payment(
-        &state,
-        &headers,
-        upload_length,
-        state.feature_paid_upload,
-    )
-    .await
+    // prior chunks only when no concurrent request started a replacement
+    // session. Otherwise discard the failed upload's files without touching
+    // that live reservation.
+    if let Err(payment_error) =
+        check_payment(&state, &headers, upload_length, state.feature_paid_upload).await
     {
         let mut restored = upload_data.clone();
         restored.chunks.pop();
-        state.chunk_sessions.reinsert(&key, restored).await;
-        let _ = tokio::fs::remove_file(&chunk_path).await;
+        if state.chunk_sessions.restore(&key, restored).await {
+            let _ = tokio::fs::remove_file(&chunk_path).await;
+        } else {
+            for chunk in &upload_data.chunks {
+                let _ = tokio::fs::remove_file(&chunk.chunk_path).await;
+            }
+        }
         return Err(payment_error);
     }
     if upload_data.chunks.len() == 1 && upload_data.chunks[0].length != upload_length {

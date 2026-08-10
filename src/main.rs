@@ -816,14 +816,12 @@ async fn load_app_state() -> AppState {
         p2p_debug,
         ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
         upstream_negotiations: Arc::new(RwLock::new(HashMap::new())),
-        chunk_sessions: Arc::new(
-            services::chunk_sessions::ChunkSessions::new(
-                services::chunk_sessions::SessionLimits {
-                    max_sessions: max_chunk_upload_sessions,
-                    max_sessions_per_pubkey: max_chunk_upload_sessions_per_pubkey,
-                },
-            ),
-        ),
+        chunk_sessions: Arc::new(services::chunk_sessions::ChunkSessions::new(
+            services::chunk_sessions::SessionLimits {
+                max_sessions: max_chunk_upload_sessions,
+                max_sessions_per_pubkey: max_chunk_upload_sessions_per_pubkey,
+            },
+        )),
         failed_upstream_lookups: Arc::new(RwLock::new(HashMap::new())),
         blossom_server_lists: Arc::new(RwLock::new(HashMap::new())),
         blossom_server_list_cache_ttl_hours,

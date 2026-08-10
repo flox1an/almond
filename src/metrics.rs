@@ -21,6 +21,12 @@ pub struct Metrics {
     pub storage_usage_percent: IntGauge,
 }
 
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Metrics {
     /// Initialize all Prometheus metrics
     #[must_use]

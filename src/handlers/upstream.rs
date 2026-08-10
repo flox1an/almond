@@ -9,11 +9,7 @@ use futures_util::StreamExt;
 use reqwest::{header as reqwest_header, Client};
 use serde_json::json;
 use sha2::Digest;
-use tokio::{
-    fs::File,
-    io::AsyncWriteExt,
-    sync::watch,
-};
+use tokio::{fs::File, io::AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
 use crate::services::upload::validate_upstream_url;
@@ -24,14 +20,13 @@ use crate::helpers::{
     get_extension_from_mime, server_url_candidates,
 };
 use crate::models::{
-    AppState, DownloadHandle, DownloadPhase, DownloadProgress, NegotiationPhase,
-    UpstreamNegotiation,
+    AppState, DownloadHandle, DownloadPhase, NegotiationPhase, UpstreamNegotiation,
 };
 use crate::services::download::{
     claim_upstream_negotiation, NegotiationClaim, NegotiationGuard, PreparedDownload,
 };
-use crate::utils::{get_sha256_hash_from_filename, parse_range_header, RangeSpec};
 use crate::services::tail::create_tailing_stream;
+use crate::utils::{get_sha256_hash_from_filename, parse_range_header, RangeSpec};
 
 const SEEK_AHEAD_LIMIT: u64 = 8 * 1024 * 1024;
 const NEGOTIATION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1552,11 +1547,18 @@ async fn download_file_from_upstream_background(
     .await;
 }
 
+fn upstream_hash_matches_filename(computed_hash: &str, filename: &str) -> bool {
+    get_sha256_hash_from_filename(filename)
+        .unwrap_or(filename)
+        .eq_ignore_ascii_case(computed_hash)
+}
+
 async fn run_download(
     state: AppState,
     file_url: String,
     upstream_resp: reqwest::Response,
     filename: String,
+
     mut prepared: PreparedDownload,
     count_as_served: bool,
 ) {
@@ -1616,8 +1618,8 @@ async fn run_download(
         }
 
         let sha256 = hex::encode(hasher.finalize());
-        let requested_hash = get_sha256_hash_from_filename(&filename).unwrap_or(&filename);
-        if sha256 != requested_hash {
+        if !upstream_hash_matches_filename(&sha256, &filename) {
+            let requested_hash = get_sha256_hash_from_filename(&filename).unwrap_or(&filename);
             return Err(format!(
                 "upstream hash mismatch: requested {requested_hash}, received {sha256}"
             ));
@@ -1668,7 +1670,7 @@ async fn run_download(
             let _ = tokio::fs::remove_file(&temp_path).await;
             guard.finish(DownloadPhase::Failed).await;
         }
-}
+    }
 }
 
 fn apply_streaming_headers(
@@ -1720,7 +1722,8 @@ fn apply_streaming_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
+    use crate::models::DownloadProgress;
+    use tokio::{io::AsyncWriteExt, sync::watch};
 
     async fn temp_download_file() -> (std::path::PathBuf, File, File) {
         let path = std::env::temp_dir().join(format!("almond-tail-{}", uuid::Uuid::new_v4()));
@@ -1894,6 +1897,17 @@ mod tests {
             wait_for_negotiation(&negotiation, std::time::Duration::from_secs(1)).await,
             NegotiationPhase::Ready
         );
+    }
+
+    #[test]
+    fn upstream_hash_comparison_accepts_case_insensitive_filenames() {
+        let hash = "a3f5c01f0f87b6e1d2c3a4b5c6d7e8f90123456789abcdef0123456789abcdef";
+        assert!(upstream_hash_matches_filename(hash, &hash.to_uppercase()));
+        assert!(upstream_hash_matches_filename(hash, &format!("{hash}.mp4")));
+        assert!(!upstream_hash_matches_filename(
+            hash,
+            "b3f5c01f0f87b6e1d2c3a4b5c6d7e8f90123456789abcdef0123456789abcdef"
+        ));
     }
 
     #[tokio::test]

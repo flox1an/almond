@@ -22,8 +22,7 @@ impl PreparedDownload {
     /// Extract the guard so the happy path can call `guard.finish(Complete)`.
     /// Every other drop path unwinds via `DownloadGuard::drop` → Failed + map removal.
     pub fn take_guard(&mut self) -> DownloadGuard {
-        self.guard.take()
-            .expect("take_guard called more than once")
+        self.guard.take().expect("take_guard called more than once")
     }
 }
 

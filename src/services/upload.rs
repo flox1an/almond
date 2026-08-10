@@ -244,7 +244,7 @@ pub async fn stream_response_to_temp_file(
         hasher.update(&chunk);
         body_size += chunk.len() as u64;
 
-        if body_size.is_multiple_of(1024 * 1024) {
+        if body_size % (1024 * 1024) == 0 {
             debug!(
                 "📊 Download progress: {} MB / {} MB",
                 body_size / (1024 * 1024),

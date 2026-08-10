@@ -1,16 +1,9 @@
 //! Chunked-upload session registry.
 //!
-//! Owns the resumable-upload state machine that previously lived inline in
-//! `handlers/upload.rs::patch_upload`. Every lock acquisition is inside this
-//! type and no `.await` happens while a guard is held, so callers cannot
-//! introduce a lock-across-await or a TOCTOU on the completion transition.
-//!
-//! The payment race the old code had: "will this chunk complete the upload?"
-//! was decided under a *read* guard, the guard was dropped, and then the chunk
-//! was committed under a *write* guard. Two concurrent final chunks both saw
-//! "not complete" and neither paid. Here the decision and the commit are one
-//! atomic `commit()` transition: exactly one caller observes
-//! [`Commit::Complete`], and payment is charged on that transition.
+//! A reservation is acquired before its request body is streamed, so session
+//! capacity is enforced before bytes reach disk. Reservations are kept separate
+//! from persisted sessions: failed bodies release their reservation without
+//! leaving an empty upload behind.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -36,13 +29,19 @@ pub struct SessionLimits {
     pub max_sessions_per_pubkey: usize,
 }
 
+/// A capacity reservation for one in-flight chunk request.
+#[must_use]
+pub struct ReservationTicket {
+    key: ChunkUploadKey,
+}
+
 /// Result of [`ChunkSessions::reserve`].
 pub enum Reservation {
-    /// A session exists (or was created). The caller may stream the body.
-    Granted,
-    /// Global session capacity exhausted.
+    /// Capacity was reserved; the caller may stream the body.
+    Granted(ReservationTicket),
+    /// Global session capacity is exhausted.
     GlobalLimit,
-    /// This owner's per-pubkey session capacity exhausted.
+    /// This owner's per-pubkey session capacity is exhausted.
     PerPubkeyLimit,
 }
 
@@ -51,51 +50,100 @@ pub enum Reservation {
 pub enum Commit {
     /// Chunk appended; the upload is still incomplete.
     Incomplete,
-    /// Chunk appended and the upload is now complete; the session was removed
-    /// from the registry and returned so the caller owns the finish (payment,
-    /// reconstruction). Exactly one caller sees this variant per upload.
+    /// Chunk appended and the upload is now complete. The session was removed
+    /// from the registry; the caller owns payment and reconstruction.
     Complete(ChunkUpload),
     /// Chunk overlaps an already-received chunk at this offset range.
     Overlap,
-    /// The session's stored parameters disagree with this chunk's headers.
+    /// The reservation or stored parameters disagree with this request.
     ParamMismatch,
+}
+
+struct SessionState {
+    uploads: HashMap<ChunkUploadKey, ChunkUpload>,
+    pending: HashMap<ChunkUploadKey, usize>,
 }
 
 /// The resumable-upload session registry.
 pub struct ChunkSessions {
-    map: RwLock<HashMap<ChunkUploadKey, ChunkUpload>>,
+    state: RwLock<SessionState>,
     limits: SessionLimits,
 }
 
 impl ChunkSessions {
     pub fn new(limits: SessionLimits) -> Self {
         Self {
-            map: RwLock::new(HashMap::new()),
+            state: RwLock::new(SessionState {
+                uploads: HashMap::new(),
+                pending: HashMap::new(),
+            }),
             limits,
         }
     }
 
-    /// Ensure a session exists for `key`, enforcing global and per-pubkey
-    /// capacity. Call *before* streaming the body so capacity is checked
-    /// before any bytes hit disk.
-    pub async fn reserve(&self, key: &ChunkUploadKey, params: &SessionParams) -> Reservation {
-        let mut map = self.map.write().await;
-        if map.contains_key(key) {
-            return Reservation::Granted;
+    /// Reserve capacity for one request before streaming its body.
+    ///
+    /// A reservation is not yet a persisted upload: callers must pass the
+    /// ticket to [`Self::commit`] after a successful body write, or release it
+    /// on every error path with [`Self::release`]. Pending reservations count
+    /// toward both capacity limits, preventing disk-before-cap races without
+    /// retaining failed requests as empty sessions.
+    pub async fn reserve(&self, key: &ChunkUploadKey) -> Reservation {
+        let mut state = self.state.write().await;
+
+        if state.uploads.contains_key(key) || state.pending.contains_key(key) {
+            *state.pending.entry(key.clone()).or_default() += 1;
+            return Reservation::Granted(ReservationTicket { key: key.clone() });
         }
-        let owner_sessions = map
+
+        let pending_without_upload = state
+            .pending
             .keys()
-            .filter(|existing| existing.pubkey == key.pubkey)
-            .count();
-        if map.len() >= self.limits.max_sessions {
+            .filter(|pending_key| !state.uploads.contains_key(*pending_key));
+        if state.uploads.len() + pending_without_upload.clone().count() >= self.limits.max_sessions
+        {
             return Reservation::GlobalLimit;
         }
+        let owner_sessions = state
+            .uploads
+            .keys()
+            .chain(pending_without_upload)
+            .filter(|existing| existing.pubkey == key.pubkey)
+            .count();
         if owner_sessions >= self.limits.max_sessions_per_pubkey {
             return Reservation::PerPubkeyLimit;
         }
-        map.insert(
-            key.clone(),
-            ChunkUpload {
+
+        state.pending.insert(key.clone(), 1);
+        Reservation::Granted(ReservationTicket { key: key.clone() })
+    }
+
+    /// Discard a reservation after a failed pre-commit request.
+    pub async fn release(&self, ticket: ReservationTicket) {
+        let mut state = self.state.write().await;
+        Self::consume_reservation(&mut state, &ticket.key);
+    }
+
+    /// Append a successfully written chunk to its session.
+    ///
+    /// The completion decision and insertion are one atomic transition. A
+    /// completed session is removed before payment and reconstruction, so only
+    /// one caller can observe [`Commit::Complete`].
+    pub async fn commit(
+        &self,
+        ticket: ReservationTicket,
+        params: &SessionParams,
+        chunk: ChunkInfo,
+    ) -> Commit {
+        let mut state = self.state.write().await;
+        if !Self::consume_reservation(&mut state, &ticket.key) {
+            return Commit::ParamMismatch;
+        }
+
+        let upload = state
+            .uploads
+            .entry(ticket.key.clone())
+            .or_insert_with(|| ChunkUpload {
                 sha256: params.sha256.clone(),
                 owner: params.owner,
                 upload_type: params.upload_type.clone(),
@@ -103,31 +151,9 @@ impl ChunkSessions {
                 chunks: Vec::new(),
                 created_at: Instant::now(),
                 expiration: params.expiration,
-            },
-        );
-        Reservation::Granted
-    }
-
-    /// Append a chunk to the session for `key`.
-    ///
-    /// The completion decision and the chunk insertion are one atomic
-    /// transition under the write guard. When the accumulated length reaches
-    /// `upload_length` the session is removed and returned as
-    /// [`Commit::Complete`]; the caller is then responsible for payment and
-    /// reconstruction. No `.await` occurs while the guard is held.
-    pub async fn commit(
-        &self,
-        key: &ChunkUploadKey,
-        chunk: ChunkInfo,
-        upload_type: &str,
-        upload_length: u64,
-    ) -> Commit {
-        let mut map = self.map.write().await;
-        let Some(upload) = map.get_mut(key) else {
-            // Session was evicted or never reserved; caller must restart.
-            return Commit::ParamMismatch;
-        };
-        if upload.upload_type != upload_type || upload.upload_length != upload_length {
+            });
+        if upload.upload_type != params.upload_type || upload.upload_length != params.upload_length
+        {
             return Commit::ParamMismatch;
         }
         if upload.chunks.iter().any(|existing| {
@@ -144,39 +170,168 @@ impl ChunkSessions {
         let Some(new_total) = new_total else {
             return Commit::ParamMismatch;
         };
+
         upload.chunks.push(chunk);
         if new_total == upload.upload_length {
-            // Atomic remove: a second finisher cannot observe a complete
-            // session, so only this caller proceeds to payment+reconstruction.
-            let complete = map.remove(key).expect("session present above");
+            let complete = state
+                .uploads
+                .remove(&ticket.key)
+                .expect("session inserted or found above");
             return Commit::Complete(complete);
         }
         Commit::Incomplete
     }
 
-    /// Re-insert a session previously returned by [`Commit::Complete`].
+    /// Restore a payment-rejected completed upload if no other request for its
+    /// key began while payment was pending.
     ///
-    /// Used by the payment flow: when the completing chunk's payment is
-    /// rejected, the session is restored *without* the completing chunk so the
-    /// client can retry the final chunk with payment attached (the reactive
-    /// BUD-07 flow). Only call with a session you received from `commit`.
-    pub async fn reinsert(&self, key: &ChunkUploadKey, upload: ChunkUpload) {
-        self.map.write().await.insert(key.clone(), upload);
+    /// A concurrent request has priority over the failed completion: replacing
+    /// its in-flight session would lose chunks and leak their temporary files.
+    pub async fn restore(&self, key: &ChunkUploadKey, upload: ChunkUpload) -> bool {
+        let mut state = self.state.write().await;
+        if state.uploads.contains_key(key) || state.pending.contains_key(key) {
+            return false;
+        }
+        state.uploads.insert(key.clone(), upload);
+        true
     }
 
-    /// Remove sessions idle longer than `age` and return them so the caller
-    /// can clean up their chunk files. Used by the periodic cleanup job.
+    /// Remove sessions idle longer than `age` and return them for file cleanup.
+    /// Sessions with an in-flight reserved body are retained until that body
+    /// reaches [`Self::commit`] or [`Self::release`].
     pub async fn evict_older_than(&self, age: Duration) -> Vec<ChunkUpload> {
-        let mut map = self.map.write().await;
+        let mut state = self.state.write().await;
+        let SessionState { uploads, pending } = &mut *state;
         let mut evicted = Vec::new();
-        map.retain(|_, upload| {
-            if upload.created_at.elapsed() >= age {
+        uploads.retain(|key, upload| {
+            if pending.contains_key(key) || upload.created_at.elapsed() < age {
+                true
+            } else {
                 evicted.push(upload.clone());
                 false
-            } else {
-                true
             }
         });
         evicted
+    }
+
+    fn consume_reservation(state: &mut SessionState, key: &ChunkUploadKey) -> bool {
+        let Some(count) = state.pending.get_mut(key) else {
+            return false;
+        };
+        if *count == 1 {
+            state.pending.remove(key);
+        } else {
+            *count -= 1;
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    const OWNER_HEX: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    fn key(hash: &str) -> ChunkUploadKey {
+        ChunkUploadKey {
+            pubkey: PublicKey::from_hex(OWNER_HEX).unwrap(),
+            sha256: hash.to_string(),
+        }
+    }
+
+    fn params(hash: &str, upload_length: u64) -> SessionParams {
+        SessionParams {
+            sha256: hash.to_string(),
+            owner: PublicKey::from_hex(OWNER_HEX).unwrap(),
+            upload_type: "media".to_string(),
+            upload_length,
+            expiration: None,
+        }
+    }
+
+    fn chunk(offset: u64, length: u64) -> ChunkInfo {
+        ChunkInfo {
+            offset,
+            length,
+            chunk_path: PathBuf::from("test-chunk"),
+        }
+    }
+
+    fn granted(reservation: Reservation) -> ReservationTicket {
+        let Reservation::Granted(ticket) = reservation else {
+            panic!("expected a granted reservation");
+        };
+        ticket
+    }
+
+    #[tokio::test]
+    async fn released_failed_reservation_frees_global_capacity() {
+        let sessions = ChunkSessions::new(SessionLimits {
+            max_sessions: 1,
+            max_sessions_per_pubkey: 1,
+        });
+        let first = key("first");
+        let second = key("second");
+
+        let ticket = granted(sessions.reserve(&first).await);
+        assert!(matches!(
+            sessions.reserve(&second).await,
+            Reservation::GlobalLimit
+        ));
+
+        sessions.release(ticket).await;
+        sessions
+            .release(granted(sessions.reserve(&second).await))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn restore_never_overwrites_a_racing_reservation() {
+        let sessions = ChunkSessions::new(SessionLimits {
+            max_sessions: 2,
+            max_sessions_per_pubkey: 2,
+        });
+        let key = key("shared");
+        let params = params("shared", 4);
+
+        let completed = sessions
+            .commit(granted(sessions.reserve(&key).await), &params, chunk(0, 4))
+            .await;
+        let Commit::Complete(upload) = completed else {
+            panic!("expected the first chunk to complete the upload");
+        };
+
+        let racing = granted(sessions.reserve(&key).await);
+        assert!(!sessions.restore(&key, upload).await);
+        assert!(matches!(
+            sessions.commit(racing, &params, chunk(0, 2)).await,
+            Commit::Incomplete
+        ));
+    }
+
+    #[tokio::test]
+    async fn cleanup_skips_sessions_with_an_in_flight_body() {
+        let sessions = ChunkSessions::new(SessionLimits {
+            max_sessions: 1,
+            max_sessions_per_pubkey: 1,
+        });
+        let key = key("active");
+        let params = params("active", 4);
+
+        assert!(matches!(
+            sessions
+                .commit(granted(sessions.reserve(&key).await), &params, chunk(0, 2))
+                .await,
+            Commit::Incomplete
+        ));
+        let pending = granted(sessions.reserve(&key).await);
+
+        assert!(sessions.evict_older_than(Duration::ZERO).await.is_empty());
+
+        sessions.release(pending).await;
+        assert_eq!(sessions.evict_older_than(Duration::ZERO).await.len(), 1);
     }
 }

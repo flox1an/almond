@@ -168,9 +168,10 @@ impl ReportAction {
     /// Falls back to Quarantine if the string doesn't match
     #[must_use]
     pub fn from_str_with_default(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "delete" => ReportAction::Delete,
-            "quarantine" | _ => ReportAction::Quarantine,
+        if s.eq_ignore_ascii_case("delete") {
+            Self::Delete
+        } else {
+            Self::Quarantine
         }
     }
 

@@ -32,8 +32,10 @@ struct ReportStats {
 }
 
 fn analyze_events(events: &[NostrEvent]) -> ReportStats {
-    let mut stats = ReportStats::default();
-    stats.total_events = events.len();
+    let mut stats = ReportStats {
+        total_events: events.len(),
+        ..ReportStats::default()
+    };
 
     for event in events {
         // Count by kind

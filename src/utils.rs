@@ -530,7 +530,11 @@ pub async fn cleanup_abandoned_chunks(state: &AppState) {
     let timeout_duration = std::time::Duration::from_secs(state.chunk_cleanup_timeout_minutes * 60);
 
     // Remove abandoned uploads and clean up their files
-    for chunk_upload in state.chunk_sessions.evict_older_than(timeout_duration).await {
+    for chunk_upload in state
+        .chunk_sessions
+        .evict_older_than(timeout_duration)
+        .await
+    {
         let chunk_count = chunk_upload.chunks.len();
         info!(
             "Cleaning up abandoned chunked upload: {} ({} chunks)",
@@ -608,7 +612,8 @@ pub async fn cleanup_expired_failed_lookups(state: &AppState) {
     let mut failed_lookups = state.failed_upstream_lookups.write().await;
     let initial_count = failed_lookups.len();
 
-    failed_lookups.retain(|_, timestamp| timestamp.elapsed() < std::time::Duration::from_secs(3600));
+    failed_lookups
+        .retain(|_, timestamp| timestamp.elapsed() < std::time::Duration::from_secs(3600));
 
     let cleaned_count = initial_count - failed_lookups.len();
     if cleaned_count > 0 {
