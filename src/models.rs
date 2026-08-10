@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, Weak},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{watch, Mutex, OwnedMutexGuard, RwLock};
 
 /// Feature mode controlling access to features
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,10 +219,70 @@ pub struct ServeFileMetadata {
     pub size: u64,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FileLocation {
     Local(PathBuf),
     S3 { key: String },
+}
+
+/// The reason Almond retains a completed local blob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlobOrigin {
+    Upload,
+    UpstreamCache,
+}
+
+/// Explicit storage roots below `STORAGE_PATH`.
+#[derive(Debug, Clone)]
+pub struct StorageLayout {
+    pub root: PathBuf,
+    pub uploads: PathBuf,
+    pub upstream_cache: PathBuf,
+    pub temp: PathBuf,
+    pub quarantine: PathBuf,
+}
+
+impl StorageLayout {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            uploads: root.join("uploads"),
+            upstream_cache: root.join("upstream-cache"),
+            temp: root.join("temp"),
+            quarantine: root.join("quarantine"),
+            root,
+        }
+    }
+}
+
+/// Serializes publication and deletion of one hash without blocking unrelated blobs.
+#[derive(Default)]
+pub struct BlobMutationLocks {
+    locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+}
+
+impl BlobMutationLocks {
+    pub async fn lock(&self, sha256: &str) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.locks.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            locks
+                .entry(sha256.to_owned())
+                .or_insert_with(Weak::new)
+                .upgrade()
+                .unwrap_or_else(|| {
+                    let lock = Arc::new(Mutex::new(()));
+                    locks.insert(sha256.to_owned(), Arc::downgrade(&lock));
+                    lock
+                })
+        };
+        lock.lock_owned().await
+    }
+}
+
+impl Default for BlobOrigin {
+    fn default() -> Self {
+        Self::Upload
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -235,6 +295,8 @@ pub struct FileMetadata {
     pub pubkey: Option<PublicKey>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expiration: Option<u64>,
+    #[serde(default)]
+    pub origin: BlobOrigin,
 }
 
 /// A rendered BUD-11 filter response, valid for one index generation.
@@ -253,7 +315,10 @@ pub struct CachedFilter {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub upload_dir: PathBuf,
+    pub storage: StorageLayout,
+    pub blob_mutation_locks: Arc<BlobMutationLocks>,
+    /// Superseded copies whose deletion failed after a preferred entry was indexed.
+    pub superseded_blob_deletions: Arc<RwLock<Vec<(String, FileMetadata)>>>,
     pub file_index: Arc<BlobIndex>,
     /// Optional S3-compatible backend for native blobs. Upstream cache stays local.
     pub native_s3: Option<crate::services::native_storage::SharedNativeS3Storage>,
@@ -284,6 +349,7 @@ pub struct AppState {
     /// How often to refresh DVM pubkeys (in minutes)
     pub dvm_refresh_interval_mins: u64,
     pub max_file_age_days: u64,
+    pub max_upstream_cache_ttl_days: u64,
     /// Cached BUD-11 filter, rebuilt only when the index generation moves.
     pub filter_cache: Arc<RwLock<Option<CachedFilter>>>,
     pub upstream_servers: Vec<String>,
@@ -383,7 +449,7 @@ impl AppState {
             self.max_total_files,
             self.max_total_size,
             self.max_file_age_days,
-            &self.upload_dir,
+            &self.storage.root,
         );
 
         // Update feature flag metrics

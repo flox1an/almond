@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::models::FileMetadata;
+use crate::models::{BlobOrigin, FileMetadata};
 
 /// Aggregates over the index, read without scanning it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +14,17 @@ pub struct IndexStats {
     /// Bumped on every mutation. Lets callers cache derived artefacts (the
     /// BUD-11 filter, for instance) and detect staleness in O(1).
     pub generation: u64,
+}
+
+/// Result of atomically publishing a completed blob.
+pub enum PublishResult {
+    /// The new metadata is now visible. Any entry it displaced is returned for
+    /// physical cleanup by the storage layer.
+    Published {
+        displaced: Option<Arc<FileMetadata>>,
+    },
+    /// An existing entry retained precedence over this publication.
+    Retained { existing: Arc<FileMetadata> },
 }
 
 #[derive(Default)]
@@ -107,6 +118,27 @@ impl BlobIndex {
 
     pub async fn insert(&self, key: String, metadata: FileMetadata) {
         self.entries.write().await.insert(key, Arc::new(metadata));
+    }
+
+    /// Publish one completed blob with origin-aware collision precedence.
+    ///
+    /// Uploads replace cache entries. Cache fills never replace an existing
+    /// entry, including another cache fill. The returned displaced metadata is
+    /// intentionally not deleted here: callers must first make the preferred
+    /// index entry visible, then remove only the superseded physical copy.
+    pub async fn publish(&self, key: String, metadata: FileMetadata) -> PublishResult {
+        let mut entries = self.entries.write().await;
+        if metadata.origin == BlobOrigin::UpstreamCache {
+            if let Some(existing) = entries.map.get(&key) {
+                return PublishResult::Retained {
+                    existing: Arc::clone(existing),
+                };
+            }
+        }
+
+        PublishResult::Published {
+            displaced: entries.insert(key, Arc::new(metadata)),
+        }
     }
 
     pub async fn remove(&self, sha256: &str) -> Option<Arc<FileMetadata>> {
@@ -228,6 +260,7 @@ mod tests {
             created_at: 0,
             pubkey: None,
             expiration: None,
+            origin: BlobOrigin::Upload,
         }
     }
 
@@ -358,5 +391,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["b", "a"]
         );
+    }
+    #[tokio::test]
+    async fn upload_publication_replaces_cached_metadata() {
+        let index = BlobIndex::new();
+        let mut cached = meta(10);
+        cached.origin = BlobOrigin::UpstreamCache;
+        assert!(matches!(
+            index.publish("hash".into(), cached).await,
+            PublishResult::Published { displaced: None }
+        ));
+
+        assert!(matches!(
+            index.publish("hash".into(), meta(20)).await,
+            PublishResult::Published { displaced: Some(_) }
+        ));
+        let metadata = index.get("hash").await.unwrap();
+        assert_eq!(metadata.origin, BlobOrigin::Upload);
+        assert_eq!(metadata.size, 20);
+    }
+
+    #[tokio::test]
+    async fn cache_publication_retains_existing_upload() {
+        let index = BlobIndex::new();
+        index.publish("hash".into(), meta(20)).await;
+        let mut cached = meta(10);
+        cached.origin = BlobOrigin::UpstreamCache;
+
+        assert!(matches!(
+            index.publish("hash".into(), cached).await,
+            PublishResult::Retained { .. }
+        ));
+        assert_eq!(index.get("hash").await.unwrap().origin, BlobOrigin::Upload);
     }
 }

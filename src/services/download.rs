@@ -99,7 +99,7 @@ pub async fn prepare_download_state(
     let file_extension = get_extension_from_mime(content_type)
         .map(|ext| format!(".{}", ext))
         .unwrap_or_default();
-    let temp_dir = state.upload_dir.join("temp");
+    let temp_dir = state.storage.temp.clone();
     tokio::fs::create_dir_all(&temp_dir)
         .await
         .map_err(|e| AppError::IoError(format!("Failed to create temp directory: {e}")))?;

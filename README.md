@@ -108,14 +108,17 @@ makes the body byte-stable and the validator meaningful.
 - `TLS_AUTO_GENERATE`: Auto-generate self-signed certificate if not found (default: true)
 
 ### Storage Configuration
-- `STORAGE_PATH`: Path where files are stored (default: "./files")
-- `MAX_TOTAL_SIZE`: Maximum total storage size in MB (default: 99999)
-- `MAX_TOTAL_FILES`: Maximum number of files (default: 99999999)
-- `CLEANUP_INTERVAL_SECS`: Interval for lightweight cleanup checks in seconds (default: 30). Full storage cleanup runs when changes are pending, plus an occasional full scan.
-- `MAX_FILE_AGE_DAYS`: Maximum age of files in days, 0 for no limit (default: 0)
+- `STORAGE_PATH`: Storage root. Completed uploads live under `uploads/`, transparent upstream fills under `upstream-cache/`, and incomplete data under `temp/`.
+- `MAX_TOTAL_SIZE`: Maximum aggregate storage size in MB across both completed-blob origins (default: 99999).
+- `MAX_TOTAL_FILES`: Maximum aggregate completed-blob count across both origins (default: 99999999).
+- `CLEANUP_INTERVAL_SECS`: Expiry and capacity cleanup interval in seconds (default: 30).
+- `MAX_FILE_AGE_DAYS`: Maximum age of uploaded, explicitly mirrored, and HLS-mirrored blobs in days; `0` disables this policy (default: 0).
+- `MAX_UPSTREAM_CACHE_TTL_DAYS`: Maximum age of transparently fetched upstream cache entries in days; `0` disables this policy (default: 1). Serving a cached blob does not refresh this TTL.
+
+Capacity eviction removes the oldest upstream-cache entries before uploaded content. Existing legacy hash trees are migrated into `uploads/` at startup, preserving files by rename.
 
 ### Optional S3-Compatible Native Storage
-New uploads and explicit mirrors use S3 when all four variables are configured. Existing local blobs and automatic upstream cache fills remain local; Almond continues to proxy every blob response.
+New uploads and explicit mirrors use S3 when all four variables are configured. They remain `Upload`-origin content for retention and collision precedence; automatic upstream cache fills remain local. Almond continues to proxy every blob response.
 
 All four variables are required together. Supplying only a subset fails startup.
 
@@ -252,12 +255,12 @@ docker run -p 3000:3000 \
 ```
 
 ## Internals
-- Blobs are stored in `STORAGE_PATH` within a folder structure with a two layer hierarchy of folders with the first and second letter of the SHA256 storage hash, e.g. 
+- Completed filesystem blobs are stored below `STORAGE_PATH/uploads/` or `STORAGE_PATH/upstream-cache/` with the existing two-level SHA-256 hierarchy, e.g.
   ```bash
-  ./files/5/3/53860ca3a463ad7170fe1f1e5b08bf4b66422c72b594a329e001a69e07f2e50e.mp4
+  ./files/uploads/5/3/53860ca3a463ad7170fe1f1e5b08bf4b66422c72b594a329e001a69e07f2e50e.mp4
   ```
-- File age is tracked by using the file creation date.
-- When starting `almond` the folder structure is read into memory, i.e. changes to the folders are not recognized until the app is restarted.
+- Startup indexes only completed-blob roots; `temp/` and `quarantine/` are never treated as live blobs. Indexed age is recovered from modification time.
+- When starting `almond`, completed-blob roots are read into memory; filesystem changes outside Almond are not recognized until restart.
 
 ## Docker
 
@@ -633,7 +636,6 @@ Clients request blobs via `GET /<sha256>` with `?xs=` (server hints) and `?as=` 
 
 ### Configuration
 
-```bash
 BIND_ADDR=127.0.0.1:24242
 PUBLIC_URL=http://127.0.0.1:24242
 FEATURE_UPLOAD_ENABLED=off
@@ -643,8 +645,7 @@ FEATURE_HOMEPAGE_ENABLED=true
 FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=public
 UPSTREAM_MODE=proxy
 MAX_TOTAL_SIZE=5000
-MAX_FILE_AGE_DAYS=30
-```
+MAX_UPSTREAM_CACHE_TTL_DAYS=30
 
 ### Docker
 
@@ -658,7 +659,7 @@ docker run -p 24242:24242 \
   -e FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=public \
   -e UPSTREAM_MODE=proxy \
   -e MAX_TOTAL_SIZE=5000 \
-  -e MAX_FILE_AGE_DAYS=30 \
+  -e MAX_UPSTREAM_CACHE_TTL_DAYS=30 \
   ghcr.io/flox1an/almond
 ```
 
@@ -671,7 +672,7 @@ docker run -p 24242:24242 \
 5. Caches the blob locally and returns it to the client
 6. Returns `404` if the blob can't be found on any hinted server
 
-Cache eviction is automatic — oldest files are removed when `MAX_TOTAL_SIZE` or `MAX_FILE_AGE_DAYS` limits are reached.
+Cache eviction is automatic — expired entries are removed by `MAX_UPSTREAM_CACHE_TTL_DAYS`, and capacity pressure evicts the oldest cache entries first.
 
 ## Development
 

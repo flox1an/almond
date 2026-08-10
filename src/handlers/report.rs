@@ -64,7 +64,7 @@ async fn quarantine_blob(
     sha256: &str,
     file_path: &PathBuf,
 ) -> Result<PathBuf, std::io::Error> {
-    let quarantine_dir = state.upload_dir.join("quarantine");
+    let quarantine_dir = &state.storage.quarantine;
     fs::create_dir_all(&quarantine_dir).await?;
 
     let file_name = file_path

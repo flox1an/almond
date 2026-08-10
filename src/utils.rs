@@ -1,267 +1,426 @@
 use mime_guess::from_path;
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::fs;
 use tracing::{error, info, warn};
 
-use crate::models::{AppState, FileLocation, FileMetadata};
+use crate::error::{AppError, AppResult};
+use crate::models::{AppState, BlobOrigin, FileLocation, FileMetadata, StorageLayout};
 use crate::services::blob_index::BlobIndex;
+use crate::services::file_storage;
 
-pub fn get_nested_path(
-    upload_dir: &Path,
-    hash: &str,
-    extension: Option<&str>,
-    expiration: Option<u64>,
-) -> PathBuf {
-    let first_level = &hash[..1];
-    let second_level = &hash[1..2];
-    let path = upload_dir.join(first_level).join(second_level);
-
-    // Build filename: <hash>_<expiration>.<ext> or <hash>_<expiration> or <hash>.<ext> or <hash>
-    let filename = match (expiration, extension) {
-        (Some(exp), Some(ext)) => format!("{}_{}.{}", hash, exp, ext),
-        (Some(exp), None) => format!("{}_{}", hash, exp),
-        (None, Some(ext)) => format!("{}.{}", hash, ext),
-        (None, None) => hash.to_string(),
-    };
-
-    path.join(filename)
+/// Create all explicitly managed storage roots.
+pub async fn initialize_storage(layout: &StorageLayout) -> AppResult<()> {
+    for directory in [
+        &layout.root,
+        &layout.uploads,
+        &layout.upstream_cache,
+        &layout.temp,
+        &layout.quarantine,
+    ] {
+        fs::create_dir_all(directory).await.map_err(|error| {
+            AppError::IoError(format!(
+                "Failed to create storage directory {}: {error}",
+                directory.display()
+            ))
+        })?;
+    }
+    Ok(())
 }
 
-pub async fn build_file_index(upload_dir: &Path, index: &BlobIndex) {
+/// Move legacy `<hex>/<hex>/blob` trees into `uploads/` without copying blob
+/// bodies. A partially completed earlier migration is resumed entry by entry.
+pub async fn migrate_legacy_blobs(layout: &StorageLayout) -> AppResult<()> {
+    let mut entries = fs::read_dir(&layout.root).await.map_err(|error| {
+        AppError::IoError(format!(
+            "Failed to read storage root {}: {error}",
+            layout.root.display()
+        ))
+    })?;
+    while let Some(entry) = entries.next_entry().await.map_err(|error| {
+        AppError::IoError(format!(
+            "Failed to enumerate storage root {}: {error}",
+            layout.root.display()
+        ))
+    })? {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.len() != 1 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        if !entry
+            .file_type()
+            .await
+            .map_err(|error| {
+                AppError::IoError(format!(
+                    "Failed to inspect legacy entry {}: {error}",
+                    entry.path().display()
+                ))
+            })?
+            .is_dir()
+        {
+            continue;
+        }
+        merge_legacy_tree(&entry.path(), &layout.uploads.join(name.as_ref())).await?;
+    }
+    Ok(())
+}
+
+async fn merge_legacy_tree(source_root: &Path, destination_root: &Path) -> AppResult<()> {
+    let mut directories = vec![(source_root.to_path_buf(), destination_root.to_path_buf())];
+    while let Some((source, destination)) = directories.pop() {
+        fs::create_dir_all(&destination).await.map_err(|error| {
+            AppError::IoError(format!(
+                "Failed to create migration destination {}: {error}",
+                destination.display()
+            ))
+        })?;
+        let mut entries = fs::read_dir(&source).await.map_err(|error| {
+            AppError::IoError(format!(
+                "Failed to read migration source {}: {error}",
+                source.display()
+            ))
+        })?;
+        while let Some(entry) = entries.next_entry().await.map_err(|error| {
+            AppError::IoError(format!(
+                "Failed to enumerate migration source {}: {error}",
+                source.display()
+            ))
+        })? {
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            let file_type = entry.file_type().await.map_err(|error| {
+                AppError::IoError(format!(
+                    "Failed to inspect migration source {}: {error}",
+                    source_path.display()
+                ))
+            })?;
+            if file_type.is_dir() {
+                directories.push((source_path, destination_path));
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            if fs::try_exists(&destination_path).await.map_err(|error| {
+                AppError::IoError(format!(
+                    "Failed to inspect migration destination {}: {error}",
+                    destination_path.display()
+                ))
+            })? {
+                let source_size = entry
+                    .metadata()
+                    .await
+                    .map_err(|error| {
+                        AppError::IoError(format!(
+                            "Failed to inspect migration source {}: {error}",
+                            source_path.display()
+                        ))
+                    })?
+                    .len();
+                let destination_size = fs::metadata(&destination_path)
+                    .await
+                    .map_err(|error| {
+                        AppError::IoError(format!(
+                            "Failed to inspect migration destination {}: {error}",
+                            destination_path.display()
+                        ))
+                    })?
+                    .len();
+                if source_size != destination_size {
+                    return Err(AppError::IoError(format!(
+                        "Conflicting legacy migration files: {} and {}",
+                        source_path.display(),
+                        destination_path.display()
+                    )));
+                }
+                fs::remove_file(&source_path).await.map_err(|error| {
+                    AppError::IoError(format!(
+                        "Failed to remove migrated duplicate {}: {error}",
+                        source_path.display()
+                    ))
+                })?;
+            } else {
+                fs::rename(&source_path, &destination_path)
+                    .await
+                    .map_err(|error| {
+                        AppError::IoError(format!(
+                            "Failed to migrate {} to {}: {error}",
+                            source_path.display(),
+                            destination_path.display()
+                        ))
+                    })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reconstruct the index from explicit roots. Upstream cache is scanned first,
+/// then uploads overwrite same-hash cache entries deterministically.
+pub async fn build_file_index(layout: &StorageLayout, index: &BlobIndex) -> AppResult<()> {
     let mut map = HashMap::new();
-    let mut dirs_to_process = vec![upload_dir.to_path_buf()];
+    scan_blob_root(&layout.upstream_cache, BlobOrigin::UpstreamCache, &mut map).await?;
+    let displaced_cache = scan_blob_root(&layout.uploads, BlobOrigin::Upload, &mut map).await?;
+    index.replace(map).await;
 
-    while let Some(current_dir) = dirs_to_process.pop() {
-        if let Ok(mut entries) = fs::read_dir(&current_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) {
-                        // Parse filename to extract hash, expiration, and extension
-                        // Format: <hash>_<expiration>.<ext> or <hash>_<expiration> or <hash>.<ext> or <hash>
-                        let (key, expiration) = parse_filename_for_hash_and_expiration(&name);
-
-                        if let Ok(metadata) = entry.metadata().await {
-                            let extension = path
-                                .extension()
-                                .and_then(|ext| ext.to_str())
-                                .map(|s| s.to_string());
-                            let mime_type = from_path(&path)
-                                .first()
-                                .map(|m| m.essence_str().to_string());
-                            let created_at = metadata
-                                .created()
-                                .unwrap_or(std::time::SystemTime::now())
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-
-                            map.insert(
-                                key,
-                                FileMetadata {
-                                    location: FileLocation::Local(path),
-                                    extension,
-                                    mime_type,
-                                    size: metadata.len(),
-                                    created_at,
-                                    pubkey: None,
-                                    expiration,
-                                },
-                            );
-                        }
-                    }
-                } else if path.is_dir() {
-                    dirs_to_process.push(path);
+    for duplicate in displaced_cache {
+        if let FileLocation::Local(path) = duplicate.location {
+            if let Err(error) = fs::remove_file(&path).await {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    warn!(
+                        path = %path.display(),
+                        "Uploaded blob won startup collision but failed to remove cache duplicate: {error}"
+                    );
                 }
             }
         }
     }
-
-    index.replace(map).await;
+    Ok(())
 }
 
-/// Parse filename to extract SHA256 hash and optional expiration
-/// Formats: <hash>_<expiration>.<ext>, <hash>_<expiration>, <hash>.<ext>, <hash>
-fn parse_filename_for_hash_and_expiration(filename: &str) -> (String, Option<u64>) {
-    // Remove extension if present
-    let name_without_ext = filename.split('.').next().unwrap_or(filename);
-
-    // Check if it contains underscore (expiration separator)
-    if let Some(underscore_pos) = name_without_ext.find('_') {
-        let hash = &name_without_ext[..underscore_pos];
-        let expiration_str = &name_without_ext[underscore_pos + 1..];
-
-        // Validate hash is 64 hex chars
-        if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
-            // Try to parse expiration
-            if let Ok(expiration) = expiration_str.parse::<u64>() {
-                return (hash.to_string(), Some(expiration));
+async fn scan_blob_root(
+    root: &Path,
+    origin: BlobOrigin,
+    map: &mut HashMap<String, FileMetadata>,
+) -> AppResult<Vec<FileMetadata>> {
+    let mut displaced = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let mut entries = fs::read_dir(&directory).await.map_err(|error| {
+            AppError::IoError(format!(
+                "Failed to scan blob root {}: {error}",
+                directory.display()
+            ))
+        })?;
+        while let Some(entry) = entries.next_entry().await.map_err(|error| {
+            AppError::IoError(format!(
+                "Failed to enumerate blob root {}: {error}",
+                directory.display()
+            ))
+        })? {
+            let path = entry.path();
+            let file_type = entry.file_type().await.map_err(|error| {
+                AppError::IoError(format!(
+                    "Failed to inspect blob path {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if file_type.is_dir() {
+                directories.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some((sha256, expiration)) = parse_filename_for_hash_and_expiration(&name) else {
+                continue;
+            };
+            let metadata = entry.metadata().await.map_err(|error| {
+                AppError::IoError(format!(
+                    "Failed to read blob metadata {}: {error}",
+                    path.display()
+                ))
+            })?;
+            let modified = metadata.modified().map_err(|error| {
+                AppError::IoError(format!(
+                    "Failed to read modification time for {}: {error}",
+                    path.display()
+                ))
+            })?;
+            let created_at = modified
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let extension = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_owned);
+            let indexed = FileMetadata {
+                location: FileLocation::Local(path.clone()),
+                extension,
+                mime_type: from_path(&path)
+                    .first()
+                    .map(|mime| mime.essence_str().to_owned()),
+                size: metadata.len(),
+                created_at,
+                pubkey: None,
+                expiration,
+                origin,
+            };
+            if let Some(previous) = map.insert(sha256, indexed) {
+                if previous.origin == BlobOrigin::UpstreamCache && origin == BlobOrigin::Upload {
+                    displaced.push(previous);
+                }
             }
         }
     }
+    Ok(displaced)
+}
 
-    // No expiration, just extract the hash (first 64 chars)
-    let hash = &name_without_ext[..64.min(name_without_ext.len())];
-    (hash.to_string(), None)
+/// Parse `<hash>[_<expiration>][.<extension>]` only when the hash is valid.
+fn parse_filename_for_hash_and_expiration(filename: &str) -> Option<(String, Option<u64>)> {
+    let stem = filename.split_once('.').map_or(filename, |(stem, _)| stem);
+    let (hash, expiration) = match stem.split_once('_') {
+        Some((hash, expiration)) => (hash, Some(expiration.parse::<u64>().ok()?)),
+        None => (stem, None),
+    };
+    (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| (hash.to_owned(), expiration))
 }
 
 async fn cleanup_empty_dirs(root_dir: &Path) {
-    let mut dirs_to_process = vec![root_dir.to_path_buf()];
+    let mut directories = vec![root_dir.to_path_buf()];
     let mut empty_dirs = vec![];
-
-    // First pass: collect all empty directories
-    while let Some(dir) = dirs_to_process.pop() {
-        if let Ok(mut entries) = fs::read_dir(&dir).await {
+    while let Some(directory) = directories.pop() {
+        if let Ok(mut entries) = fs::read_dir(&directory).await {
             let mut has_entries = false;
             while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if path.is_dir() {
-                    dirs_to_process.push(path);
+                if entry.path().is_dir() {
+                    directories.push(entry.path());
                 }
                 has_entries = true;
             }
-            if !has_entries && dir != root_dir {
-                empty_dirs.push(dir);
+            if !has_entries && directory != root_dir {
+                empty_dirs.push(directory);
             }
         }
     }
-
-    // Second pass: remove empty directories and check parent directories
-    let mut parent_dirs = vec![];
-    for dir in empty_dirs.into_iter().rev() {
-        if fs::remove_dir(&dir).await.is_ok() {
-            info!("🗑 Removed empty directory: {}", dir.display());
-            // Add parent directory to check if it becomes empty
-            if let Some(parent) = dir.parent() {
-                if parent != root_dir {
-                    parent_dirs.push(parent.to_path_buf());
-                }
-            }
-        }
-    }
-
-    // Third pass: check parent directories that might have become empty
-    for parent_dir in parent_dirs {
-        if let Ok(mut entries) = fs::read_dir(&parent_dir).await {
-            let mut has_entries = false;
-            if let Ok(Some(_)) = entries.next_entry().await {
-                has_entries = true;
-            }
-            if !has_entries && fs::remove_dir(&parent_dir).await.is_ok() {
-                info!("🗑 Removed empty parent directory: {}", parent_dir.display());
-            }
+    for directory in empty_dirs.into_iter().rev() {
+        if fs::remove_dir(&directory).await.is_ok() {
+            info!(path = %directory.display(), "Removed empty blob directory");
         }
     }
 }
 
 pub async fn enforce_storage_limits(state: &AppState) {
-    let mut total_size = 0u64;
-    let mut files = state.file_index.snapshot().await;
-
-    // Retain newest blobs; once the quota is full, evict the oldest ones.
-    files.sort_by(|left, right| right.1.created_at.cmp(&left.1.created_at));
-
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let max_age_secs = state.max_file_age_days * 24 * 60 * 60;
+    enforce_storage_limits_at(state, now).await;
+}
 
-    let mut deleted_by_expiration = 0;
-    let mut deleted_by_age = 0;
-    let mut deleted_by_limits = 0;
-    let mut retained_files = 0usize;
-    let mut deletion_candidates = Vec::new();
+/// Apply expiration and aggregate capacity cleanup at an injected time.
+pub async fn enforce_storage_limits_at(state: &AppState, now: u64) {
+    file_storage::reconcile_superseded_blobs(state).await;
+    let entries = state.file_index.snapshot().await;
+    for (sha256, metadata) in entries {
+        if let Some(reason) = expiration_reason(state, &metadata, now) {
+            delete_cleanup_candidate(state, &sha256, &metadata, reason).await;
+        }
+    }
 
-    for (sha256, metadata) in files.into_iter() {
-        // Check file expiration if expiration is set
-        if let Some(expiration) = metadata.expiration {
-            if now >= expiration {
-                deletion_candidates.push((sha256, metadata, "expiration"));
-                continue;
+    let remaining = state.file_index.snapshot().await;
+    let mut total_size = remaining
+        .iter()
+        .fold(0u64, |sum, (_, metadata)| sum.saturating_add(metadata.size));
+    let mut total_files = remaining.len();
+
+    for (sha256, metadata) in capacity_eviction_order(&remaining) {
+        if total_size <= state.max_total_size && total_files <= state.max_total_files {
+            break;
+        }
+        if delete_cleanup_candidate(state, &sha256, &metadata, "capacity").await {
+            total_size = total_size.saturating_sub(metadata.size);
+            total_files = total_files.saturating_sub(1);
+        }
+    }
+
+    cleanup_empty_dirs(&state.storage.uploads).await;
+    cleanup_empty_dirs(&state.storage.upstream_cache).await;
+}
+
+fn capacity_eviction_order(
+    entries: &[(String, Arc<FileMetadata>)],
+) -> Vec<(String, Arc<FileMetadata>)> {
+    let mut ordered = Vec::with_capacity(entries.len());
+    for origin in [BlobOrigin::UpstreamCache, BlobOrigin::Upload] {
+        let mut by_origin = entries
+            .iter()
+            .filter(|(_, metadata)| metadata.origin == origin)
+            .cloned()
+            .collect::<Vec<_>>();
+        by_origin.sort_by_key(|(_, metadata)| metadata.created_at);
+        ordered.extend(by_origin);
+    }
+    ordered
+}
+
+fn expiration_reason(state: &AppState, metadata: &FileMetadata, now: u64) -> Option<&'static str> {
+    expiration_reason_for(
+        metadata,
+        state.max_file_age_days,
+        state.max_upstream_cache_ttl_days,
+        now,
+    )
+}
+
+fn expiration_reason_for(
+    metadata: &FileMetadata,
+    max_file_age_days: u64,
+    max_upstream_cache_ttl_days: u64,
+    now: u64,
+) -> Option<&'static str> {
+    match metadata.origin {
+        BlobOrigin::Upload => {
+            if metadata
+                .expiration
+                .is_some_and(|expiration| now >= expiration)
+            {
+                return Some("expiration");
             }
+            (max_file_age_days > 0
+                && now
+                    >= metadata
+                        .created_at
+                        .saturating_add(max_file_age_days.saturating_mul(86_400)))
+            .then_some("upload_age")
         }
-
-        // Check file age if max_age_days is set
-        if state.max_file_age_days > 0 && now - metadata.created_at > max_age_secs {
-            deletion_candidates.push((sha256, metadata, "age"));
-            continue;
-        }
-
-        // Check storage limits
-        if total_size.saturating_add(metadata.size) > state.max_total_size
-            || retained_files >= state.max_total_files
-        {
-            deletion_candidates.push((sha256, metadata, "limits"));
-        } else {
-            total_size += metadata.size;
-            retained_files += 1;
-        }
+        BlobOrigin::UpstreamCache => (max_upstream_cache_ttl_days > 0
+            && now
+                >= metadata
+                    .created_at
+                    .saturating_add(max_upstream_cache_ttl_days.saturating_mul(86_400)))
+        .then_some("upstream_cache_ttl"),
     }
+}
 
-    let mut deleted_files = Vec::new();
-    for (sha256, metadata, reason) in deletion_candidates {
-        match reason {
-            "expiration" => info!(
-                "🗑 Deleting expired file (X-Expiration): {} (expired at {:?}, now {})",
-                sha256, metadata.expiration, now
-            ),
-            "age" => info!("🗑 Deleting expired file (MAX_FILE_AGE_DAYS): {}", sha256),
-            _ => info!("🗑 Deleting file to enforce limits: {}", sha256),
+async fn delete_cleanup_candidate(
+    state: &AppState,
+    sha256: &str,
+    metadata: &FileMetadata,
+    reason: &str,
+) -> bool {
+    match file_storage::delete_indexed_blob(state, sha256, metadata).await {
+        Ok(true) => {
+            info!(
+                sha256,
+                origin = ?metadata.origin,
+                reason,
+                path = ?metadata.location,
+                "Deleted blob during storage cleanup"
+            );
+            true
         }
-
-        let deleted = match &metadata.location {
-            FileLocation::Local(path) => match fs::remove_file(path).await {
-                Ok(()) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-                Err(error) => {
-                    error!("❌ Failed to delete file {}: {}", sha256, error);
-                    false
-                }
-            },
-            FileLocation::S3 { .. } => match &state.native_s3 {
-                Some(s3) => match s3.delete_matching(&sha256).await {
-                    Ok(()) => true,
-                    Err(error) => {
-                        error!("❌ Failed to delete S3 blob {}: {}", sha256, error);
-                        false
-                    }
-                },
-                None => false,
-            },
-        };
-        if !deleted {
-            continue;
+        Ok(false) => false,
+        Err(error) => {
+            error!(
+                sha256,
+                origin = ?metadata.origin,
+                reason,
+                path = ?metadata.location,
+                "Failed to delete blob during storage cleanup: {error}"
+            );
+            false
         }
-        match reason {
-            "expiration" => deleted_by_expiration += 1,
-            "age" => deleted_by_age += 1,
-            _ => deleted_by_limits += 1,
-        }
-        deleted_files.push((sha256, metadata.location.clone()));
-    }
-
-    for (sha256, deleted_location) in deleted_files {
-        state
-            .file_index
-            .remove_if_location_matches(&sha256, &deleted_location)
-            .await;
-    }
-
-    // Log cleanup summary
-    if deleted_by_expiration > 0 || deleted_by_age > 0 || deleted_by_limits > 0 {
-        info!("🧹 Cleanup summary: {} expired (X-Expiration), {} aged out (MAX_FILE_AGE_DAYS), {} by storage limits",
-              deleted_by_expiration, deleted_by_age, deleted_by_limits);
-    }
-
-    // Clean up empty directories
-    if deleted_by_expiration > 0 || deleted_by_age > 0 || deleted_by_limits > 0 {
-        cleanup_empty_dirs(&state.upload_dir).await;
     }
 }
 
@@ -407,7 +566,7 @@ pub async fn cleanup_abandoned_chunks(state: &AppState) {
 
 /// Clean up orphaned chunk files that don't belong to any active upload
 async fn cleanup_orphaned_chunk_files(state: &AppState) {
-    let chunks_dir = state.upload_dir.join("temp").join("chunks");
+    let chunks_dir = state.storage.temp.join("chunks");
 
     if !chunks_dir.exists() {
         return;
@@ -541,5 +700,147 @@ mod range_tests {
     #[test]
     fn inverted_range_is_unsatisfiable() {
         assert_eq!(parse("bytes=800-100", 1000), RangeSpec::Unsatisfiable);
+    }
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::{
+        build_file_index, capacity_eviction_order, expiration_reason_for, initialize_storage,
+        migrate_legacy_blobs,
+    };
+    use crate::models::{BlobOrigin, FileLocation, FileMetadata, StorageLayout};
+    use crate::services::blob_index::BlobIndex;
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+
+    fn hash(character: char) -> String {
+        character.to_string().repeat(64)
+    }
+
+    fn metadata(origin: BlobOrigin, created_at: u64, expiration: Option<u64>) -> FileMetadata {
+        FileMetadata {
+            location: FileLocation::Local(std::path::PathBuf::from("/tmp/blob")),
+            extension: None,
+            mime_type: None,
+            size: 1,
+            created_at,
+            pubkey: None,
+            expiration,
+            origin,
+        }
+    }
+
+    async fn write_blob(root: &std::path::Path, sha256: &str, body: &[u8]) {
+        let path = root.join(&sha256[..1]).join(&sha256[1..2]).join(sha256);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(path, body).await.unwrap();
+    }
+
+    #[test]
+    fn expiration_policies_remain_origin_specific() {
+        let now = 86_400;
+        let upload = metadata(BlobOrigin::Upload, 0, None);
+        let cache = metadata(BlobOrigin::UpstreamCache, 0, None);
+
+        assert_eq!(expiration_reason_for(&upload, 0, 1, now), None);
+        assert_eq!(
+            expiration_reason_for(&cache, 0, 1, now),
+            Some("upstream_cache_ttl")
+        );
+        assert_eq!(
+            expiration_reason_for(&upload, 1, 0, now),
+            Some("upload_age")
+        );
+        assert_eq!(
+            expiration_reason_for(&metadata(BlobOrigin::Upload, now, Some(now)), 1, 1, now,),
+            Some("expiration")
+        );
+    }
+
+    #[test]
+    fn capacity_eviction_prefers_oldest_cache_entries() {
+        let entries = vec![
+            (
+                "upload-old".to_string(),
+                Arc::new(metadata(BlobOrigin::Upload, 1, None)),
+            ),
+            (
+                "cache-new".to_string(),
+                Arc::new(metadata(BlobOrigin::UpstreamCache, 3, None)),
+            ),
+            (
+                "cache-old".to_string(),
+                Arc::new(metadata(BlobOrigin::UpstreamCache, 2, None)),
+            ),
+            (
+                "upload-new".to_string(),
+                Arc::new(metadata(BlobOrigin::Upload, 4, None)),
+            ),
+        ];
+        let ordered = capacity_eviction_order(&entries)
+            .into_iter()
+            .map(|(sha256, _)| sha256)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered,
+            vec!["cache-old", "cache-new", "upload-old", "upload-new"]
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_and_reconstruction_preserve_origin_precedence() {
+        let root = std::env::temp_dir().join(format!("almond-storage-{}", uuid::Uuid::new_v4()));
+        let layout = StorageLayout::new(root.clone());
+        initialize_storage(&layout).await.unwrap();
+
+        let duplicate = hash('a');
+        let cache_only = hash('b');
+        write_blob(&root, &duplicate, b"legacy-upload").await;
+        write_blob(&layout.upstream_cache, &duplicate, b"cache-duplicate").await;
+        let legacy_path = root
+            .join(&duplicate[..1])
+            .join(&duplicate[1..2])
+            .join(&duplicate);
+        std::fs::File::open(legacy_path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(123)),
+            )
+            .unwrap();
+        write_blob(&layout.upstream_cache, &cache_only, b"cache-only").await;
+        tokio::fs::write(layout.temp.join(&duplicate), b"ignored")
+            .await
+            .unwrap();
+        tokio::fs::write(layout.quarantine.join(&duplicate), b"ignored")
+            .await
+            .unwrap();
+
+        migrate_legacy_blobs(&layout).await.unwrap();
+        let index = BlobIndex::new();
+        build_file_index(&layout, &index).await.unwrap();
+
+        let uploaded = index.get(&duplicate).await.unwrap();
+        assert_eq!(uploaded.origin, BlobOrigin::Upload);
+        assert!(matches!(
+            &uploaded.location,
+            FileLocation::Local(path) if path.starts_with(&layout.uploads)
+        ));
+        assert!(!layout
+            .upstream_cache
+            .join("a")
+            .join("a")
+            .join(&duplicate)
+            .exists());
+
+        let cached = index.get(&cache_only).await.unwrap();
+        assert_eq!(cached.origin, BlobOrigin::UpstreamCache);
+        assert_eq!(index.stats().await.count, 2);
+        assert_eq!(uploaded.created_at, 123);
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }

@@ -20,14 +20,15 @@ use crate::models::AppState;
 use crate::trust_network::{refresh_dvm_pubkeys, refresh_trust_network};
 use crate::utils::{
     build_file_index, cleanup_abandoned_chunks, cleanup_expired_blossom_server_lists,
-    cleanup_expired_failed_lookups, enforce_storage_limits,
+    cleanup_expired_failed_lookups, enforce_storage_limits, initialize_storage,
+    migrate_legacy_blobs,
 };
 use axum::Router;
 use dotenvy::dotenv;
 use nostr_relay_pool::prelude::*;
 use tokio::fs;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use axum::{
     extract::State,
@@ -219,13 +220,14 @@ async fn load_app_state() -> AppState {
         .map(str::to_owned)
         .collect::<Vec<_>>();
 
-    // Parse storage path from environment variable
+    // Storage uses explicit roots so completed uploads and upstream cache
+    // entries cannot be reconstructed into the same namespace.
     let storage_path = env::var("STORAGE_PATH").unwrap_or_else(|_| "./files".to_string());
-    let upload_dir = PathBuf::from(&storage_path);
-    fs::create_dir_all(&upload_dir)
+    let storage = models::StorageLayout::new(PathBuf::from(&storage_path));
+    initialize_storage(&storage)
         .await
-        .expect("Failed to create storage directory");
-    info!("⚙️ Storage path: {}", upload_dir.display());
+        .unwrap_or_else(|error| panic!("Failed to initialize storage layout: {error}"));
+    info!("⚙️ Storage path: {}", storage.root.display());
     let native_s3 = match crate::services::native_storage::S3Settings::from_env() {
         Ok(Some(settings)) => {
             info!("S3 native storage enabled for bucket {}", settings.bucket);
@@ -240,36 +242,36 @@ async fn load_app_state() -> AppState {
         }
     };
 
-    // Clear temp directory on startup
-    let temp_dir = upload_dir.join("temp");
-    if temp_dir.exists() {
+    // Clear temp directory on startup.
+    if storage.temp.exists() {
         info!(
             "🧹 Clearing temp directory on startup: {}",
-            temp_dir.display()
+            storage.temp.display()
         );
-        if let Err(e) = clear_temp_directory(&temp_dir).await {
+        if let Err(error) = clear_temp_directory(&storage.temp).await {
             error!(
                 "⚠️  Failed to clear temp directory {}: {}",
-                temp_dir.display(),
-                e
+                storage.temp.display(),
+                error
             );
             warn!("⚠️  Continuing startup with existing temp files (they may be orphaned)");
-        } else {
-            info!("✅ Temp directory cleared successfully");
         }
-    } else {
-        info!("📁 Temp directory does not exist, no cleanup needed");
     }
 
+    migrate_legacy_blobs(&storage)
+        .await
+        .unwrap_or_else(|error| panic!("Failed to migrate legacy storage: {error}"));
     let file_index = Arc::new(crate::services::blob_index::BlobIndex::new());
-    build_file_index(&upload_dir, &file_index).await;
+    build_file_index(&storage, &file_index)
+        .await
+        .unwrap_or_else(|error| panic!("Failed to reconstruct blob index: {error}"));
     if let Some(s3) = &native_s3 {
         for (sha256, metadata) in s3
             .list_all()
             .await
             .unwrap_or_else(|error| panic!("Failed to build S3 blob index: {error}"))
         {
-            // Native files retain precedence during the V1 no-migration transition.
+            // Local uploads retain precedence over same-hash S3 uploads.
             if !file_index.contains(&sha256).await {
                 file_index.insert(sha256, metadata).await;
             }
@@ -328,6 +330,11 @@ async fn load_app_state() -> AppState {
         .unwrap_or_else(|_| "0".to_string())
         .parse()
         .expect("Invalid value for MAX_FILE_AGE_DAYS");
+
+    let max_upstream_cache_ttl_days = env::var("MAX_UPSTREAM_CACHE_TTL_DAYS")
+        .unwrap_or_else(|_| "1".to_string())
+        .parse()
+        .expect("Invalid value for MAX_UPSTREAM_CACHE_TTL_DAYS");
 
     // Parse max upstream download size in MB
     let max_upstream_download_size_mb = env::var("MAX_UPSTREAM_DOWNLOAD_SIZE_MB")
@@ -728,7 +735,9 @@ async fn load_app_state() -> AppState {
 
     AppState {
         native_s3,
-        upload_dir,
+        storage,
+        blob_mutation_locks: Arc::new(models::BlobMutationLocks::default()),
+        superseded_blob_deletions: Arc::new(RwLock::new(Vec::new())),
         file_index,
         serve_file_index,
         serve_files_path,
@@ -750,6 +759,7 @@ async fn load_app_state() -> AppState {
         dvm_relays,
         dvm_refresh_interval_mins,
         max_file_age_days,
+        max_upstream_cache_ttl_days,
         filter_cache: Arc::new(RwLock::new(None)),
         upstream_servers,
         upstream_mode,
@@ -804,34 +814,14 @@ fn start_cleanup_job(state: AppState) {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
             state.cleanup_interval_secs,
         ));
-        let full_scan_interval =
-            tokio::time::Duration::from_secs((state.cleanup_interval_secs * 120).max(60 * 60));
-        let mut last_full_scan = tokio::time::Instant::now() - full_scan_interval;
         loop {
             interval.tick().await;
+            // Expiry must run even during idle periods so cache TTL is bounded
+            // by one configured cleanup interval.
+            enforce_storage_limits(&state).await;
+            *state.changes_pending.write().await = false;
 
-            let changes_pending = {
-                let changes = state.changes_pending.read().await;
-                *changes
-            };
-            let full_scan_due = last_full_scan.elapsed() >= full_scan_interval;
-
-            if changes_pending || full_scan_due {
-                enforce_storage_limits(&state).await;
-
-                let mut changes = state.changes_pending.write().await;
-                *changes = false;
-                if full_scan_due {
-                    last_full_scan = tokio::time::Instant::now();
-                }
-            } else {
-                debug!("Skipping storage cleanup: no pending changes");
-            }
-
-            // Clean up expired failed upstream lookups
             cleanup_expired_failed_lookups(&state).await;
-
-            // Clean up expired blossom server list cache entries
             cleanup_expired_blossom_server_lists(&state).await;
         }
     });

@@ -12,7 +12,7 @@ use tokio::fs;
 
 use crate::{
     error::{AppError, AppResult},
-    models::{FileLocation, FileMetadata},
+    models::{BlobOrigin, FileLocation, FileMetadata},
 };
 
 const REQUIRED_S3_ENV: [&str; 4] = [
@@ -155,6 +155,7 @@ impl NativeS3Storage {
                         .map_or_else(now_secs, |time| time.secs().max(0) as u64),
                     pubkey: None,
                     expiration,
+                    origin: BlobOrigin::Upload,
                 }));
             }
         }
@@ -185,6 +186,19 @@ impl NativeS3Storage {
             .into_bytes();
         String::from_utf8(bytes.to_vec())
             .map_err(|error| AppError::IoError(format!("S3 object was not UTF-8: {error}")))
+    }
+
+    pub async fn delete(&self, key: &str) -> AppResult<()> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|error| {
+                AppError::ServiceUnavailable(format!("S3 DeleteObject failed: {error}"))
+            })?;
+        Ok(())
     }
 
     pub async fn delete_matching(&self, sha256: &str) -> AppResult<()> {
@@ -255,6 +269,7 @@ impl NativeS3Storage {
                             .map_or_else(now_secs, |time| time.secs().max(0) as u64),
                         pubkey: None,
                         expiration,
+                        origin: BlobOrigin::Upload,
                     },
                 ));
             }

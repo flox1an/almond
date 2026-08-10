@@ -18,6 +18,7 @@ use crate::helpers::{get_mime_type, track_download_stats};
 use crate::models::{AppState, FileLocation, FileRequestQuery};
 use crate::services::blossom_servers;
 use crate::services::cashu;
+use crate::services::file_storage;
 use crate::utils::{find_file, parse_range_header, RangeSpec};
 
 /// Handle file requests (GET/HEAD)
@@ -44,13 +45,10 @@ pub async fn handle_file_request(
             native_file
         } else if let Some(s3) = &state.native_s3 {
             match s3.find(file_hash).await? {
-                Some(metadata) => {
-                    state
-                        .file_index
-                        .insert(file_hash.to_owned(), metadata.clone())
-                        .await;
-                    Some(std::sync::Arc::new(metadata))
-                }
+                Some(metadata) => Some(
+                    file_storage::publish_existing_metadata(&state, file_hash.to_owned(), metadata)
+                        .await?,
+                ),
                 None => None,
             }
         } else {

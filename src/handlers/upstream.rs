@@ -1606,38 +1606,23 @@ async fn run_download(
         }
 
         let sha256 = hex::encode(hasher.finalize());
-        let final_path =
-            crate::utils::get_nested_path(&state.upload_dir, &sha256, extension.as_deref(), None);
-        if let Some(parent) = final_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|error| error.to_string())?;
+        let published = crate::services::file_storage::publish_blob(
+            &state,
+            &temp_path,
+            crate::services::file_storage::BlobPublication {
+                sha256: sha256.clone(),
+                origin: crate::models::BlobOrigin::UpstreamCache,
+                extension,
+                mime_type: Some(content_type),
+                size: body_size,
+                expiration: None,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        if let crate::models::FileLocation::Local(path) = &published.location {
+            let _ = handle.final_path.set(path.clone());
         }
-        tokio::fs::rename(&temp_path, &final_path)
-            .await
-            .map_err(|error| error.to_string())?;
-        let _ = handle.final_path.set(final_path.clone());
-
-        let key = sha256[..sha256.len().min(64)].to_string();
-        state
-            .file_index
-            .insert(
-                key,
-                crate::models::FileMetadata {
-                    location: crate::models::FileLocation::Local(final_path),
-                    extension,
-                    mime_type: Some(content_type),
-                    size: body_size,
-                    created_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                    pubkey: None,
-                    expiration: None,
-                },
-            )
-            .await;
-        *state.changes_pending.write().await = true;
         Ok((sha256, body_size))
     }
     .await;

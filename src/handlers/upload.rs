@@ -440,7 +440,7 @@ pub async fn patch_upload(
     }
     file_storage::ensure_storage_capacity(&state, content_length).await?;
     file_storage::ensure_temp_dir(&state).await?;
-    let chunk_temp_dir = state.upload_dir.join("temp").join("chunks");
+    let chunk_temp_dir = state.storage.temp.join("chunks");
     tokio::fs::create_dir_all(&chunk_temp_dir)
         .await
         .map_err(|error| AppError::IoError(format!("Failed to create chunk directory: {error}")))?;
@@ -492,8 +492,8 @@ pub async fn patch_upload(
                         upload_type: upload_type.clone(),
                         upload_length,
                         temp_path: state
-                            .upload_dir
-                            .join("temp")
+                            .storage
+                            .temp
                             .join(format!("chunk_upload_{}", uuid::Uuid::new_v4())),
                         chunks: Vec::new(),
                         created_at: std::time::Instant::now(),
