@@ -183,7 +183,7 @@ Almond can optionally join the current Hashtree Nostr/WebRTC mesh as a serving n
 
 - `FEATURE_P2P_SERVE_ENABLED`: Set to `true` to start the P2P serving worker (default: false)
 - `P2P_NSEC`: Nostr secret key used for Hashtree mesh signaling (required when P2P serving is enabled)
-- `P2P_RELAYS`: Comma-separated Nostr relays for Hashtree signaling (default: `wss://relay.damus.io,wss://relay.primal.net,wss://relay.nostr.band,wss://temp.iris.to,wss://relay.snort.social`)
+- `P2P_RELAYS`: Comma-separated Nostr relays for Hashtree signaling (default: `wss://relay.primal.net,wss://relay.nostr.band,wss://temp.iris.to,wss://relay.snort.social`)
 - `P2P_STUN_SERVERS`: Comma-separated STUN servers for WebRTC ICE (defaults to Hashtree/WebRTC public STUN servers)
 - `P2P_REQUEST_TIMEOUT_MS`: Mesh request timeout used by the local store runtime (default: 10000)
 - `P2P_HELLO_INTERVAL_MS`: Interval for announcing this Almond node to mesh peers (default: 3000)
@@ -194,7 +194,7 @@ Example:
 ```bash
 FEATURE_P2P_SERVE_ENABLED=true \
 P2P_NSEC=nsec1... \
-P2P_RELAYS=wss://relay.damus.io,wss://relay.primal.net,wss://relay.nostr.band,wss://temp.iris.to,wss://relay.snort.social \
+P2P_RELAYS=wss://relay.primal.net,wss://relay.nostr.band,wss://temp.iris.to,wss://relay.snort.social \
 cargo run
 ```
 

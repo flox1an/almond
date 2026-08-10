@@ -96,7 +96,6 @@ async fn run_p2p_serve(state: AppState) -> Result<(), String> {
 
     let relays = if state.p2p_relays.is_empty() {
         vec![
-            "wss://relay.damus.io".to_string(),
             "wss://relay.primal.net".to_string(),
             "wss://relay.nostr.band".to_string(),
             "wss://temp.iris.to".to_string(),

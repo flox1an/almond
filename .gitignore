@@ -1,13 +1,14 @@
 /target
 /files
 .DS_Store
-
-# Local dev artifacts / secrets
+# Local secrets
 cert.pem
 key.pem
 fips.pem
 fips-key.pem
+
+# Local development artifacts
 storage5/
-*.bak
 node_modules/
 todelete.txt
+*.bak

@@ -14,7 +14,6 @@ static SEED_RELAYS: &[&str] = &[
     "wss://nostr.mom",
     "wss://purplepag.es",
     "wss://purplerelay.com",
-    "wss://relay.damus.io",
     "wss://relay.nostr.band",
     "wss://relay.snort.social",
     "wss://relay.primal.net",
