@@ -1,11 +1,10 @@
 use axum::{body::Body, extract::State, http::StatusCode, response::Response, Json};
 use nostr_relay_pool::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use tokio::fs;
 use tracing::{error, info, warn};
 
-use crate::models::{AppState, FeatureMode, FileLocation, ReportAction};
+use crate::models::{AppState, FeatureMode, ReportAction};
+use crate::services::file_storage::{self, Removal};
 
 /// NIP-56 Report event structure
 #[derive(Debug, Deserialize)]
@@ -56,26 +55,6 @@ fn extract_report_type(tags: &[Vec<String>]) -> Option<String> {
         }
     }
     None
-}
-
-/// Move blob to quarantine directory
-async fn quarantine_blob(
-    state: &AppState,
-    sha256: &str,
-    file_path: &PathBuf,
-) -> Result<PathBuf, std::io::Error> {
-    let quarantine_dir = &state.storage.quarantine;
-    fs::create_dir_all(&quarantine_dir).await?;
-
-    let file_name = file_path
-        .file_name()
-        .map_or_else(|| sha256.to_string(), |n| n.to_string_lossy().to_string());
-
-    let quarantine_path = quarantine_dir.join(&file_name);
-
-    fs::rename(file_path, &quarantine_path).await?;
-
-    Ok(quarantine_path)
 }
 
 /// Handle blob report (BUD-09)
@@ -204,75 +183,25 @@ pub async fn report_blob(
 
     // Process each reported blob
     for sha256 in &blob_hashes {
-        // Check if blob exists
-        let file_metadata = if let Some(metadata) = state.file_index.get(sha256).await {
-            metadata
-        } else {
+        if state.file_index.get(sha256).await.is_none() {
             warn!("Reported blob not found: {}", sha256);
             continue;
+        }
+
+        let removal = match state.report_action {
+            ReportAction::Quarantine => Removal::Quarantined,
+            ReportAction::Delete => Removal::Reported,
         };
 
-        let FileLocation::Local(file_path) = &file_metadata.location else {
-            if let Some(s3) = &state.native_s3 {
-                if let Err(error) = s3.delete_matching(sha256).await {
-                    error!("Failed to delete reported S3 blob {}: {}", sha256, error);
-                    continue;
-                }
-                state.file_index.remove(sha256).await;
+        match file_storage::remove_indexed_blob(&state, sha256, removal, None).await {
+            Ok(true) => {
+                info!(sha256, action = ?state.report_action, "Processed reported blob");
                 processed_hashes.push(sha256.clone());
             }
-            continue;
-        };
-        let file_path = file_path.clone();
-        info!(
-            "📁 Processing reported blob: {} at {}",
-            sha256,
-            file_path.display()
-        );
-
-        match state.report_action {
-            ReportAction::Quarantine => {
-                // Move to quarantine directory
-                match quarantine_blob(&state, sha256, &file_path).await {
-                    Ok(quarantine_path) => {
-                        info!(
-                            "🔒 Quarantined blob {} to {}",
-                            sha256,
-                            quarantine_path.display()
-                        );
-
-                        // Remove from file index
-                        state.file_index.remove(sha256).await;
-
-                        processed_hashes.push(sha256.clone());
-                    }
-                    Err(e) => {
-                        error!("Failed to quarantine blob {}: {}", sha256, e);
-                    }
-                }
-            }
-            ReportAction::Delete => {
-                // Delete the file permanently
-                match fs::remove_file(&file_path).await {
-                    Ok(()) => {
-                        info!("🗑️  Deleted reported blob: {}", sha256);
-
-                        // Remove from file index
-                        state.file_index.remove(sha256).await;
-
-                        processed_hashes.push(sha256.clone());
-                    }
-                    Err(e) => {
-                        error!("Failed to delete blob {}: {}", sha256, e);
-                    }
-                }
-            }
+            Ok(false) => warn!("Reported blob vanished before it could be processed: {sha256}"),
+            Err(error) => error!("Failed to process reported blob {sha256}: {error}"),
         }
     }
-
-    // Mark changes pending for cleanup
-    let mut changes_pending = state.changes_pending.write().await;
-    *changes_pending = true;
 
     if processed_hashes.is_empty() {
         warn!("No blobs were processed from report");

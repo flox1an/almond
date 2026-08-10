@@ -394,7 +394,14 @@ async fn delete_cleanup_candidate(
     metadata: &FileMetadata,
     reason: &str,
 ) -> bool {
-    match file_storage::delete_indexed_blob(state, sha256, metadata).await {
+    match file_storage::remove_indexed_blob(
+        state,
+        sha256,
+        file_storage::Removal::Evicted,
+        Some(metadata),
+    )
+    .await
+    {
         Ok(true) => {
             info!(
                 sha256,

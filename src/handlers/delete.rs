@@ -4,11 +4,11 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::Response,
 };
-use tokio::fs;
 use tracing::{debug, error, info};
 
-use crate::models::{AppState, FileLocation};
+use crate::models::AppState;
 use crate::services::auth;
+use crate::services::file_storage::{self, Removal};
 
 /// Handle blob deletion
 pub async fn delete_blob(
@@ -57,34 +57,14 @@ pub async fn delete_blob(
 
     debug!("✅ Delete authorization tags validated");
 
-    // Delete every relevant native copy. Absence in either backend is success;
-    // a backend failure is availability uncertainty and must not become a 404.
-    if let Some(file_metadata) = state.file_index.get(&sha256).await {
-        if let FileLocation::Local(file_path) = &file_metadata.location {
-            match fs::remove_file(file_path).await {
-                Ok(()) => debug!("✅ Deleted local blob: {}", file_path.display()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    error!(
-                        "Failed to delete local blob {}: {}",
-                        file_path.display(),
-                        error
-                    );
-                    return Err(StatusCode::SERVICE_UNAVAILABLE);
-                }
-            }
-        }
-    }
-
-    if let Some(s3) = &state.native_s3 {
-        s3.delete_matching(&sha256).await.map_err(|error| {
-            error!("Failed to delete S3 blob {sha256}: {error}");
+    // Absence in either backend is success; a backend failure is availability
+    // uncertainty and must not become a 404.
+    file_storage::remove_indexed_blob(&state, &sha256, Removal::Requested, None)
+        .await
+        .map_err(|error| {
+            error!("Failed to delete blob {sha256}: {error}");
             StatusCode::SERVICE_UNAVAILABLE
         })?;
-    }
-
-    state.file_index.remove(&sha256).await;
-    *state.changes_pending.write().await = true;
 
     info!("🎉 Successfully deleted blob: {}", sha256);
 

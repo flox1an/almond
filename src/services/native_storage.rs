@@ -303,8 +303,10 @@ fn parse_object_key(key: &str) -> Option<(String, Option<u64>, Option<String>)> 
         return None;
     }
     let parsed = blob_name::parse(filename)?;
-    (first == &parsed.hash[..1] && second == &parsed.hash[1..2])
-        .then(|| (parsed.hash, parsed.expiration, parsed.extension))
+    if first != &parsed.hash[..1] || second != &parsed.hash[1..2] {
+        return None;
+    }
+    Some((parsed.hash, parsed.expiration, parsed.extension))
 }
 
 fn now_secs() -> u64 {

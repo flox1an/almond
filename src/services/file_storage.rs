@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::fs;
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{AppState, BlobOrigin, FileLocation, FileMetadata};
@@ -246,42 +246,142 @@ pub async fn get_file_metadata(state: &AppState, sha256: &str) -> Option<Arc<Fil
     state.file_index.get(sha256).await
 }
 
-/// Delete a particular indexed entry only when it has not changed since the
-/// caller selected it. Used by cleanup and destructive operations.
-pub async fn delete_indexed_blob(
-    state: &AppState,
-    sha256: &str,
-    expected: &FileMetadata,
-) -> AppResult<bool> {
-    let _guard = state.blob_mutation_locks.lock(sha256).await;
-    let Some(current) = state.file_index.get(sha256).await else {
-        return Ok(false);
-    };
-    if current.location != expected.location
-        || current.created_at != expected.created_at
-        || current.origin != expected.origin
-    {
-        return Ok(false);
-    }
-
-    remove_physical_file(state, &current).await?;
-    Ok(state
-        .file_index
-        .remove_if_location_matches(sha256, &current.location)
-        .await)
+/// Why a blob is leaving the served set.
+///
+/// Each reason fixes the two things the call sites used to decide for
+/// themselves: what happens to the stored bytes, and how thoroughly the
+/// native backend is swept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removal {
+    /// BUD-02 `DELETE /<hash>`: drop the indexed copy and every sibling object
+    /// stored under the same hash.
+    Requested,
+    /// BUD-09 report resolved as a deletion.
+    Reported,
+    /// BUD-09 report resolved as a quarantine: local bytes move out of the
+    /// served tree into the quarantine root and are kept.
+    Quarantined,
+    /// Retention sweep: expiry or capacity pressure.
+    Evicted,
 }
 
-/// Delete a blob selected by hash.
-pub async fn delete_file(state: &AppState, sha256: &str) -> AppResult<()> {
-    let metadata = state
-        .file_index
-        .get(sha256)
-        .await
-        .ok_or_else(|| AppError::NotFound(format!("File not found: {sha256}")))?;
-    if delete_indexed_blob(state, sha256, &metadata).await? {
-        debug!(sha256, "Deleted indexed blob");
+impl Removal {
+    /// A requested or reported removal means "make this hash go away", so it
+    /// also drops backend objects the index does not point at. An eviction
+    /// only reclaims the copy it selected.
+    const fn sweeps_backend(self) -> bool {
+        matches!(self, Self::Requested | Self::Reported)
     }
+}
+
+/// Remove one indexed blob under the per-hash mutation guard.
+///
+/// This is the only way a blob leaves the index. The guard spans the metadata
+/// read, the physical disposal and the index mutation, so a concurrent
+/// `publish_blob` cannot have its fresh copy deleted in between.
+///
+/// `expected` pins the entry the caller selected: the removal is skipped when
+/// the index has moved on, so a stale retention candidate cannot delete a
+/// republished hash. Callers acting on a hash alone pass `None`.
+///
+/// Removal is origin-agnostic by design. See
+/// `docs/plans/2026-07-25-storage-origin-split-design.md`, "Existing behavior
+/// preserved": delete and report act on the currently indexed copy regardless
+/// of origin.
+///
+/// Returns whether an indexed entry was removed. An unindexed hash is not an
+/// error — absence is already the caller's desired end state.
+pub async fn remove_indexed_blob(
+    state: &AppState,
+    sha256: &str,
+    removal: Removal,
+    expected: Option<&FileMetadata>,
+) -> AppResult<bool> {
+    let _guard = state.blob_mutation_locks.lock(sha256).await;
+
+    let Some(current) = state.file_index.get(sha256).await else {
+        // Nothing indexed, but a requested or reported removal still sweeps the
+        // backend so a hash that lost its index entry cannot linger in it.
+        if removal.sweeps_backend() {
+            sweep_backend_copies(state, sha256).await?;
+        }
+        return Ok(false);
+    };
+
+    if let Some(expected) = expected {
+        if current.location != expected.location
+            || current.created_at != expected.created_at
+            || current.origin != expected.origin
+        {
+            return Ok(false);
+        }
+    }
+
+    if removal == Removal::Quarantined {
+        quarantine_current(state, sha256, &current).await?;
+    } else {
+        remove_physical_file(state, &current).await?;
+    }
+
+    if removal.sweeps_backend() {
+        sweep_backend_copies(state, sha256).await?;
+    }
+
+    let removed = state
+        .file_index
+        .remove_if_location_matches(sha256, &current.location)
+        .await;
+    if removed {
+        mark_changes_pending(state).await;
+    }
+    Ok(removed)
+}
+
+/// Move a local blob into the quarantine root, keeping its bytes.
+///
+/// A blob held in the native backend cannot be moved into a local directory,
+/// so quarantining one removes it instead — the behaviour the report handler
+/// had before this path existed.
+async fn quarantine_current(
+    state: &AppState,
+    sha256: &str,
+    metadata: &FileMetadata,
+) -> AppResult<()> {
+    let FileLocation::Local(path) = &metadata.location else {
+        return sweep_backend_copies(state, sha256).await;
+    };
+
+    let quarantine = &state.storage.quarantine;
+    fs::create_dir_all(quarantine).await.map_err(|error| {
+        AppError::IoError(format!(
+            "Failed to create quarantine directory {}: {error}",
+            quarantine.display()
+        ))
+    })?;
+
+    let name = path.file_name().map_or_else(
+        || sha256.to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let destination = quarantine.join(name);
+    fs::rename(path, &destination).await.map_err(|error| {
+        AppError::IoError(format!(
+            "Failed to quarantine {} into {}: {error}",
+            path.display(),
+            destination.display()
+        ))
+    })?;
+
+    info!(sha256, quarantine = ?destination, "Quarantined blob");
     Ok(())
+}
+
+/// Drop every native-backend object stored under `sha256`, indexed or not.
+async fn sweep_backend_copies(state: &AppState, sha256: &str) -> AppResult<()> {
+    match &state.native_s3 {
+        Some(s3) => s3.delete_matching(sha256).await,
+        None => Ok(()),
+    }
 }
 
 /// Mark changes as pending for consumers that observe index mutations.
