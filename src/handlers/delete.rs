@@ -1,13 +1,13 @@
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::Response,
 };
 use tracing::{debug, error, info};
 
 use crate::models::AppState;
-use crate::services::auth;
+use crate::services::authorization;
 use crate::services::file_storage::{self, Removal};
 
 /// Handle blob deletion
@@ -34,28 +34,18 @@ pub async fn delete_blob(
 
     debug!("🗑️  Delete request for blob: {}", sha256);
 
-    // Validate Nostr authorization (strict mode - no WOT)
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .ok_or_else(|| {
-            error!("Missing Authorization header");
-            StatusCode::UNAUTHORIZED
-        })?;
-
-    let auth_event = auth::validate_nostr_auth(auth_header, &state, auth::AuthMode::Strict)
+    // Authorization is bound to this hash and consumes its single-use nonce,
+    // so the same signed event cannot delete twice.
+    let authorized =
+        authorization::authorize(&headers, &state, authorization::Operation::Delete)
+            .await
+            .map_err(StatusCode::from)?;
+    authorized
+        .bind(&state, &sha256)
         .await
         .map_err(StatusCode::from)?;
 
-    debug!(
-        "✅ Authorization validated for pubkey: {}",
-        auth_event.pubkey
-    );
-
-    // Validate delete-specific authorization (t=delete tag + x tag)
-    auth::validate_delete_auth(&auth_event, &sha256).map_err(StatusCode::from)?;
-
-    debug!("✅ Delete authorization tags validated");
+    debug!("✅ Delete authorization validated");
 
     // Absence in either backend is success; a backend failure is availability
     // uncertainty and must not become a 404.

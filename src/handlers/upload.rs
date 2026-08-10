@@ -16,7 +16,7 @@ use crate::helpers::{
     get_extension_from_mime, track_upload_stats,
 };
 use crate::models::{AppState, FileLocation};
-use crate::services::{auth, cashu, file_storage, hls, upload};
+use crate::services::{auth, authorization, cashu, file_storage, hls, upload};
 
 /// Handle file uploads - REFACTORED VERSION
 pub async fn upload_file(
@@ -24,28 +24,8 @@ pub async fn upload_file(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, AppError> {
-    // Check if upload feature is enabled and determine auth mode
-    let auth_mode = match state.feature_upload_enabled {
-        crate::models::FeatureMode::Off => {
-            return Err(AppError::Forbidden(
-                "Upload feature is disabled".to_string(),
-            ));
-        }
-        crate::models::FeatureMode::Wot => auth::AuthMode::WotOnly,
-        crate::models::FeatureMode::Dvm => auth::AuthMode::DvmOnly,
-        crate::models::FeatureMode::Public if state.allowed_pubkeys.is_empty() => {
-            auth::AuthMode::Unrestricted
-        }
-        crate::models::FeatureMode::Public => auth::AuthMode::Strict,
-    };
-
-    // Validate Nostr authorization
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .ok_or_else(|| AppError::Unauthorized("Missing Authorization header".to_string()))?;
-
-    let auth_event = auth::validate_nostr_auth(auth_header, &state, auth_mode).await?;
+    let authorized =
+        authorization::authorize(&headers, &state, authorization::Operation::Upload).await?;
 
     // Extract content type, extension, and expiration
     let content_type = extract_content_type(&headers);
@@ -69,7 +49,7 @@ pub async fn upload_file(
         upload::stream_to_temp_file(body_stream, temp.path(), state.max_blob_size_bytes).await?;
 
     // Validate authorization matches the hash (must come before payment check)
-    auth::validate_upload_auth(&auth_event, &sha256)?;
+    authorized.bind(&state, &sha256).await?;
 
     // Check payment if required (after we know the size and auth is validated)
     cashu::charge(&state, &headers, cashu::PaidOperation::Upload, total_bytes).await?;
@@ -109,34 +89,15 @@ pub async fn mirror_blob(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, AppError> {
-    // Check if mirror feature is enabled and determine auth mode
-    let auth_mode = match state.feature_mirror_enabled {
-        crate::models::FeatureMode::Off => {
-            return Err(AppError::Forbidden(
-                "Mirror feature is disabled".to_string(),
-            ));
-        }
-        crate::models::FeatureMode::Wot => auth::AuthMode::WotOnly,
-        crate::models::FeatureMode::Dvm => auth::AuthMode::DvmOnly,
-        crate::models::FeatureMode::Public if state.allowed_pubkeys.is_empty() => {
-            auth::AuthMode::Unrestricted
-        }
-        crate::models::FeatureMode::Public => auth::AuthMode::Strict,
-    };
-
-    // Validate Nostr authorization
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .ok_or_else(|| AppError::Unauthorized("Missing Authorization header".to_string()))?;
-
-    let auth_event = auth::validate_nostr_auth(auth_header, &state, auth_mode).await?;
+    let authorized =
+        authorization::authorize(&headers, &state, authorization::Operation::Mirror).await?;
+    let auth_event = authorized.event();
 
     // BUD-11: validate t=upload tag for mirror operations
-    auth::validate_t_tag(&auth_event, "upload")?;
+    auth::validate_t_tag(auth_event, "upload")?;
 
     // Extract expected SHA-256 from auth event and expiration from headers
-    let expected_sha256 = auth::extract_sha256_from_event(&auth_event).ok_or_else(|| {
+    let expected_sha256 = auth::extract_sha256_from_event(auth_event).ok_or_else(|| {
         AppError::Unauthorized("No valid SHA-256 hash found in auth event".to_string())
     })?;
     let expiration = extract_expiration(&headers);
@@ -293,19 +254,6 @@ pub async fn patch_upload(
     };
     use crate::models::{ChunkInfo, ChunkUploadKey};
 
-    let auth_mode = match state.feature_upload_enabled {
-        crate::models::FeatureMode::Off => {
-            return Err(AppError::Forbidden(
-                "Upload feature is disabled".to_string(),
-            ));
-        }
-        crate::models::FeatureMode::Wot => auth::AuthMode::WotOnly,
-        crate::models::FeatureMode::Dvm => auth::AuthMode::DvmOnly,
-        crate::models::FeatureMode::Public if state.allowed_pubkeys.is_empty() => {
-            auth::AuthMode::Unrestricted
-        }
-        crate::models::FeatureMode::Public => auth::AuthMode::Strict,
-    };
 
     let sha256 = headers
         .get(X_SHA_256_HEADER)
@@ -358,20 +306,18 @@ pub async fn patch_upload(
         ));
     }
 
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| AppError::Unauthorized("Missing Authorization header".to_string()))?;
-    let auth_event = auth::validate_nostr_auth(auth_header, &state, auth_mode).await?;
-    auth::validate_chunk_upload_auth(&auth_event, &sha256, &content_length.to_string())?;
+    let authorized =
+        authorization::authorize(&headers, &state, authorization::Operation::ChunkUpload).await?;
+    authorized.bind(&state, &sha256).await?;
+    let owner = *authorized.pubkey();
     let key = ChunkUploadKey {
-        pubkey: auth_event.pubkey,
+        pubkey: owner,
         sha256: sha256.clone(),
     };
 
     let session_params = crate::services::chunk_sessions::SessionParams {
         sha256: sha256.clone(),
-        owner: auth_event.pubkey,
+        owner,
         upload_type: upload_type.clone(),
         upload_length,
         expiration: extract_expiration(&headers),

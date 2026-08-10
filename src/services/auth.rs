@@ -9,18 +9,19 @@ use tracing::{error, info};
 use crate::error::{AppError, AppResult};
 use crate::models::AppState;
 
-/// Authentication mode for different operations
+/// How a caller's pubkey is authorized, once its event has been verified.
+///
+/// Chosen by `services::authorization` from the operation's feature mode —
+/// handlers never pick one.
 #[derive(Debug, Clone, Copy)]
 pub enum AuthMode {
-    /// Standard mode - allows `WoT` (Web of Trust) for uploads if `allowed_pubkeys` is set
-    Standard,
-    /// Strict mode - only allows explicit whitelist (for delete operations)
+    /// Only an explicit `ALLOWED_NPUBS` whitelist entry is accepted.
     Strict,
-    /// Unrestricted mode - only validates signature, no pubkey authorization checks (for public features)
+    /// Any valid signature is accepted; no pubkey restriction applies.
     Unrestricted,
-    /// WoT-only mode - requires `WoT` check, enforces `trusted_pubkeys` validation
+    /// Whitelist first, then the web of trust.
     WotOnly,
-    /// DVM-only mode - requires DVM announcement check, enforces `dvm_pubkeys` validation
+    /// Whitelist first, then a live DVM announcement.
     DvmOnly,
 }
 
@@ -128,27 +129,6 @@ pub fn verify_event_with_policy(event: &Event, state: &AppState) -> AppResult<u6
     Ok(expiration)
 }
 
-/// Reject a destructive authorization event more than once until it expires.
-pub async fn consume_destructive_event(
-    event: &Event,
-    state: &AppState,
-    expiration: u64,
-) -> AppResult<()> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let mut seen = state.destructive_event_replays.write().await;
-    seen.retain(|_, expires_at| *expires_at >= now);
-    let id = event.id.to_string();
-    if seen.insert(id, expiration).is_some() {
-        return Err(AppError::Conflict(
-            "Authorization event was already used".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 /// Check if pubkey is authorized based on mode
 pub async fn check_pubkey_authorization(
     event: &Event,
@@ -168,15 +148,6 @@ pub async fn check_pubkey_authorization(
                 return Err(AppError::Unauthorized(
                     "Pubkey not in ALLOWED_NPUBS whitelist".to_string(),
                 ));
-            }
-        }
-        AuthMode::Standard => {
-            // Standard mode: check allowed_pubkeys first, then trusted_pubkeys (WoT)
-            if !state.allowed_pubkeys.is_empty() && !state.allowed_pubkeys.contains(&event.pubkey) {
-                let trusted_pubkeys = state.trusted_pubkeys.read().await;
-                if !trusted_pubkeys.contains_key(&event.pubkey) {
-                    return Err(AppError::Unauthorized("Pubkey not authorized".to_string()));
-                }
             }
         }
         AuthMode::Unrestricted => {
@@ -257,19 +228,6 @@ pub fn validate_event_kind(event: &Event, expected_kind: u16) -> AppResult<()> {
         )));
     }
     Ok(())
-}
-
-/// Validate Nostr authentication with specified mode
-pub async fn validate_nostr_auth(
-    auth_header: &str,
-    state: &AppState,
-    mode: AuthMode,
-) -> AppResult<Event> {
-    let event = parse_auth_header(auth_header)?;
-    let _expiration = verify_event_with_policy(&event, state)?;
-    validate_event_kind(&event, 24242)?;
-    check_pubkey_authorization(&event, state, mode).await?;
-    Ok(event)
 }
 
 /// Validate the `t` tag matches the expected verb (BUD-11)
@@ -394,11 +352,7 @@ pub fn validate_delete_auth(event: &Event, sha256: &str) -> AppResult<()> {
 }
 
 /// Validate chunk upload authorization
-pub fn validate_chunk_upload_auth(
-    event: &Event,
-    sha256: &str,
-    _chunk_length: &str,
-) -> AppResult<()> {
+pub fn validate_chunk_upload_auth(event: &Event, sha256: &str) -> AppResult<()> {
     validate_t_tag(event, "upload")?;
 
     // Check if the event has an 'x' tag with the final blob hash
@@ -458,13 +412,6 @@ pub async fn is_pubkey_authorized(pubkey: &PublicKey, state: &AppState) -> bool 
     }
 
     // Check WoT
-    let trusted_pubkeys = state.trusted_pubkeys.read().await;
-    trusted_pubkeys.contains_key(pubkey)
-}
-
-/// Check if a pubkey is in the Web of Trust
-/// Returns true only if the pubkey is in `trusted_pubkeys` (`WoT`)
-pub async fn is_pubkey_in_wot(pubkey: &PublicKey, state: &AppState) -> bool {
     let trusted_pubkeys = state.trusted_pubkeys.read().await;
     trusted_pubkeys.contains_key(pubkey)
 }
@@ -832,7 +779,7 @@ mod tests {
             &keys,
             vec![valid_expiration_tag(), t_tag("upload"), x_tag(TEST_HASH)],
         );
-        assert!(validate_chunk_upload_auth(&event, TEST_HASH, "1024").is_ok());
+        assert!(validate_chunk_upload_auth(&event, TEST_HASH).is_ok());
     }
 
     #[test]
@@ -842,7 +789,7 @@ mod tests {
             &keys,
             vec![valid_expiration_tag(), t_tag("delete"), x_tag(TEST_HASH)],
         );
-        assert!(validate_chunk_upload_auth(&event, TEST_HASH, "1024").is_err());
+        assert!(validate_chunk_upload_auth(&event, TEST_HASH).is_err());
     }
 
     // ── parse_auth_header tests ──

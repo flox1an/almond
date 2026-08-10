@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod authorization;
 pub mod blob_index;
 pub mod blob_name;
 pub mod blossom_servers;

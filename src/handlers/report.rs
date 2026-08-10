@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 use crate::models::{AppState, FeatureMode, ReportAction};
+use crate::services::authorization;
 use crate::services::file_storage::{self, Removal};
 
 /// NIP-56 Report event structure
@@ -127,19 +128,13 @@ pub async fn report_blob(
     {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    {
-        let mut seen = state.destructive_event_replays.write().await;
-        seen.retain(|_, expires_at| *expires_at >= now);
-        if seen
-            .insert(
-                report.id.clone(),
-                now.saturating_add(state.auth_max_ttl_secs),
-            )
-            .is_some()
-        {
-            return Err(StatusCode::CONFLICT);
-        }
-    }
+    authorization::consume_single_use(
+        &state.destructive_event_replays,
+        &report.id,
+        now.saturating_add(state.auth_max_ttl_secs),
+    )
+    .await
+    .map_err(StatusCode::from)?;
     if state.feature_report_enabled == FeatureMode::Public {
         let body = serde_json::to_string(&ReportResponse {
             message: "Report accepted for moderation".to_string(),
