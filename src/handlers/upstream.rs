@@ -1082,8 +1082,10 @@ async fn run_download(
         )
         .await
         .map_err(|error| error.to_string())?;
-        if let crate::models::FileLocation::Local(path) = &published.location {
-            let _ = handle.final_path.set(path.clone());
+        // Followers tail the file on disk, so there is only a path to publish
+        // when the filesystem adapter is the one that took the blob.
+        if let Some(path) = crate::services::file_storage::local_path(&published) {
+            let _ = handle.final_path.set(path.to_path_buf());
         }
         Ok((sha256, body_size))
     }

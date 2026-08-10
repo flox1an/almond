@@ -6,7 +6,7 @@ use regex::Regex;
 use tracing::{error, info, warn};
 
 use crate::helpers::get_extension_from_mime;
-use crate::models::{AppState, FileLocation};
+use crate::models::AppState;
 use crate::services::{file_storage, upload};
 
 /// A reference extracted from an HLS playlist (sha256 hash + optional extension)
@@ -134,15 +134,9 @@ pub async fn collect_playlist_references(state: &AppState, sha256: &str) -> Vec<
     let Some(metadata) = file_storage::get_file_metadata(state, sha256).await else {
         return Vec::new();
     };
-    let playlist: Result<String, String> = match &metadata.location {
-        FileLocation::Local(path) => tokio::fs::read_to_string(path)
-            .await
-            .map_err(|error| error.to_string()),
-        FileLocation::S3 { key } => match &state.native_s3 {
-            Some(s3) => s3.read_text(key).await.map_err(|error| error.to_string()),
-            None => return Vec::new(),
-        },
-    };
+    let playlist = file_storage::read_text(state, &metadata)
+        .await
+        .map_err(|error| error.to_string());
     match playlist {
         Ok(content) => {
             let child_refs = parse_playlist_references(&content);

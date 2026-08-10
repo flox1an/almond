@@ -10,7 +10,7 @@ use tokio::fs;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    models::{AppState, FileLocation},
+    models::AppState,
     services::{blob_index::BlobIndex, p2p_webrtc::RealPeerConnectionFactory},
 };
 
@@ -31,9 +31,11 @@ impl AlmondLocalBlobStore {
         self.file_index
             .get(&hash_hex)
             .await
-            .and_then(|metadata| match &metadata.location {
-                FileLocation::Local(path) => Some(path.clone()),
-                FileLocation::S3 { .. } => None,
+            .and_then(|metadata| {
+                // Only the filesystem adapter can hand out a path to export;
+                // a natively stored blob is simply not P2P-servable.
+                crate::services::file_storage::local_path(&metadata)
+                    .map(std::path::Path::to_path_buf)
             })
     }
 }

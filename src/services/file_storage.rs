@@ -246,6 +246,42 @@ pub async fn reconcile_superseded_blobs(state: &AppState) {
     state.superseded_blob_deletions.write().await.extend(retry);
 }
 
+/// Read a stored blob as UTF-8 text, whichever adapter holds it.
+///
+/// Callers outside this module used to match on `FileLocation` themselves and
+/// separately re-check whether a native backend was configured. Asking storage
+/// keeps the two adapters behind one interface.
+pub async fn read_text(state: &AppState, metadata: &FileMetadata) -> AppResult<String> {
+    match &metadata.location {
+        FileLocation::Local(path) => fs::read_to_string(path).await.map_err(|error| {
+            AppError::IoError(format!("Failed to read {}: {error}", path.display()))
+        }),
+        FileLocation::S3 { key } => {
+            state
+                .native_s3
+                .as_ref()
+                .ok_or_else(|| {
+                    AppError::ServiceUnavailable("S3 storage is not configured".to_string())
+                })?
+                .read_text(key)
+                .await
+        }
+    }
+}
+
+/// The on-disk path of a blob, when the filesystem adapter is the one holding
+/// it.
+///
+/// A blob in the native backend has no local path to hand out, so `None` means
+/// "this adapter cannot expose a path", not "the blob is missing".
+#[must_use]
+pub fn local_path(metadata: &FileMetadata) -> Option<&Path> {
+    match &metadata.location {
+        FileLocation::Local(path) => Some(path),
+        FileLocation::S3 { .. } => None,
+    }
+}
+
 /// Get file metadata from the shared index.
 pub async fn get_file_metadata(state: &AppState, sha256: &str) -> Option<Arc<FileMetadata>> {
     state.file_index.get(sha256).await
