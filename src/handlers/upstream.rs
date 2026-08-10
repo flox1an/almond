@@ -12,12 +12,12 @@ use sha2::Digest;
 use tokio::{fs::File, io::AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
-use crate::services::upload::validate_upstream_url;
+use crate::services::upstream_candidates;
 
 use crate::constants::CACHE_CONTROL_IMMUTABLE;
 use crate::helpers::{
     copy_headers_to_reqwest, copy_headers_without_range, extract_content_type_from_response,
-    get_extension_from_mime, server_url_candidates,
+    get_extension_from_mime,
 };
 use crate::models::{
     AppState, DownloadHandle, DownloadPhase, NegotiationPhase, UpstreamNegotiation,
@@ -210,275 +210,44 @@ pub async fn try_upstream_servers(
         None
     };
 
-    // Track which servers we've already tried to avoid duplicate HEAD requests
-    let mut tried_servers = std::collections::HashSet::<String>::new();
-
     let client = state.upstream_client.clone();
+    let mut walk = upstream_candidates::Walk::new(
+        state,
+        filename,
+        custom_origin,
+        xs_servers,
+        author_pubkey,
+    );
 
-    // Try custom origin first if provided (single server)
-    if let Some(origin_url) = custom_origin {
-        // Validate URL against SSRF before making request
-        let normalized_origin = match validate_upstream_url(origin_url).await {
-            Ok(url) => url,
-            Err(e) => {
-                warn!(
-                    "Custom origin URL validation failed (SSRF protection): {} - {}",
-                    origin_url, e
-                );
-                // Skip this server and continue to xs_servers or configured upstream servers
-                String::new()
+    while let Some(candidate) = walk.next().await {
+        let request = copy_headers_for_cold_fetch(headers, client.get(&candidate.url));
+        match request.send().await {
+            Ok(response) if response.status().is_success() => {
+                debug!("Found file on {}: {}", candidate.tier.label(), candidate.url);
+                return handle_successful_upstream_response(
+                    state,
+                    &client,
+                    response,
+                    &candidate.url,
+                    file_hash,
+                    filename,
+                    headers,
+                    method,
+                    negotiation,
+                )
+                .await;
             }
-        };
-
-        if normalized_origin.is_empty() {
-            debug!(
-                "Custom origin failed validation, trying xs servers or configured upstream servers"
-            );
-        } else {
-            debug!("Trying custom origin server first: {}", normalized_origin);
-            let file_url = format!("{}/{}", normalized_origin.trim_end_matches('/'), filename);
-            debug!("Trying upstream server: {}", file_url);
-            tried_servers.insert(normalized_origin.clone());
-
-            // Create request with all relevant headers for upstream servers
-            let request = client.get(&file_url);
-            let request = copy_headers_for_cold_fetch(headers, request);
-
-            match request.send().await {
-                Ok(response) if response.status().is_success() => {
-                    debug!("Found file on custom origin server: {}", file_url);
-                    return handle_successful_upstream_response(
-                        state,
-                        &client,
-                        response,
-                        &file_url,
-                        file_hash,
-                        filename,
-                        headers,
-                        method,
-                        negotiation,
-                    )
-                    .await;
-                }
-                Ok(response) => {
-                    debug!(
-                        "Custom origin server {} returned status: {}",
-                        file_url,
-                        response.status()
-                    );
-                }
-                Err(e) => {
-                    warn!("Failed to fetch from custom origin {}: {}", file_url, e);
-                }
-            }
-            // If custom origin failed, continue to xs_servers or configured upstream servers
-            debug!("Custom origin failed, trying xs servers or configured upstream servers");
-        }
-    }
-
-    // Priority 1: Try xs servers if provided
-    if let Some(servers) = xs_servers {
-        debug!("Priority 1: Trying xs servers ({} servers)", servers.len());
-        for server in servers {
-            for candidate in server_url_candidates(server) {
-                let normalized_server = match validate_upstream_url(&candidate).await {
-                    Ok(url) => url,
-                    Err(e) => {
-                        warn!(
-                            "xs server URL validation failed (SSRF protection): {} - {}",
-                            candidate, e
-                        );
-                        continue;
-                    }
-                };
-
-                if !tried_servers.insert(normalized_server.clone()) {
-                    debug!("Skipping already-tried server: {}", normalized_server);
-                    continue;
-                }
-
-                let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-                debug!("Trying xs server: {}", file_url);
-
-                let request = client.get(&file_url);
-                let request = copy_headers_for_cold_fetch(headers, request);
-
-                match request.send().await {
-                    Ok(response) if response.status().is_success() => {
-                        debug!("Found file on xs server: {}", file_url);
-                        return handle_successful_upstream_response(
-                            state,
-                            &client,
-                            response,
-                            &file_url,
-                            file_hash,
-                            filename,
-                            headers,
-                            method,
-                            negotiation,
-                        )
-                        .await;
-                    }
-                    Ok(response) => {
-                        debug!(
-                            "xs server {} returned status: {}",
-                            file_url,
-                            response.status()
-                        );
-                    }
-                    Err(e) => {
-                        debug!("Failed to fetch from xs server {}: {}", file_url, e);
-                    }
-                }
-            }
-        }
-        debug!("All xs servers failed or returned non-success, trying local UPSTREAM_SERVERS");
-    }
-
-    // Priority 2: Try local UPSTREAM_SERVERS
-    if !state.upstream_servers.is_empty() {
-        debug!(
-            "Priority 2: Trying local UPSTREAM_SERVERS ({} servers)",
-            state.upstream_servers.len()
-        );
-        for server in &state.upstream_servers {
-            // Validate URL against SSRF before making request
-            let normalized_server = match validate_upstream_url(server).await {
-                Ok(url) => url,
-                Err(e) => {
-                    warn!(
-                        "UPSTREAM_SERVER URL validation failed (SSRF protection): {} - {}",
-                        server, e
-                    );
-                    continue;
-                }
-            };
-
-            // Skip if we've already tried this server
-            if tried_servers.contains(&normalized_server) {
-                debug!("Skipping already-tried server: {}", normalized_server);
-                continue;
-            }
-
-            tried_servers.insert(normalized_server.clone());
-            let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-            debug!("Trying local UPSTREAM_SERVER: {}", file_url);
-
-            // Create request with all relevant headers for upstream servers
-            let request = client.get(&file_url);
-            let request = copy_headers_for_cold_fetch(headers, request);
-
-            match request.send().await {
-                Ok(response) if response.status().is_success() => {
-                    debug!("Found file on local UPSTREAM_SERVER: {}", file_url);
-                    return handle_successful_upstream_response(
-                        state,
-                        &client,
-                        response,
-                        &file_url,
-                        file_hash,
-                        filename,
-                        headers,
-                        method,
-                        negotiation,
-                    )
-                    .await;
-                }
-                Ok(response) => {
-                    debug!(
-                        "UPSTREAM_SERVER {} returned status: {}",
-                        file_url,
-                        response.status()
-                    );
-                }
-                Err(e) => {
-                    debug!("Failed to fetch from UPSTREAM_SERVER {}: {}", file_url, e);
-                }
-            }
-        }
-        debug!("All local UPSTREAM_SERVERS failed or returned non-success");
-    }
-
-    // Priority 3: Fetch and try user servers (lazy fetch) if author pubkey is provided
-    if let Some(pubkey) = author_pubkey {
-        debug!(
-            "Priority 3: Fetching user server list for pubkey: {} (lazy fetch)",
-            pubkey.to_hex()
-        );
-        match crate::services::blossom_servers::fetch_user_server_list(state, pubkey).await {
-            Ok(user_servers) if !user_servers.is_empty() => {
-                debug!(
-                    "Fetched {} servers from user's server list (BUD-03)",
-                    user_servers.len()
-                );
-                for server in &user_servers {
-                    // Validate URL against SSRF before making request
-                    let normalized_server = match validate_upstream_url(server).await {
-                        Ok(url) => url,
-                        Err(e) => {
-                            warn!(
-                                "User server URL validation failed (SSRF protection): {} - {}",
-                                server, e
-                            );
-                            continue;
-                        }
-                    };
-
-                    // Skip if we've already tried this server
-                    if tried_servers.contains(&normalized_server) {
-                        debug!("Skipping already-tried server: {}", normalized_server);
-                        continue;
-                    }
-
-                    tried_servers.insert(normalized_server.clone());
-                    let file_url =
-                        format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-                    debug!("Trying user server: {}", file_url);
-
-                    // Create request with all relevant headers for upstream servers
-                    let request = client.get(&file_url);
-                    let request = copy_headers_for_cold_fetch(headers, request);
-
-                    match request.send().await {
-                        Ok(response) if response.status().is_success() => {
-                            debug!("Found file on user server: {}", file_url);
-                            return handle_successful_upstream_response(
-                                state,
-                                &client,
-                                response,
-                                &file_url,
-                                file_hash,
-                                filename,
-                                headers,
-                                method,
-                                negotiation,
-                            )
-                            .await;
-                        }
-                        Ok(response) => {
-                            debug!(
-                                "User server {} returned status: {}",
-                                file_url,
-                                response.status()
-                            );
-                        }
-                        Err(e) => {
-                            debug!("Failed to fetch from user server {}: {}", file_url, e);
-                        }
-                    }
-                }
-                debug!("All user servers failed or returned non-success");
-            }
-            Ok(_) => {
-                debug!("User server list is empty for pubkey: {}", pubkey.to_hex());
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to fetch user server list for pubkey {}: {}",
-                    pubkey.to_hex(),
-                    e
-                );
-            }
+            Ok(response) => debug!(
+                "{} {} returned status: {}",
+                candidate.tier.label(),
+                candidate.url,
+                response.status()
+            ),
+            Err(error) => debug!(
+                "Failed to fetch from {} {}: {error}",
+                candidate.tier.label(),
+                candidate.url
+            ),
         }
     }
 
@@ -507,192 +276,27 @@ pub async fn try_upstream_redirect(
         );
     }
 
-    // Track which servers we've already tried to avoid duplicate HEAD requests
-    let mut tried_servers = std::collections::HashSet::<String>::new();
     let client = state.upstream_client.clone();
+    let mut walk = upstream_candidates::Walk::new(
+        state,
+        filename,
+        custom_origin,
+        xs_servers,
+        author_pubkey,
+    );
 
-    // Try custom origin first if provided (single server)
-    if let Some(origin_url) = custom_origin {
-        let normalized_origin = match validate_upstream_url(origin_url).await {
-            Ok(url) => url,
-            Err(e) => {
-                warn!(
-                    "Custom origin URL validation failed (SSRF protection): {} - {}",
-                    origin_url, e
-                );
-                String::new()
-            }
-        };
-
-        if !normalized_origin.is_empty() {
-            debug!(
-                "Trying custom origin server first (HEAD): {}",
-                normalized_origin
-            );
-            tried_servers.insert(normalized_origin.clone());
-            let file_url = format!("{}/{}", normalized_origin.trim_end_matches('/'), filename);
-
-            if let Some(response) = try_head_and_redirect(
-                state,
-                &client,
-                &file_url,
-                file_hash,
-                filename,
-                cache_in_background,
-            )
-            .await
-            {
-                return Ok(response);
-            }
-        }
-    }
-
-    // Priority 1: Try xs servers if provided
-    if let Some(servers) = xs_servers {
-        debug!(
-            "Priority 1: Trying xs servers (HEAD) ({} servers)",
-            servers.len()
-        );
-        for server in servers {
-            for candidate in server_url_candidates(server) {
-                let normalized_server = match validate_upstream_url(&candidate).await {
-                    Ok(url) => url,
-                    Err(e) => {
-                        warn!(
-                            "xs server URL validation failed (SSRF protection): {} - {}",
-                            candidate, e
-                        );
-                        continue;
-                    }
-                };
-
-                if !tried_servers.insert(normalized_server.clone()) {
-                    debug!("Skipping already-tried server: {}", normalized_server);
-                    continue;
-                }
-
-                let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-                debug!("Trying xs server (HEAD): {}", file_url);
-
-                if let Some(response) = try_head_and_redirect(
-                    state,
-                    &client,
-                    &file_url,
-                    file_hash,
-                    filename,
-                    cache_in_background,
-                )
-                .await
-                {
-                    return Ok(response);
-                }
-            }
-        }
-        debug!("All xs servers failed HEAD check, trying local UPSTREAM_SERVERS");
-    }
-
-    // Priority 2: Try local UPSTREAM_SERVERS
-    if !state.upstream_servers.is_empty() {
-        debug!(
-            "Priority 2: Trying local UPSTREAM_SERVERS (HEAD) ({} servers)",
-            state.upstream_servers.len()
-        );
-        for server in &state.upstream_servers {
-            let normalized_server = match validate_upstream_url(server).await {
-                Ok(url) => url,
-                Err(e) => {
-                    warn!(
-                        "UPSTREAM_SERVER URL validation failed (SSRF protection): {} - {}",
-                        server, e
-                    );
-                    continue;
-                }
-            };
-
-            if tried_servers.contains(&normalized_server) {
-                debug!("Skipping already-tried server: {}", normalized_server);
-                continue;
-            }
-
-            tried_servers.insert(normalized_server.clone());
-            let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-            debug!("Trying local UPSTREAM_SERVER (HEAD): {}", file_url);
-
-            if let Some(response) = try_head_and_redirect(
-                state,
-                &client,
-                &file_url,
-                file_hash,
-                filename,
-                cache_in_background,
-            )
-            .await
-            {
-                return Ok(response);
-            }
-        }
-        debug!("All local UPSTREAM_SERVERS failed HEAD check");
-    }
-
-    // Priority 3: Fetch and try user servers (lazy fetch) if author pubkey is provided
-    if let Some(pubkey) = author_pubkey {
-        debug!(
-            "Priority 3: Fetching user server list for pubkey: {} (lazy fetch)",
-            pubkey.to_hex()
-        );
-        match crate::services::blossom_servers::fetch_user_server_list(state, pubkey).await {
-            Ok(user_servers) if !user_servers.is_empty() => {
-                debug!(
-                    "Fetched {} servers from user's server list (BUD-03)",
-                    user_servers.len()
-                );
-                for server in &user_servers {
-                    let normalized_server = match validate_upstream_url(server).await {
-                        Ok(url) => url,
-                        Err(e) => {
-                            warn!(
-                                "User server URL validation failed (SSRF protection): {} - {}",
-                                server, e
-                            );
-                            continue;
-                        }
-                    };
-
-                    if tried_servers.contains(&normalized_server) {
-                        debug!("Skipping already-tried server: {}", normalized_server);
-                        continue;
-                    }
-
-                    tried_servers.insert(normalized_server.clone());
-                    let file_url =
-                        format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-                    debug!("Trying user server (HEAD): {}", file_url);
-
-                    if let Some(response) = try_head_and_redirect(
-                        state,
-                        &client,
-                        &file_url,
-                        file_hash,
-                        filename,
-                        cache_in_background,
-                    )
-                    .await
-                    {
-                        return Ok(response);
-                    }
-                }
-                debug!("All user servers failed HEAD check");
-            }
-            Ok(_) => {
-                debug!("User server list is empty for pubkey: {}", pubkey.to_hex());
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to fetch user server list for pubkey {}: {}",
-                    pubkey.to_hex(),
-                    e
-                );
-            }
+    while let Some(candidate) = walk.next().await {
+        if let Some(response) = try_head_and_redirect(
+            state,
+            &client,
+            &candidate.url,
+            file_hash,
+            filename,
+            cache_in_background,
+        )
+        .await
+        {
+            return Ok(response);
         }
     }
 
@@ -1124,200 +728,37 @@ async fn proxy_request_to_upstream(
     );
 
     let client = state.upstream_client.clone();
+    let mut walk = upstream_candidates::Walk::new(
+        state,
+        filename,
+        custom_origin,
+        xs_servers,
+        author_pubkey,
+    );
 
-    // Track which servers we've already tried to avoid duplicate requests
-    let mut tried_servers = std::collections::HashSet::<String>::new();
-
-    // Try custom origin first if provided
-    if let Some(origin_url) = custom_origin {
-        // Validate URL against SSRF before making request
-        let normalized_origin = match validate_upstream_url(origin_url).await {
-            Ok(url) => url,
-            Err(e) => {
-                warn!(
-                    "Custom origin URL validation failed (SSRF protection): {} - {}",
-                    origin_url, e
-                );
-                String::new()
-            }
-        };
-
-        if !normalized_origin.is_empty() {
-            let file_url = format!("{}/{}", normalized_origin.trim_end_matches('/'), filename);
-            debug!("Proxying to custom origin server: {}", file_url);
-            tried_servers.insert(normalized_origin.clone());
-
-            // Create request with all relevant headers
-            let request = client.get(&file_url);
-            let request = copy_headers_to_reqwest(headers, request);
-
-            match request.send().await {
-                Ok(response) if response.status().is_success() => {
-                    debug!(
-                        "Successfully proxied request to custom origin: {}",
-                        file_url
-                    );
-                    let content_type = extract_content_type_from_response(response.headers());
-                    return proxy_upstream_response(response, &content_type, filename).await;
-                }
-                Ok(response) => {
-                    debug!(
-                        "Custom origin server {} returned status: {}",
-                        file_url,
-                        response.status()
-                    );
-                }
-                Err(e) => {
-                    warn!("Failed to proxy to custom origin {}: {}", file_url, e);
-                }
-            }
-        }
-    }
-
-    // Priority 1: Try xs servers if provided
-    if let Some(servers) = xs_servers {
-        for server in servers {
-            for candidate in server_url_candidates(server) {
-                let normalized_server = match validate_upstream_url(&candidate).await {
-                    Ok(url) => url,
-                    Err(e) => {
-                        warn!(
-                            "xs server URL validation failed (SSRF protection): {} - {}",
-                            candidate, e
-                        );
-                        continue;
-                    }
-                };
-
-                if !tried_servers.insert(normalized_server.clone()) {
-                    continue;
-                }
-
-                let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-                debug!("Proxying to xs server: {}", file_url);
-
-                let request = client.get(&file_url);
-                let request = copy_headers_to_reqwest(headers, request);
-
-                match request.send().await {
-                    Ok(response) if response.status().is_success() => {
-                        debug!("Successfully proxied request to xs server: {}", file_url);
-                        let content_type = extract_content_type_from_response(response.headers());
-                        return proxy_upstream_response(response, &content_type, filename).await;
-                    }
-                    Ok(response) => {
-                        debug!(
-                            "xs server {} returned status: {}",
-                            file_url,
-                            response.status()
-                        );
-                    }
-                    Err(e) => {
-                        debug!("Failed to proxy to xs server {}: {}", file_url, e);
-                    }
-                }
-            }
-        }
-    }
-
-    // Priority 2: Try local UPSTREAM_SERVERS
-    for server in &state.upstream_servers {
-        // Validate URL against SSRF before making request
-        let normalized_server = match validate_upstream_url(server).await {
-            Ok(url) => url,
-            Err(e) => {
-                warn!(
-                    "UPSTREAM_SERVER URL validation failed (SSRF protection): {} - {}",
-                    server, e
-                );
-                continue;
-            }
-        };
-
-        if tried_servers.contains(&normalized_server) {
-            continue;
-        }
-        tried_servers.insert(normalized_server.clone());
-
-        let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-        debug!("Proxying to local UPSTREAM_SERVER: {}", file_url);
-
-        let request = client.get(&file_url);
-        let request = copy_headers_to_reqwest(headers, request);
-
+    while let Some(candidate) = walk.next().await {
+        let request = copy_headers_to_reqwest(headers, client.get(&candidate.url));
         match request.send().await {
             Ok(response) if response.status().is_success() => {
                 debug!(
-                    "Successfully proxied request to UPSTREAM_SERVER: {}",
-                    file_url
+                    "Successfully proxied request to {}: {}",
+                    candidate.tier.label(),
+                    candidate.url
                 );
                 let content_type = extract_content_type_from_response(response.headers());
                 return proxy_upstream_response(response, &content_type, filename).await;
             }
-            Ok(response) => {
-                debug!(
-                    "UPSTREAM_SERVER {} returned status: {}",
-                    file_url,
-                    response.status()
-                );
-            }
-            Err(e) => {
-                debug!("Failed to proxy to UPSTREAM_SERVER {}: {}", file_url, e);
-            }
-        }
-    }
-
-    // Priority 3: Fetch and try user servers (lazy fetch)
-    if let Some(pubkey) = author_pubkey {
-        debug!(
-            "Fetching user server list for proxying: {}",
-            pubkey.to_hex()
-        );
-        if let Ok(user_servers) =
-            crate::services::blossom_servers::fetch_user_server_list(state, pubkey).await
-        {
-            for server in &user_servers {
-                // Validate URL against SSRF before making request
-                let normalized_server = match validate_upstream_url(server).await {
-                    Ok(url) => url,
-                    Err(e) => {
-                        warn!(
-                            "User server URL validation failed (SSRF protection): {} - {}",
-                            server, e
-                        );
-                        continue;
-                    }
-                };
-
-                if tried_servers.contains(&normalized_server) {
-                    continue;
-                }
-                tried_servers.insert(normalized_server.clone());
-
-                let file_url = format!("{}/{}", normalized_server.trim_end_matches('/'), filename);
-                debug!("Proxying to user server: {}", file_url);
-
-                let request = client.get(&file_url);
-                let request = copy_headers_to_reqwest(headers, request);
-
-                match request.send().await {
-                    Ok(response) if response.status().is_success() => {
-                        debug!("Successfully proxied request to user server: {}", file_url);
-                        let content_type = extract_content_type_from_response(response.headers());
-                        return proxy_upstream_response(response, &content_type, filename).await;
-                    }
-                    Ok(response) => {
-                        debug!(
-                            "User server {} returned status: {}",
-                            file_url,
-                            response.status()
-                        );
-                    }
-                    Err(e) => {
-                        debug!("Failed to proxy to user server {}: {}", file_url, e);
-                    }
-                }
-            }
+            Ok(response) => debug!(
+                "{} {} returned status: {}",
+                candidate.tier.label(),
+                candidate.url,
+                response.status()
+            ),
+            Err(error) => warn!(
+                "Failed to proxy to {} {}: {error}",
+                candidate.tier.label(),
+                candidate.url
+            ),
         }
     }
 
