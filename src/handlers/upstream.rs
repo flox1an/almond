@@ -1624,9 +1624,11 @@ async fn run_download(
                 "upstream hash mismatch: requested {requested_hash}, received {sha256}"
             ));
         }
+        // The coalescing machinery owned this file while followers tailed it;
+        // publication is the point where ownership transfers to storage.
         let published = crate::services::file_storage::publish_blob(
             &state,
-            &temp_path,
+            crate::services::file_storage::TempBlob::adopt(temp_path.clone()),
             crate::services::file_storage::BlobPublication {
                 sha256: sha256.clone(),
                 origin: crate::models::BlobOrigin::UpstreamCache,

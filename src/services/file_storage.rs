@@ -104,16 +104,17 @@ async fn remove_physical_file(state: &AppState, metadata: &FileMetadata) -> AppR
 /// so a cleanup candidate or competing completion cannot delete a new copy.
 pub async fn publish_blob(
     state: &AppState,
-    temp_path: &Path,
+    temp: TempBlob,
     publication: BlobPublication,
 ) -> AppResult<Arc<FileMetadata>> {
+    let temp_path = temp.path().to_path_buf();
     validate_sha256_format(&publication.sha256)?;
     let _guard = state.blob_mutation_locks.lock(&publication.sha256).await;
 
     if let Some(existing) = state.file_index.get(&publication.sha256).await {
         if publication.origin == BlobOrigin::UpstreamCache || existing.origin == BlobOrigin::Upload
         {
-            remove_local_file(temp_path).await?;
+            // `temp` unlinks the redundant copy as it drops out of scope.
             return Ok(existing);
         }
     }
@@ -122,12 +123,14 @@ pub async fn publish_blob(
         if let Some(s3) = &state.native_s3 {
             let key = s3
                 .put(
-                    temp_path,
+                    &temp_path,
                     &publication.sha256,
                     publication.extension.as_deref(),
                     publication.expiration,
                 )
                 .await?;
+            // `put` consumes the temporary file on success.
+            temp.into_published();
             let metadata = publication.metadata(FileLocation::S3 { key });
             return publish_metadata(state, publication.sha256, metadata).await;
         }
@@ -153,13 +156,15 @@ pub async fn publish_blob(
     })? {
         remove_local_file(&final_path).await?;
     }
-    fs::rename(temp_path, &final_path).await.map_err(|error| {
+    fs::rename(&temp_path, &final_path).await.map_err(|error| {
         AppError::IoError(format!(
             "Failed to publish {} to {}: {error}",
             temp_path.display(),
             final_path.display()
         ))
     })?;
+    // The bytes now live at their final path; nothing is left to unlink.
+    temp.into_published();
 
     let sha256 = publication.sha256.clone();
     let metadata = publication.metadata(FileLocation::Local(final_path));
@@ -389,15 +394,79 @@ pub async fn mark_changes_pending(state: &AppState) {
     *state.changes_pending.write().await = true;
 }
 
-/// Create a temporary file path with an optional extension.
-#[must_use]
-pub fn create_temp_path(state: &AppState, prefix: &str, extension: Option<&str>) -> PathBuf {
-    let uuid = uuid::Uuid::new_v4();
-    let filename = extension.map_or_else(
-        || format!("{prefix}_{uuid}"),
-        |extension| format!("{prefix}_{uuid}.{extension}"),
-    );
-    state.storage.temp.join(filename)
+/// A temporary file that owns its own disposal.
+///
+/// A temp path used to be a bare `PathBuf` handed across every seam, so the
+/// rule for removing it was re-decided at each site — three `Drop` guards in
+/// one handler, nine hand-written unlinks elsewhere, and a `publish_blob` that
+/// deleted its caller's file on one branch but not the others. Owning the path
+/// states the rule once: whoever holds a `TempBlob` and lets it drop has
+/// removed the file, and the only way to keep the bytes is to publish them.
+///
+/// Disposal is a synchronous unlink because `Drop` cannot await. An unlink is
+/// a single fast syscall, and the alternative — leaking on every error path —
+/// is what this type exists to prevent.
+pub struct TempBlob {
+    /// `None` once the bytes have been moved somewhere permanent.
+    path: Option<PathBuf>,
+}
+
+impl TempBlob {
+    /// Reserve a temporary path under the storage temp root.
+    ///
+    /// The file itself is created by whoever streams into it; reserving only
+    /// fixes the name, so an intake that fails before writing still drops a
+    /// `TempBlob` that finds nothing to unlink.
+    #[must_use]
+    pub fn reserve(state: &AppState, prefix: &str, extension: Option<&str>) -> Self {
+        let uuid = uuid::Uuid::new_v4();
+        let filename = extension.map_or_else(
+            || format!("{prefix}_{uuid}"),
+            |extension| format!("{prefix}_{uuid}.{extension}"),
+        );
+        Self {
+            path: Some(state.storage.temp.join(filename)),
+        }
+    }
+
+    /// Take ownership of a file some other module created.
+    ///
+    /// Used by the upstream download path, where the coalescing machinery owns
+    /// the file while followers read it and only hands it over at publication.
+    #[must_use]
+    pub fn adopt(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    /// Where to write the bytes.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.path
+            .as_deref()
+            .expect("a TempBlob is only pathless after it has been published")
+    }
+
+    /// Give up ownership: the bytes moved somewhere permanent, so dropping
+    /// this value must not unlink them.
+    fn into_published(mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TempBlob {
+    fn drop(&mut self) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => warn!(
+                path = %path.display(),
+                "Failed to remove temporary blob: {error}"
+            ),
+        }
+    }
 }
 
 /// Ensure the temporary root exists.
@@ -458,4 +527,53 @@ pub fn validate_sha256_format(sha256: &str) -> AppResult<()> {
 #[must_use]
 pub fn extract_sha256_from_filename(filename: &str) -> Option<String> {
     Some(blob_name::parse(filename)?.hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "almond_temp_blob_{label}_{}",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    fn written_scratch(label: &str) -> PathBuf {
+        let path = scratch_path(label);
+        std::fs::write(&path, b"blob bytes").expect("scratch file is writable");
+        path
+    }
+
+    #[test]
+    fn dropping_a_temp_blob_unlinks_its_file() {
+        // Every intake error path depends on this: a partial blob must not
+        // survive the failure that abandoned it.
+        let path = written_scratch("dropped");
+        drop(TempBlob::adopt(path.clone()));
+        assert!(
+            !path.exists(),
+            "a dropped TempBlob must leave nothing behind"
+        );
+    }
+
+    #[test]
+    fn a_published_temp_blob_keeps_its_bytes() {
+        // Publication renames the file into place, so the disposal must not
+        // then unlink the blob that was just published.
+        let path = written_scratch("published");
+        TempBlob::adopt(path.clone()).into_published();
+        assert!(path.exists(), "published bytes must survive disposal");
+        std::fs::remove_file(&path).expect("cleanup");
+    }
+
+    #[test]
+    fn dropping_a_reserved_but_unwritten_temp_blob_is_harmless() {
+        // Reserving only fixes a name. An intake that fails before writing a
+        // single byte still drops a TempBlob, and that must not be an error.
+        let path = scratch_path("never_written");
+        drop(TempBlob::adopt(path.clone()));
+        assert!(!path.exists());
+    }
 }

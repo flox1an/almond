@@ -8,7 +8,7 @@ use axum::{
     response::Response,
 };
 use serde_json::Value;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::AppError;
 use crate::helpers::{
@@ -60,14 +60,13 @@ pub async fn upload_file(
 
     // Prepare temp file
     file_storage::ensure_temp_dir(&state).await?;
-    let temp_path = file_storage::create_temp_path(&state, "upload", None);
-    let _temp_guard = TempFileGuard::new(temp_path.clone());
+    let temp = file_storage::TempBlob::reserve(&state, "upload", None);
 
     // Stream to temp file and calculate hash.  The explicit accounting is
     // required even when a transport layer already rejects oversized bodies.
     let body_stream = req.into_body().into_data_stream();
     let (sha256, total_bytes) =
-        upload::stream_to_temp_file(body_stream, &temp_path, state.max_blob_size_bytes).await?;
+        upload::stream_to_temp_file(body_stream, temp.path(), state.max_blob_size_bytes).await?;
 
     // Validate authorization matches the hash (must come before payment check)
     auth::validate_upload_auth(&auth_event, &sha256)?;
@@ -78,7 +77,7 @@ pub async fn upload_file(
     // Finalize upload
     upload::finalize_upload(
         &state,
-        &temp_path,
+        temp,
         &sha256,
         total_bytes,
         extension.clone(),
@@ -177,14 +176,13 @@ pub async fn mirror_blob(
     // Prepare temp file
     file_storage::ensure_temp_dir(&state).await?;
     let extension = get_extension_from_mime(&content_type);
-    let temp_path = file_storage::create_temp_path(&state, "mirror", extension.as_deref());
-    let _temp_guard = TempFileGuard::new(temp_path.clone());
+    let temp = file_storage::TempBlob::reserve(&state, "mirror", extension.as_deref());
 
-    info!("💾 Streaming blob to temp file: {}", temp_path.display());
+    info!("💾 Streaming blob to temp file: {}", temp.path().display());
     // The body is still counted while streaming: Content-Length is only an
     // early rejection signal and cannot enlarge the accepted blob.
     let (calculated_sha256, body_size) =
-        upload::stream_response_to_temp_file(response, &temp_path, max_size_bytes).await?;
+        upload::stream_response_to_temp_file(response, temp.path(), max_size_bytes).await?;
 
     info!(
         "🔐 SHA256 verification: calculated {} vs expected {}",
@@ -204,7 +202,7 @@ pub async fn mirror_blob(
     // Finalize upload
     upload::finalize_upload(
         &state,
-        &temp_path,
+        temp,
         &expected_sha256,
         body_size,
         get_extension_from_mime(&content_type),
@@ -482,9 +480,7 @@ pub async fn patch_upload(
         if state.chunk_sessions.restore(&key, restored).await {
             let _ = tokio::fs::remove_file(&chunk_path).await;
         } else {
-            for chunk in &upload_data.chunks {
-                let _ = tokio::fs::remove_file(&chunk.chunk_path).await;
-            }
+            discard_chunk_files(&upload_data.chunks).await;
         }
         return Err(payment_error);
     }
@@ -541,9 +537,7 @@ async fn reconstruct_blob(
     let mut expected_offset = 0u64;
     for chunk in &chunks {
         if chunk.offset != expected_offset {
-            for chunk in &chunks {
-                let _ = tokio::fs::remove_file(&chunk.chunk_path).await;
-            }
+            discard_chunk_files(&chunks).await;
             return Err(AppError::BadRequest(
                 "Chunk coverage has a gap or overlap".to_string(),
             ));
@@ -553,19 +547,16 @@ async fn reconstruct_blob(
             .ok_or_else(|| AppError::BadRequest("Chunk length overflows".to_string()))?;
     }
     if expected_offset != chunk_upload.upload_length {
-        for chunk in &chunks {
-            let _ = tokio::fs::remove_file(&chunk.chunk_path).await;
-        }
+        discard_chunk_files(&chunks).await;
         return Err(AppError::BadRequest(
             "Chunks do not cover the declared upload length".to_string(),
         ));
     }
 
-    let temp_dir = file_storage::ensure_temp_dir(state).await?;
-    let temp_path = temp_dir.join(format!("reconstruct_{}", uuid::Uuid::new_v4()));
-    let _guard = TempFileGuard::new(temp_path.clone());
+    file_storage::ensure_temp_dir(state).await?;
+    let temp = file_storage::TempBlob::reserve(state, "reconstruct", None);
     let result = async {
-        let mut target = File::create(&temp_path).await.map_err(|error| {
+        let mut target = File::create(temp.path()).await.map_err(|error| {
             AppError::IoError(format!("Failed to create reconstruction file: {error}"))
         })?;
         let mut hasher = Sha256::new();
@@ -619,7 +610,7 @@ async fn reconstruct_blob(
         drop(target);
         upload::finalize_upload(
             state,
-            &temp_path,
+            temp,
             expected_sha256,
             total_written,
             get_extension_from_mime(&chunk_upload.upload_type),
@@ -635,33 +626,16 @@ async fn reconstruct_blob(
         ))
     }
     .await;
-    for chunk in &chunks {
-        let _ = tokio::fs::remove_file(&chunk.chunk_path).await;
-    }
+    discard_chunk_files(&chunks).await;
     result
 }
 
-/// Temp file guard for cleanup (keeps existing implementation)
-struct TempFileGuard {
-    path: std::path::PathBuf,
-}
-
-impl TempFileGuard {
-    fn new(path: std::path::PathBuf) -> Self {
-        Self { path }
-    }
-}
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if self.path.exists() {
-            if let Err(e) = std::fs::remove_file(&self.path) {
-                error!(
-                    "Failed to clean up temp file {}: {}",
-                    self.path.display(),
-                    e
-                );
-            }
-        }
+/// Remove the on-disk chunks of a resumable upload.
+///
+/// Written once: reconstruction discards them on three separate paths, and a
+/// missed one leaks a whole blob's worth of chunk files.
+async fn discard_chunk_files(chunks: &[crate::models::ChunkInfo]) {
+    for chunk in chunks {
+        let _ = tokio::fs::remove_file(&chunk.chunk_path).await;
     }
 }

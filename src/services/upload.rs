@@ -272,7 +272,7 @@ pub async fn stream_response_to_temp_file(
 /// Finalize an authorized upload or mirror as uploaded content.
 pub async fn finalize_upload(
     state: &AppState,
-    temp_path: &std::path::Path,
+    temp: file_storage::TempBlob,
     sha256: &str,
     size: u64,
     extension: Option<String>,
@@ -281,7 +281,7 @@ pub async fn finalize_upload(
 ) -> AppResult<()> {
     file_storage::publish_blob(
         state,
-        temp_path,
+        temp,
         file_storage::BlobPublication {
             sha256: sha256.to_owned(),
             origin: crate::models::BlobOrigin::Upload,

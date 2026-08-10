@@ -97,22 +97,19 @@ async fn mirror_single_reference(
     file_storage::ensure_temp_dir(state)
         .await
         .map_err(|error| format!("Failed to ensure temp dir: {error}"))?;
-    let temp_path = file_storage::create_temp_path(state, "hls_segment", extension.as_deref());
+    let temp = file_storage::TempBlob::reserve(state, "hls_segment", extension.as_deref());
+    // Every early return below drops `temp`, which unlinks the partial segment.
     let (calculated_sha256, body_size) =
-        match upload::stream_response_to_temp_file(response, &temp_path, max_size_bytes).await {
+        match upload::stream_response_to_temp_file(response, temp.path(), max_size_bytes).await {
             Ok(result) => result,
-            Err(error) => {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(format!("Failed to stream segment: {error}"));
-            }
+            Err(error) => return Err(format!("Failed to stream segment: {error}")),
         };
     if calculated_sha256 != reference.sha256 {
-        let _ = tokio::fs::remove_file(&temp_path).await;
         return Err(format!("SHA256 mismatch for segment {}", reference.sha256));
     }
     if let Err(error) = upload::finalize_upload(
         state,
-        &temp_path,
+        temp,
         &reference.sha256,
         body_size,
         extension,
@@ -121,7 +118,6 @@ async fn mirror_single_reference(
     )
     .await
     {
-        let _ = tokio::fs::remove_file(&temp_path).await;
         return Err(format!("Failed to finalize {}: {error}", reference.sha256));
     }
     Ok(true)
