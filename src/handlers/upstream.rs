@@ -30,7 +30,7 @@ use crate::models::{
 use crate::services::download::{
     claim_upstream_negotiation, NegotiationClaim, NegotiationGuard, PreparedDownload,
 };
-use crate::utils::{parse_range_header, RangeSpec};
+use crate::utils::{get_sha256_hash_from_filename, parse_range_header, RangeSpec};
 
 const SEEK_AHEAD_LIMIT: u64 = 8 * 1024 * 1024;
 const NEGOTIATION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -145,7 +145,7 @@ pub async fn try_upstream_servers(
 
     // Extract hash from filename for internal tracking (ongoing downloads, file index, etc.)
     // But use the full filename (with extension) for upstream URL construction
-    let file_hash = crate::utils::get_sha256_hash_from_filename(filename).unwrap_or(filename);
+    let file_hash = get_sha256_hash_from_filename(filename).unwrap_or(filename);
 
     if let Some(handle) = state.ongoing_downloads.read().await.get(file_hash).cloned() {
         if let Some(response) = serve_existing_download(&handle, filename, headers, method).await {
@@ -501,7 +501,7 @@ pub async fn try_upstream_redirect(
     cache_in_background: bool,
 ) -> Result<Response, StatusCode> {
     // Extract hash from filename for internal tracking
-    let file_hash = crate::utils::get_sha256_hash_from_filename(filename).unwrap_or(filename);
+    let file_hash = get_sha256_hash_from_filename(filename).unwrap_or(filename);
 
     // Check if this file is already being downloaded
     if state.ongoing_downloads.read().await.contains_key(file_hash) {
@@ -1555,7 +1555,7 @@ async fn run_download(
     state: AppState,
     file_url: String,
     upstream_resp: reqwest::Response,
-    _filename: String,
+    filename: String,
     mut prepared: PreparedDownload,
     count_as_served: bool,
 ) {
@@ -1615,6 +1615,12 @@ async fn run_download(
         }
 
         let sha256 = hex::encode(hasher.finalize());
+        let requested_hash = get_sha256_hash_from_filename(&filename).unwrap_or(&filename);
+        if sha256 != requested_hash {
+            return Err(format!(
+                "upstream hash mismatch: requested {requested_hash}, received {sha256}"
+            ));
+        }
         let published = crate::services::file_storage::publish_blob(
             &state,
             &temp_path,
