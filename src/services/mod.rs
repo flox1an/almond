@@ -10,4 +10,5 @@ pub mod native_storage;
 pub mod p2p;
 pub mod p2p_webrtc;
 pub mod serve_files;
+pub mod tail;
 pub mod upload;

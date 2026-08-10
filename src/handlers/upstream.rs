@@ -11,7 +11,7 @@ use serde_json::json;
 use sha2::Digest;
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
+    io::AsyncWriteExt,
     sync::watch,
 };
 use tracing::{debug, error, info, warn};
@@ -31,6 +31,7 @@ use crate::services::download::{
     claim_upstream_negotiation, NegotiationClaim, NegotiationGuard, PreparedDownload,
 };
 use crate::utils::{get_sha256_hash_from_filename, parse_range_header, RangeSpec};
+use crate::services::tail::create_tailing_stream;
 
 const SEEK_AHEAD_LIMIT: u64 = 8 * 1024 * 1024;
 const NEGOTIATION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1667,67 +1668,9 @@ async fn run_download(
             let _ = tokio::fs::remove_file(&temp_path).await;
             guard.finish(DownloadPhase::Failed).await;
         }
-    }
+}
 }
 
-/// Create a streaming response that reads from a growing file
-async fn create_tailing_stream(
-    mut reader: File,
-    mut progress: watch::Receiver<DownloadProgress>,
-    start: u64,
-    end: Option<u64>,
-) -> std::io::Result<impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>>> {
-    reader.seek(SeekFrom::Start(start)).await?;
-
-    Ok(async_stream::try_stream! {
-        let mut position = start;
-        loop {
-            let snapshot = *progress.borrow_and_update();
-            let available = end.unwrap_or(u64::MAX).min(snapshot.written);
-
-            if position < available {
-                let to_read = std::cmp::min(64 * 1024, (available - position) as usize);
-                let mut buffer = vec![0u8; to_read];
-                reader.read_exact(&mut buffer).await?;
-                position += to_read as u64;
-                yield bytes::Bytes::from(buffer);
-                continue;
-            }
-
-            if end.is_some_and(|limit| position >= limit) {
-                break;
-            }
-
-            match snapshot.phase {
-                DownloadPhase::Running => {
-                    progress.changed().await.map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::BrokenPipe,
-                            "download progress channel closed",
-                        )
-                    })?;
-                }
-                DownloadPhase::Complete => {
-                    if end.is_some_and(|limit| position < limit) {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "download completed before the requested range",
-                        ))?;
-                    }
-                    break;
-                }
-                DownloadPhase::Failed => {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "upstream download failed",
-                    ))?;
-                }
-            }
-        }
-    })
-}
-
-/// Apply streaming headers to an existing response
 fn apply_streaming_headers(
     mut response: Response<Body>,
     content_type: &str,
@@ -1777,7 +1720,6 @@ fn apply_streaming_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::{pin_mut, StreamExt};
     use tokio::io::AsyncWriteExt;
 
     async fn temp_download_file() -> (std::path::PathBuf, File, File) {
@@ -1787,109 +1729,6 @@ mod tests {
         (path, writer, reader)
     }
 
-    #[tokio::test]
-    async fn tailing_stream_joins_mid_download_and_terminates() {
-        let (path, mut writer, reader) = temp_download_file().await;
-        let (progress, receiver) = watch::channel(DownloadProgress {
-            written: 0,
-            phase: DownloadPhase::Running,
-        });
-        let stream = create_tailing_stream(reader, receiver, 0, None)
-            .await
-            .unwrap();
-        pin_mut!(stream);
-
-        writer.write_all(b"hello").await.unwrap();
-        writer.flush().await.unwrap();
-        progress.send_modify(|state| state.written = 5);
-        assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            bytes::Bytes::from_static(b"hello")
-        );
-
-        writer.write_all(b" world").await.unwrap();
-        writer.flush().await.unwrap();
-        progress.send_modify(|state| {
-            state.written = 11;
-            state.phase = DownloadPhase::Complete;
-        });
-        assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            bytes::Bytes::from_static(b" world")
-        );
-        assert!(stream.next().await.is_none());
-        tokio::fs::remove_file(path).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn tailing_stream_reports_download_failure() {
-        let (path, mut writer, reader) = temp_download_file().await;
-        let (progress, receiver) = watch::channel(DownloadProgress {
-            written: 0,
-            phase: DownloadPhase::Running,
-        });
-        let stream = create_tailing_stream(reader, receiver, 0, None)
-            .await
-            .unwrap();
-        pin_mut!(stream);
-
-        writer.write_all(b"abc").await.unwrap();
-        writer.flush().await.unwrap();
-        progress.send_modify(|state| state.written = 3);
-        assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            bytes::Bytes::from_static(b"abc")
-        );
-        progress.send_modify(|state| state.phase = DownloadPhase::Failed);
-        let error = stream.next().await.unwrap().unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
-        tokio::fs::remove_file(path).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn tailing_stream_respects_requested_bounds() {
-        let (path, mut writer, reader) = temp_download_file().await;
-        writer.write_all(b"abcdefgh").await.unwrap();
-        writer.flush().await.unwrap();
-        let (_, receiver) = watch::channel(DownloadProgress {
-            written: 8,
-            phase: DownloadPhase::Complete,
-        });
-        let stream = create_tailing_stream(reader, receiver, 2, Some(6))
-            .await
-            .unwrap();
-        pin_mut!(stream);
-
-        assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            bytes::Bytes::from_static(b"cdef")
-        );
-        assert!(stream.next().await.is_none());
-        tokio::fs::remove_file(path).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn tailing_stream_rejects_truncated_completed_range() {
-        let (path, mut writer, reader) = temp_download_file().await;
-        writer.write_all(b"abc").await.unwrap();
-        writer.flush().await.unwrap();
-        let (_, receiver) = watch::channel(DownloadProgress {
-            written: 3,
-            phase: DownloadPhase::Complete,
-        });
-        let stream = create_tailing_stream(reader, receiver, 0, Some(5))
-            .await
-            .unwrap();
-        pin_mut!(stream);
-
-        assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            bytes::Bytes::from_static(b"abc")
-        );
-        let error = stream.next().await.unwrap().unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
-        tokio::fs::remove_file(path).await.unwrap();
-    }
     #[tokio::test]
     async fn non_range_follower_streams_from_existing_download() {
         let (path, mut writer, _) = temp_download_file().await;
