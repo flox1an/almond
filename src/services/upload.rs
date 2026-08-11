@@ -52,6 +52,36 @@ pub fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// True for hostnames served by the FIPS overlay's own resolver.
+///
+/// Matches on the label boundary, so `evil-fips.example.com` is not a `.fips`
+/// host — only a name whose final label is `fips`.
+fn is_fips_hostname(host: &str) -> bool {
+    host.trim_end_matches('.')
+        .to_ascii_lowercase()
+        .ends_with(".fips")
+}
+
+/// True for `fd00::/8`, the range the FIPS overlay assigns.
+///
+/// Narrower than "unique local": `fc00::/8` is excluded, so an ordinary ULA
+/// address does not qualify.
+fn is_fips_overlay_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(_) => false,
+        IpAddr::V6(ipv6) => ipv6.segments()[0] & 0xff00 == 0xfd00,
+    }
+}
+
+/// The one exemption to the private-address rule: a `.fips` hostname that
+/// resolves into the FIPS overlay.
+///
+/// Both halves are required, so neither a public name pointing into overlay
+/// space nor a `.fips` name pointing at ordinary private space is accepted.
+fn is_allowed_private_upstream_ip(host: &str, ip: IpAddr) -> bool {
+    is_fips_hostname(host) && is_fips_overlay_ip(ip)
+}
+
 struct ResolvedTarget {
     url: reqwest::Url,
     host: String,
@@ -64,15 +94,19 @@ struct ResolvedTarget {
 async fn resolve_public_target(url: &str) -> AppResult<ResolvedTarget> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|_| AppError::BadRequest("Invalid URL format".to_string()))?;
-    if parsed.scheme() != "https" {
-        return Err(AppError::BadRequest(
-            "Only HTTPS URLs are allowed".to_string(),
-        ));
-    }
     let host = parsed
         .host_str()
         .ok_or_else(|| AppError::BadRequest("URL has no hostname".to_string()))?
         .to_owned();
+
+    // HTTPS everywhere, except inside the FIPS overlay: the mesh already
+    // provides transport encryption, and its nodes serve plain HTTP.
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_fips_hostname(&host)) {
+        return Err(AppError::BadRequest(
+            "Only HTTPS URLs are allowed".to_string(),
+        ));
+    }
+
     let port = parsed.port_or_known_default().unwrap_or(443);
     let addresses = tokio::time::timeout(
         Duration::from_secs(DNS_LOOKUP_TIMEOUT_SECS),
@@ -81,7 +115,9 @@ async fn resolve_public_target(url: &str) -> AppResult<ResolvedTarget> {
     .await
     .map_err(|_| AppError::Timeout(format!("DNS resolution timeout for {host}")))?
     .map_err(|_| AppError::BadRequest(format!("DNS resolution failed for {host}")))?
-    .filter(|address| !is_private_ip(address.ip()))
+    .filter(|address| {
+        !is_private_ip(address.ip()) || is_allowed_private_upstream_ip(&host, address.ip())
+    })
     .collect::<Vec<_>>();
     if addresses.is_empty() {
         return Err(AppError::BadRequest(
@@ -374,6 +410,62 @@ pub fn check_size_limit(content_length: Option<u64>, max_size_bytes: u64) -> App
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn fips_hostnames_match_only_on_the_final_label() {
+        assert!(is_fips_hostname("npub123.fips"));
+        assert!(is_fips_hostname("NPUB123.FIPS."));
+        assert!(!is_fips_hostname("example.com"));
+        // A public host merely containing "fips" must not be exempt.
+        assert!(!is_fips_hostname("evil-fips.example.com"));
+    }
+
+    #[test]
+    fn only_fd00_counts_as_overlay_space() {
+        assert!(is_fips_overlay_ip(IpAddr::V6(Ipv6Addr::new(
+            0xfd00, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        assert!(is_fips_overlay_ip(IpAddr::V6(Ipv6Addr::new(
+            0xfdff, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        assert!(!is_fips_overlay_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        // fc00::/8 is unique-local but not the overlay.
+        assert!(!is_fips_overlay_ip(IpAddr::V6(Ipv6Addr::new(
+            0xfc00, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        assert!(!is_fips_overlay_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+    }
+
+    #[test]
+    fn the_private_address_exemption_needs_both_halves() {
+        let overlay = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1));
+        let ordinary_ula = IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1));
+        let private_v4 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+        assert!(is_allowed_private_upstream_ip("npub123.fips", overlay));
+        // A public name resolving into overlay space stays rejected, so an
+        // attacker-supplied ?xs= host cannot reach the mesh.
+        assert!(!is_allowed_private_upstream_ip("example.com", overlay));
+        // A .fips name pointing at ordinary private space stays rejected.
+        assert!(!is_allowed_private_upstream_ip(
+            "npub123.fips",
+            ordinary_ula
+        ));
+        assert!(!is_allowed_private_upstream_ip("npub123.fips", private_v4));
+    }
+
+    #[tokio::test]
+    async fn plaintext_http_is_refused_outside_the_overlay() {
+        // The scheme exemption is what unblocks the FIPS mesh; it must not
+        // unblock the public internet.
+        let Err(error) = resolve_public_target("http://example.com/blob").await else {
+            panic!("plain HTTP to a public host must be refused");
+        };
+        assert!(
+            error.to_string().contains("Only HTTPS URLs are allowed"),
+            "unexpected error: {error}"
+        );
+    }
 
     #[test]
     fn non_public_ipv4_ranges_are_rejected() {
