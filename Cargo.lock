@@ -105,14 +105,13 @@ dependencies = [
  "cdk-sqlite",
  "chrono",
  "dotenvy",
- "fs2",
+ "fs4",
  "futures-util",
  "hashtree-core",
  "hashtree-webrtc",
  "hex",
  "mimalloc",
  "mime_guess",
- "nostr 0.44.8",
  "nostr-relay-pool 0.44.3",
  "nostr-sdk",
  "prometheus",
@@ -123,7 +122,6 @@ dependencies = [
  "rmp",
  "rmp-serde",
  "rustls 0.23.43",
- "rustls-pemfile",
  "serde",
  "serde_html_form 0.4.1",
  "serde_json",
@@ -2247,13 +2245,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs2"
-version = "0.4.3"
+name = "fs4"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
 dependencies = [
- "libc",
- "winapi",
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3290,6 +3288,12 @@ checksum = "c77c676d4a34cceb2ae3756916e446b4d17f9430a24107e099981f0f9aec77e6"
 dependencies = [
  "bitcoin",
 ]
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "litemap"
@@ -4484,6 +4488,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustix"
+version = "1.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+dependencies = [
+ "bitflags 2.13.1",
+ "errno",
+ "libc",
+ "linux-raw-sys",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rustls"
 version = "0.21.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4521,15 +4538,6 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]

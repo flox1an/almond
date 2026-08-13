@@ -195,7 +195,7 @@ impl Metrics {
         self.max_age.set(max_file_age_days as i64);
 
         // Calculate and update free disk space
-        let free_disk_space_bytes = match fs2::free_space(upload_dir) {
+        let free_disk_space_bytes = match fs4::free_space(upload_dir) {
             Ok(free) => free,
             Err(e) => {
                 warn!("Failed to get free disk space: {}", e);

@@ -538,7 +538,7 @@ pub async fn ensure_storage_capacity(state: &AppState, bytes: u64) -> AppResult<
         ));
     }
 
-    let available = fs2::available_space(&state.storage.root).map_err(|error| {
+    let available = fs4::available_space(&state.storage.root).map_err(|error| {
         AppError::IoError(format!("Failed to inspect available disk space: {error}"))
     })?;
     if available < state.min_free_disk_bytes.saturating_add(bytes) {
