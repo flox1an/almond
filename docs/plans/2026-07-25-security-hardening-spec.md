@@ -1,388 +1,376 @@
 # Security Hardening Specification
 
 **Status:** Audit result; implementation not started  
-**Datum:** 2026-07-25  
-**Geltung:** HTTP-API, Blob-Speicher, Upstream-/Mirror-Pfade, Chunked Uploads, Authentisierung, Cashu und Deployment
+**Date:** 2026-07-25  
+**Scope:** HTTP API, blob storage, upstream/mirror paths, chunked uploads, authentication, Cashu and deployment
 
-## Ziel
+## Goal
 
-Almond muss bei einer öffentlich erreichbaren Instanz weder durch einzelne HTTP-Anfragen
-noch durch günstige Request-Schleifen in einen fehlerhaften, erschöpften oder destruktiven
-Zustand gebracht werden können. Insbesondere dürfen unregistrierte Angreifer weder:
+Almond's publicly reachable instance must not be brought into an erroneous, exhausted or
+destructive state either by individual HTTP requests or by cheap request loops. In
+particular, unregistered attackers must not:
 
-- RAM, Disk, Inodes, File Descriptors oder CPU unbegrenzt beanspruchen;
-- interne Dienste über Mirror-/Upstream-Fetches erreichen;
-- fremde Uploads blockieren oder destruktive Aktionen auslösen;
-- eine aktivierte Zahlungsfunktion umgehen;
-- sensible Betriebs- und lokale Metadaten aus Browser-Kontexten auslesen.
+- consume RAM, disk, inodes, file descriptors or CPU without bound;
+- reach internal services via mirror/upstream fetches;
+- block other users' uploads or trigger destructive actions;
+- bypass an enabled payment feature;
+- read sensitive operational and local metadata from browser contexts.
 
-## Ausgangslage und Bedrohungsmodell
+## Baseline and threat model
 
-Die derzeitige Default-Konfiguration ist funktional öffentlich:
+The current default configuration is functionally public:
 
 - `FEATURE_UPLOAD_ENABLED=public`;
 - `FEATURE_MIRROR_ENABLED=public`;
-- `ALLOWED_NPUBS` ist leer;
-- das Docker-Image bindet an `0.0.0.0:3000`.
+- `ALLOWED_NPUBS` is empty;
+- the Docker image binds to `0.0.0.0:3000`.
 
-Im `public`-Modus ist eine gültige Nostr-Signatur erforderlich, aber jeder Angreifer kann
-ein eigenes Schlüsselpaar erzeugen. In dieser Spezifikation bedeutet **nicht registrierter
-Angreifer** deshalb: ein Client mit selbst erzeugtem, gültig signiertem Nostr-Event.
+In `public` mode a valid Nostr signature is required, but any attacker can generate
+their own key pair. In this specification **unregistered attacker** therefore means: a
+client with a self-generated, validly signed Nostr event.
 
-Die Befunde sind eine quellcodebasierte Analyse. Abhängig von Feature-Flags markierte
-Befunde gelten nur, wenn das jeweilige Feature aktiviert wurde. Ein dynamischer
-Penetrationstest gegen eine laufende Produktionsinstanz war nicht Teil dieser Analyse.
+The findings are a source-code-based analysis. Findings marked as dependent on feature
+flags apply only if the respective feature has been activated. A dynamic penetration
+test against a running production instance was not part of this analysis.
 
-## Schutzinvarianten
+## Protection invariants
 
-1. Jede eingehende Anfrage hat eine transportseitig wirksame, endpointgerechte
-   Body-Obergrenze. Streaming-Code erzwingt dieselbe Grenze selbst.
-2. Temporäre Dateien und unvollständige Uploads sind vollständig quota-kontiert,
-   begrenzt und auf allen Fehlerpfaden löschbar.
-3. Kein URL-Fetch darf nach DNS-Auflösung oder Redirect ein privates, lokales,
-   link-lokales oder anderweitig nicht öffentlich routbares Ziel erreichen.
-4. Chunked Uploads gehören genau einem Pubkey; ein anderer Pubkey kann ihren
-   Zustand weder verändern noch blockieren.
-5. Öffentliche Read-/Discovery-Endpunkte haben eine begrenzte Rechen- und
-   Speicherkomplexität pro Anfrage.
-6. Destruktive Operationen benötigen mindestens dieselbe Autorisierungsstufe wie
+1. Every incoming request has a transport-effective, endpoint-appropriate body limit.
+   Streaming code enforces the same limit itself.
+2. Temporary files and incomplete uploads are fully quota-accounted, bounded and
+   deletable on all error paths.
+3. No URL fetch may reach a private, local, link-local or otherwise non-publicly
+   routable destination after DNS resolution or redirect.
+4. Chunked uploads belong to exactly one pubkey; another pubkey can neither modify nor
+   block their state.
+5. Public read/discovery endpoints have bounded computational and memory complexity per
+   request.
+6. Destructive operations require at least the same authorization level as
    `DELETE /:filename`.
-7. Aktivierte Bezahlpfade erlauben keine Arbeit oder Persistierung oberhalb der
-   bezahlten Größe.
-8. Infrastruktur- und Diagnoseendpunkte sind nicht unkontrolliert im öffentlichen
-   Browser-Kontext lesbar.
+7. Enabled payment paths do not permit work or persistence above the paid size.
+8. Infrastructure and diagnostic endpoints are not uncontrollably readable from a public
+   browser context.
 
-## Priorität 0 — vor öffentlichem Betrieb beheben
+## Priority 0 — fix before public operation
 
-### P0-1: Reales Request-Body-Limit erzwingen
+### P0-1: Enforce a real request body limit
 
-**Befund:** `DefaultBodyLimit` in `src/main.rs:126-129` wirkt nur für Extractors, die
-es anwenden. `upload_file`, `mirror_blob` und `patch_upload` nehmen dagegen
-`Request<Body>` und konsumieren `req.into_body()` direkt (`src/handlers/upload.rs:101`,
+**Finding:** `DefaultBodyLimit` in `src/main.rs:126-129` only affects extractors that
+apply it. `upload_file`, `mirror_blob` and `patch_upload` on the other hand take
+`Request<Body>` and consume `req.into_body()` directly (`src/handlers/upload.rs:101`,
 `:177`, `:436`).
 
-`stream_to_temp_file` (`src/services/upload.rs:184-235`) schreibt ohne eigene
-Größenprüfung. Ein endloser `PUT /upload` kann deshalb die Partition über
-`files/temp/upload_<uuid>` füllen. Die Hash-Autorisierung erfolgt erst nach dem
-Streaming.
+`stream_to_temp_file` (`src/services/upload.rs:184-235`) writes without its own size
+check. An endless `PUT /upload` can therefore fill the partition via
+`files/temp/upload_<uuid>`. Hash authorization only happens after streaming.
 
-**Anforderung:**
+**Requirement:**
 
-- Einen transportseitig wirkenden `RequestBodyLimitLayer` einsetzen.
-- Für `/mirror` ein separates, kleines Limit verwenden; der JSON-Body darf maximal
-  64 KiB groß sein.
-- `stream_to_temp_file` muss `max_bytes` erhalten, geschriebene Bytes zählen und
-  beim Überschreiten mit `PayloadTooLarge` abbrechen.
-- Eine maximale Gesamtblobgröße als Konfiguration einführen und im regulären sowie
-  Chunked-Upload-Pfad erzwingen.
-- Vor dem Schreiben eine konfigurierbare freie-Disk-Reserve prüfen; der Check ergänzt,
-  ersetzt aber nicht die Byte-Grenze.
+- Deploy a transport-effective `RequestBodyLimitLayer`.
+- Use a separate, small limit for `/mirror`; the JSON body may be at most 64 KiB.
+- `stream_to_temp_file` must receive `max_bytes`, count written bytes and abort with
+  `PayloadTooLarge` on exceedance.
+- Introduce a maximum total blob size as configuration and enforce it in the regular as
+  well as the chunked upload path.
+- Check a configurable free-disk reserve before writing; the check complements but does
+  not replace the byte limit.
 
-**Akzeptanzkriterien:**
+**Acceptance criteria:**
 
-- Ein Chunked-Transfer über dem Endpoint-Limit erhält `413`; der Temp-Dateipfad
-  existiert danach nicht mehr.
-- Eine unendliche oder sehr langsame Upload-Verbindung kann weder mehr als das Limit
-  schreiben noch dauerhaft einen Temp-Dateideskriptor blockieren.
-- Das Ergebnis gilt auch für Handler, die `Request<Body>` verwenden.
+- A chunked transfer over the endpoint limit receives `413`; the temp file path no
+  longer exists afterwards.
+- An infinite or very slow upload connection can neither write more than the limit nor
+  permanently hold a temp file descriptor.
+- The result also applies to handlers that use `Request<Body>`.
 
-### P0-2: Unbegrenztes Mirror-Buffering entfernen
+### P0-2: Remove unbounded mirror buffering
 
-**Befund:** `mirror_blob` nutzt `axum::body::to_bytes(req.into_body(), usize::MAX)`
-(`src/handlers/upload.rs:177-179`). Ein großer, Chunked Request wird vollständig in den
-Heap gelesen, obwohl nur `{"url":"..."}` erwartet wird.
+**Finding:** `mirror_blob` uses `axum::body::to_bytes(req.into_body(), usize::MAX)`
+(`src/handlers/upload.rs:177-179`). A large, chunked request is read fully into the heap
+even though only `{"url":"..."}` is expected.
 
-**Anforderung:**
+**Requirement:**
 
-- Den Mirror-Body auf 64 KiB begrenzen oder einen begrenzten `Json`-Extractor nutzen.
-- Ein Überschreiten muss ein `413 Payload Too Large` sein.
-- Fehlerdetails des Parsers dürfen nicht den vollständigen, fremdgesteuerten Body loggen.
+- Limit the mirror body to 64 KiB or use a bounded `Json` extractor.
+- Exceedance must be `413 Payload Too Large`.
+- Parser error details must not log the full, attacker-controlled body.
 
-**Akzeptanzkriterium:** Ein mehrgigabytegroßer bzw. endloser Body für `PUT /mirror`
-belegt nicht mehr als das Endpoint-Limit im Heap und beendet den Prozess nicht.
+**Acceptance criterion:** A multi-gigabyte or endless body for `PUT /mirror` does not
+consume more than the endpoint limit in the heap and does not terminate the process.
 
-### P0-3: SSRF über Redirects und Rebinding schließen
+### P0-3: Close SSRF via redirects and rebinding
 
-**Befund:** `validate_url_for_ssrf` validiert nur die initiale URL
-(`src/services/upload.rs:53-135`). Die Clients folgen Redirects bis zu fünfmal
-(`src/services/upload.rs:137-151`, `:153-181`), ohne das Redirect-Ziel erneut zu
-validieren. Damit kann eine öffentliche HTTPS-Quelle auf ein internes Ziel umleiten.
-Die initiale Auflösung und die spätere Client-Verbindung sind zudem nicht an dieselbe IP
-gebunden.
+**Finding:** `validate_url_for_ssrf` only validates the initial URL
+(`src/services/upload.rs:53-135`). The clients follow redirects up to five times
+(`src/services/upload.rs:137-151`, `:153-181`) without re-validating the redirect
+target. Thus a public HTTPS source can redirect to an internal target. Furthermore the
+initial resolution and the subsequent client connection are not pinned to the same IP.
 
-**Anforderung:**
+**Requirement:**
 
-- Für alle SSRF-sensitiven Fetches Redirects standardmäßig deaktivieren.
-- Falls Redirects benötigt werden: jeden Hop maximal einmal parsen, normalisieren,
-  DNS-auflösen, gegen dieselbe Policy validieren und die Zahl der Hops klein begrenzen.
-- Die verwendete Verbindung muss auf eine zuvor validierte öffentliche IP gepinnt sein;
-  eine reine Vorabauflösung ist nicht ausreichend.
-- Die IP-Policy muss IPv4, IPv6, IPv4-mapped IPv6, Loopback, Unspecified,
-  Link-Local, RFC1918, Carrier-Grade NAT und weitere nicht öffentliche Reserven
-  fail-closed behandeln.
-- DNS-Timeouts dürfen nicht den gemeinsamen Tokio-Blocking-Pool erschöpfen.
-  Einen asynchronen Resolver oder einen strikt separierten, begrenzten DNS-Pool einsetzen.
+- Disable redirects by default for all SSRF-sensitive fetches.
+- If redirects are needed: parse, normalize, resolve DNS, validate against the same
+  policy each hop at most once, and keep the hop count small.
+- The connection used must be pinned to a previously validated public IP; a pure upfront
+  resolution is not sufficient.
+- The IP policy must handle IPv4, IPv6, IPv4-mapped IPv6, loopback, unspecified,
+  link-local, RFC1918, carrier-grade NAT and other non-public reserves in a fail-closed
+  manner.
+- DNS timeouts must not exhaust the shared Tokio blocking pool. Use an asynchronous
+  resolver or a strictly separated, bounded DNS pool.
 
-**Akzeptanzkriterien:**
+**Acceptance criteria:**
 
-- Eine öffentliche HTTPS-URL mit Redirect auf `127.0.0.1`, `::1`, eine IPv4-mapped
-  Loopback-Adresse, `169.254.169.254` oder eine RFC1918-Adresse wird nicht angefragt.
-- Ein Hostname, der nach erfolgreicher Validierung die IP wechselt, erreicht keine
-  private Zieladresse.
-- Viele absichtlich verzögerte DNS-Auflösungen blockieren keine Blob-Lese- oder
-  Schreiboperationen.
+- A public HTTPS URL with a redirect to `127.0.0.1`, `::1`, an IPv4-mapped loopback
+  address, `169.254.169.254` or an RFC1918 address is not requested.
+- A hostname that changes its IP after successful validation does not reach a private
+  target address.
+- Many deliberately delayed DNS resolutions do not block blob read or write operations.
 
-### P0-4: Öffentlichen Report nicht destruktiv machen
+### P0-4: Do not make public report destructive
 
-**Befund:** Bei `FEATURE_REPORT_ENABLED=public` akzeptiert `PUT /report` jedes gültig
-selbstsignierte Kind-1984-Event (`src/handlers/report.rs:112-127`). Mit
-`REPORT_ACTION=delete` bzw. `quarantine` können beliebige bekannte Blob-Hashes gelöscht
-oder unbrauchbar gemacht werden (`:196-224`).
+**Finding:** With `FEATURE_REPORT_ENABLED=public` `PUT /report` accepts any validly
+self-signed kind-1984 event (`src/handlers/report.rs:112-127`). With
+`REPORT_ACTION=delete` or `quarantine` any known blob hash can be deleted or made
+unusable (`:196-224`).
 
-**Anforderung:**
+**Requirement:**
 
-- `public` darf für Reports keine direkte Dateiaktion auslösen.
-- Direkte Löschung verlangt mindestens die bestehende Strict-Whitelist-Autorisierung.
-- Quarantäne durch Reports muss entweder ebenfalls streng autorisiert oder als
-  moderationsbedürftige, nicht-destruktive Meldung persistiert werden.
-- Report-Events benötigen eine kurze, geprüfte Gültigkeit und Replay-Schutz.
+- `public` must not trigger a direct file action for reports.
+- Direct deletion requires at least the existing strict whitelist authorization.
+- Quarantine via reports must either also be strictly authorized or be persisted as a
+  moderation-requiring, non-destructive notice.
+- Report events need a short, verified validity and replay protection.
 
-**Akzeptanzkriterium:** Ein selbstsigniertes Public-Report-Event kann keinen fremden
-Blob löschen, verschieben oder aus dem Index entfernen.
+**Acceptance criterion:** A self-signed public report event cannot delete, move or
+remove another user's blob from the index.
 
-## Priorität 1 — Verfügbarkeit und Integrität
+## Priority 1 — Availability and integrity
 
-### P1-1: Chunked Uploads begrenzen und an Eigentümer binden
+### P1-1: Bound chunked uploads and bind them to an owner
 
-**Befunde:**
+**Findings:**
 
-- `X-SHA-256` wird in `PATCH /upload` nicht auf exakt 64 lowercase Hex-Zeichen
-  geprüft (`src/handlers/upload.rs:327-330`). Der Wert fließt als Map-Key und in
-  Chunk-Dateinamen (`:423-429`, `:479-492`).
-- `chunk_uploads` ist allein durch den Hash indiziert (`src/models.rs:297`), nicht
-  durch den authentisierten Pubkey.
-- `Upload-Length` besitzt keine Obergrenze.
-- `upload_offset + content_length` kann überlaufen (`src/handlers/upload.rs:405-411`).
-- Die Map hat keine Kapazitätsgrenze. Leere Chunks verursachen dennoch Dateien und
-  `sync_all()`.
-- Der globale Write-Lock bleibt während eines Cashu-`await` gehalten
+- `X-SHA-256` is not checked for exactly 64 lowercase hex characters in `PATCH /upload`
+  (`src/handlers/upload.rs:327-330`). The value flows into a map key and into chunk file
+  names (`:423-429`, `:479-492`).
+- `chunk_uploads` is indexed solely by hash (`src/models.rs:297`), not by the
+  authenticated pubkey.
+- `Upload-Length` has no upper bound.
+- `upload_offset + content_length` can overflow (`src/handlers/upload.rs:405-411`).
+- The map has no capacity limit. Empty chunks still create files and `sync_all()`.
+- The global write lock is held during a Cashu `await`
   (`src/handlers/upload.rs:479-561`).
-- Parallele Abschlussrequests können denselben Upload gleichzeitig rekonstruieren;
-  Fehlerpfade hinterlassen dabei `reconstruct_*`-Tempdateien.
+- Parallel completion requests can reconstruct the same upload simultaneously; error
+  paths leave `reconstruct_*` temp files behind.
 
-**Anforderung:**
+**Requirement:**
 
-- Direkt nach dem Header-Parsing `file_storage::validate_sha256_format` anwenden und
-  ausschließlich lowercase akzeptieren.
-- Upload-Zustand mit `(PublicKey, sha256)` statt nur `sha256` indizieren.
-- Maximale Anzahl paralleler Sessions global, pro Pubkey und pro Quell-IP festlegen.
-- `Upload-Length` gegen die neue maximale Blobgröße prüfen.
-- Für Offset plus Länge `checked_add` verwenden.
-- Abschluss atomar beanspruchen: Upload-State unter Lock aus der Map entfernen oder in
-  einen nicht erneut abschließbaren Zustand überführen, bevor Rekonstruktion beginnt.
-- Kein Netzwerk-I/O unter gehaltenem `chunk_uploads`-Lock.
-- Chunk-Dateien bei jedem Fehler löschen; Rekonstruktionsdateien per RAII-Guard
-  sichern und den Cleanup auf `files/temp/` ausweiten.
-- `sync_all()` nicht für jeden leeren oder winzigen Chunk erzwingen; ein definierter,
-  dokumentierter Durability-Punkt genügt.
+- Apply `file_storage::validate_sha256_format` immediately after header parsing and
+  accept only lowercase.
+- Index upload state by `(PublicKey, sha256)` instead of `sha256` alone.
+- Set a maximum number of parallel sessions globally, per pubkey and per source IP.
+- Check `Upload-Length` against the new maximum blob size.
+- Use `checked_add` for offset plus length.
+- Claim completion atomically: remove the upload state from the map under lock or
+  transition it into a state that cannot be completed again, before reconstruction
+  begins.
+- No network I/O while holding the `chunk_uploads` lock.
+- Delete chunk files on every error; secure reconstruction files via RAII guard and
+  extend cleanup to `files/temp/`.
+- Do not force `sync_all()` for every empty or tiny chunk; one defined, documented
+  durability point suffices.
 
-**Akzeptanzkriterien:**
+**Acceptance criteria:**
 
-- Ein anderer Pubkey kann einen Upload mit demselben Hash nicht blockieren oder
-  verändern.
-- Viele 0-Byte-PATCH-Requests führen weder zu unbegrenzten Map-Einträgen noch zu
-  unkontrolliertem Inode-Verbrauch.
-- Zwei parallele Abschlussversuche erzeugen genau eine Rekonstruktion und keine
-  verbleibende `reconstruct_*`-Datei.
-- Überlaufende Headerwerte liefern `400`, nie Panic oder State-Mutation.
+- Another pubkey cannot block or modify an upload with the same hash.
+- Many 0-byte PATCH requests lead neither to unbounded map entries nor to uncontrolled
+  inode consumption.
+- Two parallel completion attempts produce exactly one reconstruction and no remaining
+  `reconstruct_*` file.
+- Overflowing header values yield `400`, never a panic or state mutation.
 
-### P1-2: Öffentliche Index- und Filter-Endpunkte skalierbar machen
+### P1-2: Make public index and filter endpoints scalable
 
-**Befunde:**
+**Findings:**
 
-- `/list` klont und sortiert den vollständigen Index vor der Pagination
+- `/list` clones and sorts the entire index before pagination
   (`src/handlers/list.rs:263-296`, `src/services/blob_index.rs:131-140`).
-- `/filter` akzeptiert beliebig viele `fp`-Werte als Cache-Key; bei Binary-Fuse ist
-  der Wert nicht einmal ausgaberelevant, erzwingt aber Neubau.
-- `/_wot` baut für jeden Request einen Bloom-Filter neu; `fp=NaN` führt zu einem
-  Bloomfilter-Assert (`src/handlers/wot.rs:28-37`).
-- `failed_upstream_lookups` ist eine stundenlang lebende, kapazitätslose Map
+- `/filter` accepts arbitrarily many `fp` values as cache key; with Binary-Fuse the
+  value is not even relevant to the output but forces a rebuild.
+- `/_wot` rebuilds a Bloom filter for each request; `fp=NaN` causes a Bloom filter
+  assert (`src/handlers/wot.rs:28-37`).
+- `failed_upstream_lookups` is a capacity-less map that lives for hours
   (`src/handlers/file_serving.rs:330-336`, `src/utils.rs:437-444`).
 
-**Anforderung:**
+**Requirement:**
 
-- `BlobIndex` muss eine paginierbare, nach `(created_at, sha256)` sortierte Sicht
-  bieten, die höchstens die angeforderte Seitengröße klont.
-- `/filter` muss `fp` für Binary-Fuse aus dem Cache-Key entfernen; Filterneubau
-  single-flight ausführen und FP-Werte diskret begrenzen.
-- `/_wot` muss nicht-endliche FP-Werte mit `400` ablehnen, nur feste FP-Stufen
-  zulassen und Ergebnisse generationsbasiert cachen.
-- Negative Lookups in einer kapazitätsbegrenzten LRU halten oder bei fehlenden
-  Upstreams vollständig deaktivieren.
-- Alle rechenintensiven öffentlichen Endpunkte erhalten Request- und Rate-Limits.
+- `BlobIndex` must provide a paginated view sorted by `(created_at, sha256)` that clones
+  at most the requested page size.
+- `/filter` must remove `fp` from the cache key for Binary-Fuse; single-flight filter
+  rebuilds and discretely bound FP values.
+- `/_wot` must reject non-finite FP values with `400`, allow only fixed FP tiers and
+  cache results generationally.
+- Keep negative lookups in a capacity-bounded LRU or disable them entirely when
+  upstreams are absent.
+- All compute-intensive public endpoints receive request and rate limits.
 
-**Akzeptanzkriterien:**
+**Acceptance criteria:**
 
-- `GET /list?limit=1` allokiert nicht proportional zur gesamten Blobanzahl.
-- Parallele Cache-Misses für denselben Filter erzeugen nur einen Filterbau.
-- `GET /_wot?fp=NaN` liefert `400` ohne Panic-Log.
-- Zufällige Hash-Requests vergrößern den Negativ-Cache nicht über die konfigurierte
-  Kapazität.
+- `GET /list?limit=1` does not allocate proportionally to the total blob count.
+- Parallel cache misses for the same filter produce only one filter build.
+- `GET /_wot?fp=NaN` returns `400` without a panic log.
+- Random hash requests do not grow the negative cache beyond the configured capacity.
 
-### P1-3: Speicherquota korrekt und synchron durchsetzen
+### P1-3: Enforce storage quota correctly and synchronously
 
-**Befund:** `enforce_storage_limits` sortiert nach Alter aufsteigend und behält zuerst die
-ältesten Dateien (`src/utils.rs:158-205`). Bei gefülltem Speicher werden neue Uploads
-zunächst mit Erfolg bestätigt und später gelöscht. Die Durchsetzung erfolgt nur periodisch;
-Temporärdateien zählen nicht mit.
+**Finding:** `enforce_storage_limits` sorts ascending by age and keeps the oldest files
+first (`src/utils.rs:158-205`). When storage is full, new uploads are initially
+confirmed as successful and deleted later. Enforcement happens only periodically;
+temporary files are not counted.
 
-**Anforderung:**
+**Requirement:**
 
-- Das gewünschte Eviction-Modell explizit festlegen. Für FIFO-artige Aufbewahrung
-  müssen die neuesten Objekte erhalten bleiben und die ältesten verdrängt werden.
-- Alternativ Schreibvorgänge vor dem Persistieren mit `507 Insufficient Storage`
-  ablehnen.
-- Finalblobs, Chunk-Dateien, Rekonstruktionsdateien und HLS-Tempdateien müssen in
-  der verfügbaren Disk-Reserve und Quota berücksichtigt werden.
-- Die Prüfung muss neben dem periodischen Cleanup im Schreibpfad stattfinden.
+- Explicitly define the desired eviction model. For FIFO-like retention the newest
+  objects must be preserved and the oldest evicted.
+- Alternatively reject writes before persisting with `507 Insufficient Storage`.
+- Final blobs, chunk files, reconstruction files and HLS temp files must be accounted
+  for in the available disk reserve and quota.
+- The check must happen on the write path in addition to the periodic cleanup.
 
-**Akzeptanzkriterium:** Ein vollständig belegter Store bestätigt keinen Upload mit `201`,
-der im nächsten Cleanup-Lauf wieder verschwindet.
+**Acceptance criterion:** A fully occupied store does not confirm an upload with `201`
+that disappears in the next cleanup run.
 
-### P1-4: HLS-Mirror begrenzen und aufräumen
+### P1-4: Bound HLS mirror and clean up
 
-**Befunde:**
+**Findings:**
 
-- Fehlerpfade in `src/services/hls.rs` erzeugen Futures von `remove_file`, ohne sie
-  zu awaiten; die Tempdateien bleiben erhalten.
-- Playlist-Referenzen sind nicht global begrenzt; eine große Playlist kann sehr viele
-  ausgehende Requests erzeugen.
+- Error paths in `src/services/hls.rs` create futures of `remove_file` without awaiting
+  them; the temp files persist.
+- Playlist references are not globally bounded; a large playlist can generate very many
+  outgoing requests.
 
-**Anforderung:**
+**Requirement:**
 
-- Tempdateien per RAII oder garantiertem async Cleanup auf allen Fehlerpfaden löschen.
-- Maximale Playlist-Größe, maximale Referenzen pro Runde, maximale Gesamtzahl von
-  Referenzen und globale Deduplication festlegen.
-- HLS-Fetches mit begrenzter Parallelität und Gesamtbudget ausführen.
+- Delete temp files via RAII or guaranteed async cleanup on all error paths.
+- Set a maximum playlist size, maximum references per round, maximum total references
+  and global deduplication.
+- Execute HLS fetches with bounded parallelism and a total budget.
 
-## Priorität 2 — Authentisierung, Zahlung und Datenschutz
+## Priority 2 — Authentication, payment and data protection
 
-### P2-1: Upload-Whitelist tatsächlich erzwingen
+### P2-1: Actually enforce the upload whitelist
 
-**Befund:** `FeatureMode::Public` wird auf `AuthMode::Unrestricted` abgebildet. Ein
-allein gesetztes `ALLOWED_NPUBS` begrenzt Uploads daher nicht.
+**Finding:** `FeatureMode::Public` maps to `AuthMode::Unrestricted`. Therefore a set
+`ALLOWED_NPUBS` alone does not limit uploads.
 
-**Anforderung:**
+**Requirement:**
 
-- Einen expliziten Whitelist-Modus einführen oder `public` bei nicht-leerem
-  `ALLOWED_NPUBS` auf eine fail-closed Autorisierung abbilden.
-- Dokumentation und Konfigurationsbeispiele müssen den tatsächlichen Modus erklären.
+- Introduce an explicit whitelist mode or map `public` to a fail-closed authorization
+  when `ALLOWED_NPUBS` is non-empty.
+- Documentation and configuration examples must explain the actual mode.
 
-### P2-2: Tokens kurzlebig und replay-resistent machen
+### P2-2: Make tokens short-lived and replay-resistant
 
-**Befund:** `verify_event` prüft Signatur, Vergangenheit und Ablauf, aber keine maximale
-TTL, kein Höchstalter und keinen Replay-Cache (`src/services/auth.rs:47-81`). Fehlen
-`server`-Tags, sind Tokens absichtlich serverübergreifend gültig.
+**Finding:** `verify_event` checks signature, past and expiry but no maximum TTL, no
+maximum age and no replay cache (`src/services/auth.rs:47-81`). When `server` tags are
+absent, tokens are intentionally valid across servers.
 
-**Anforderung:**
+**Requirement:**
 
-- Maximale Event-TTL und maximale Clock-Skew festlegen.
-- Für destruktive Events mindestens einen TTL-basierten Event-ID-Replay-Cache führen.
-- Eine Betreiberoption für verpflichtende Server-Bindung bereitstellen.
-- BUD-11-Base64url ohne Padding akzeptieren; Standard-Base64 darf als kompatibler
-  Fallback unterstützt werden.
+- Set a maximum event TTL and a maximum clock skew.
+- For destructive events maintain at least a TTL-based event-ID replay cache.
+- Provide an operator option for mandatory server binding.
+- Accept BUD-11 Base64url without padding; standard Base64 may be supported as a
+  compatible fallback.
 
-### P2-3: Cashu-Pfade fail-closed ausführen
+### P2-3: Execute Cashu paths fail-closed
 
-**Gilt nur bei aktivierten `FEATURE_PAID_*`-Flags.**
+**Only applies when `FEATURE_PAID_*` flags are enabled.**
 
-**Befunde:**
+**Findings:**
 
-- Mirror-Bezahlung wird übersprungen, wenn der Upstream keine `Content-Length` liefert.
-- Der Preis basiert auf der untrusted `Content-Length`, nicht auf den tatsächlich
-  übertragenen Bytes.
-- Der nach dem Swap tatsächlich gutgeschriebene Betrag wird nicht mit dem Preis
-  verglichen.
-- Der finale Chunk wird vor einem fehlgeschlagenen 402-Payment-Check gespeichert;
-  ein Retry scheitert dann am Duplicate-Check.
-- Der Wallet-Seed wird mit Standard-Dateirechten geschrieben.
+- Mirror payment is skipped when the upstream does not provide `Content-Length`.
+- The price is based on the untrusted `Content-Length`, not on the actually transferred
+  bytes.
+- The amount actually credited after the swap is not compared against the price.
+- The final chunk is saved before a failed 402 payment check; a retry then fails on the
+  duplicate check.
+- The wallet seed is written with default file permissions.
 
-**Anforderung:**
+**Requirement:**
 
-- Mirror-Payment anhand der tatsächlich gestreamten Bytezahl bestimmen oder fehlende
-  Länge fail-closed behandeln.
-- Netto eingelösten Betrag gegen den erforderlichen Betrag prüfen.
-- Den Chunked-402-Pfad rollback-fähig machen.
-- Wallet-Seed atomar mit `0600` anlegen.
-- Entweder je akzeptierter Mint ein Wallet führen oder nur genau einen Mint
-  konfigurieren und bewerben.
-- Wallet-/Mint-Infrastrukturfehler als 5xx abbilden, nicht als Client-400.
+- Determine mirror payment based on the actually streamed byte count or handle missing
+  length fail-closed.
+- Check the net redeemed amount against the required amount.
+- Make the chunked 402 path rollback-capable.
+- Create wallet seed atomically with `0600`.
+- Either maintain one wallet per accepted mint or configure and advertise exactly one
+  mint.
+- Map wallet/mint infrastructure errors as 5xx, not as client 400.
 
-### P2-4: Browser- und Betriebsmetadaten schützen
+### P2-4: Protect browser and operational metadata
 
-**Befunde:**
+**Findings:**
 
-- `Access-Control-Allow-Origin: *` wird auf alle Endpunkte gesetzt
-  (`src/middleware.rs:9-42`). Das erlaubt fremden Websites insbesondere bei lokalen
-  Cache-Instanzen das Lesen von `/list`, `/_wot`, `/metrics` und Blobinhalten.
-- `/metrics` und `/_metrics` sind öffentlich. Upstream-Hosts können bei aktivierten
-  Custom Origins unbeschränkte Prometheus-Label erzeugen.
+- `Access-Control-Allow-Origin: *` is set on all endpoints (`src/middleware.rs:9-42`).
+  This allows foreign websites, especially on local cache instances, to read `/list`,
+  `/_wot`, `/metrics` and blob contents.
+- `/metrics` and `/_metrics` are public. Upstream hosts can create unbounded Prometheus
+  labels when custom origins are enabled.
 
-**Anforderung:**
+**Requirement:**
 
-- CORS-Wildcard auf öffentliche Blob-GET/HEAD-Antworten beschränken.
-- Für Metadaten- und Diagnosepfade eine konfigurierte Origin-Allowlist verwenden.
-- Metrics auf separatem Admin-Listener oder hinter Auth bereitstellen.
-- Upstream-Metriklabels auf bekannte Hosts begrenzen oder unbekannte Ziele zu
-  `other` zusammenfassen.
+- Restrict the CORS wildcard to public blob GET/HEAD responses.
+- Use a configured origin allowlist for metadata and diagnostic paths.
+- Serve metrics on a separate admin listener or behind auth.
+- Limit upstream metric labels to known hosts or aggregate unknown targets as `other`.
 
-## Plattform- und Betriebsanforderungen
+## Platform and operational requirements
 
-1. Eingehende HTTP-Verbindungen benötigen Header-Read-Timeout, Request-Timeout,
-   globale Concurrency-Grenze und Per-IP-Rate-Limits.
-2. Docker muss unter einem dedizierten Non-root-User laufen.
-3. Das Runtime-Image muss von `debian:bullseye-slim` und `libssl1.1` auf eine
-   unterstützte Basis migrieren.
-4. Container-Dateisystem muss soweit möglich read-only sein; nur explizite Volumes für
-   Blob- und Wallet-Daten sind beschreibbar.
-5. `fips.pem` und `fips-key.pem` müssen in `.gitignore` ergänzt werden. Die Dateien
-   sind derzeit nicht versioniert, aber nicht ausreichend gegen versehentlichen Commit
-   geschützt.
-6. `CLEANUP_INTERVAL_SECS=0` muss explizit abgelehnt oder sicher behandelt werden;
-   ein Panic im Hintergrundjob darf Cleanup nicht dauerhaft beenden.
-7. Hintergrundjobs müssen Fehler und Panics sichtbar machen sowie kontrolliert
-   neu gestartet werden.
-8. Dependency-Hygiene in CI etablieren: `cargo audit` und `cargo deny`. Der
-   eingebundene Cashu/SQLite-Stack ist funktional, enthält aber eine alte gebündelte
-   SQLite-Version und zusätzlich zwei Reqwest-Major-Versionen.
+1. Incoming HTTP connections need header read timeout, request timeout, a global
+   concurrency limit and per-IP rate limits.
+2. Docker must run under a dedicated non-root user.
+3. The runtime image must migrate from `debian:bullseye-slim` and `libssl1.1` to a
+   supported base.
+4. The container filesystem must be read-only where possible; only explicit volumes for
+   blob and wallet data are writable.
+5. `fips.pem` and `fips-key.pem` must be added to `.gitignore`. The files are currently
+   not versioned, but not sufficiently protected against accidental commit.
+6. `CLEANUP_INTERVAL_SECS=0` must be explicitly rejected or handled safely; a panic in
+   the background job must not permanently terminate cleanup.
+7. Background jobs must surface errors and panics and be restarted in a controlled
+   manner.
+8. Establish dependency hygiene in CI: `cargo audit` and `cargo deny`. The bundled
+   Cashu/SQLite stack is functional but contains an old bundled SQLite version and
+   additionally two Reqwest major versions.
 
-## Nicht-Befunde
+## Non-findings
 
-Die Analyse fand keinen direkten Path-Traversal-Write über den finalen Blob-Pfad:
-finale Pfade erhalten in den geprüften Pfaden nur Hashes, die gegen einen tatsächlich
-berechneten SHA-256-Digest geprüft wurden. Die Chunk-Header-Validierung ist trotzdem
-verpflichtend, weil die Rohwerte zuvor State und Temp-Dateinamen beeinflussen.
+The analysis did not find a direct path traversal write via the final blob path: final
+paths in the checked code paths only receive hashes that were verified against an
+actually computed SHA-256 digest. Chunk header validation is nonetheless mandatory
+because the raw values affect state and temp file names beforehand.
 
-`DELETE /:filename` selbst ist fail-closed: Es verlangt eine nicht-leere Whitelist,
-Strict Authorization sowie passende `t=delete`- und `x`-Tags. Der Report-Endpunkt darf
-keinen schwächeren alternativen Löschpfad bieten.
+`DELETE /:filename` itself is fail-closed: it requires a non-empty whitelist, strict
+authorization and matching `t=delete` and `x` tags. The report endpoint must not provide
+a weaker alternative deletion path.
 
-## Abnahmeplan
+## Acceptance plan
 
-Die Umsetzung ist erst abgeschlossen, wenn mindestens folgende Tests existieren und grün
-sind:
+Implementation is only complete once at least the following tests exist and are green:
 
-1. Begrenzte und endlose Bodies für Upload und Mirror ergeben `413`; weder Disk noch
-   Heap überschreiten das konfigurierte Budget.
-2. SSRF-Redirects und DNS-Rebinding-Versuche erreichen keine nicht öffentlichen Ziele.
-3. Fremde Pubkeys können Chunk-Sessions nicht blockieren; Sessions, Chunk-Dateien und
-   Rekonstruktionsdateien bleiben innerhalb konfigurierter Limits.
-4. Öffentliche `/list`, `/filter`, `/_wot` und Random-Hash-GETs bleiben unter
-   Parallelität innerhalb eines vorgegebenen CPU-/Speicherbudgets.
-5. Public Reports können keine Dateisystemaktion auslösen.
-6. Mit aktivierten Paid-Features werden Chunked-, Mirror- und Download-Pfade nur nach
-   korrekt eingelöster und ausreichender Zahlung abgeschlossen.
-7. CORS- und Metrics-Tests bestätigen, dass lokale/administrative Metadaten nicht
-   cross-origin bzw. öffentlich lesbar sind.
-8. Der Container läuft non-root; der Wallet-Seed hat Modus `0600`; keine PEM-Datei
-   außerhalb der vorgesehenen Secret-Verteilung wird versioniert.
+1. Bounded and endless bodies for upload and mirror yield `413`; neither disk nor heap
+   exceed the configured budget.
+2. SSRF redirects and DNS rebinding attempts do not reach non-public targets.
+3. Foreign pubkeys cannot block chunk sessions; sessions, chunk files and reconstruction
+   files stay within configured limits.
+4. Public `/list`, `/filter`, `/_wot` and random-hash GETs stay under parallelism within
+   a given CPU/memory budget.
+5. Public reports cannot trigger a filesystem action.
+6. With paid features enabled, chunked, mirror and download paths are only completed
+   after correctly redeemed and sufficient payment.
+7. CORS and metrics tests confirm that local/administrative metadata are not readable
+   cross-origin or publicly.
+8. The container runs non-root; the wallet seed has mode `0600`; no PEM file outside the
+   intended secret distribution is versioned.
