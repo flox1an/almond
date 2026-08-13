@@ -272,35 +272,77 @@ docker build -t almond .
 
 ### Running the Container
 
-Basic run:
+The standard image runs as the fixed, non-root numeric identity `10001:10001`.
+This is an image contract, not a host-user name: ownership shown by `ls` is
+resolved through the host's `/etc/passwd` and may display a different name.
+
+For a Docker-managed named volume, no host-side ownership setup is needed:
+
 ```bash
-docker run -p 3000:3000 -v /path/to/files:/app/files ghcr.io/flox1an/almond
+docker volume create almond-files
+docker run --rm -p 3000:3000 \
+  -v almond-files:/app/files \
+  ghcr.io/flox1an/almond:v0.4.2
 ```
 
-With custom storage path:
+For a host bind mount, prepare the directory with the image's numeric identity:
+
 ```bash
-docker run -p 3000:3000 -v /custom/storage:/custom/storage -e STORAGE_PATH=/custom/storage ghcr.io/flox1an/almond
+sudo install -d -o 10001 -g 10001 -m 0750 /data/almond
+docker run --rm -p 3000:3000 \
+  -v /data/almond:/app/files \
+  ghcr.io/flox1an/almond:v0.4.2
 ```
 
-With custom configuration:
+Migrate an existing bind mount once before upgrading to an image using this
+contract:
+
 ```bash
-docker run -p 3000:3000 \
-  -v /path/to/files:/app/files \
-  -e STORAGE_PATH=/app/files \
-  -e PUBLIC_URL=https://your-domain.com \
-  -e FEATURE_UPLOAD_ENABLED=wot \
-  -e FEATURE_MIRROR_ENABLED=wot \
-  -e ALLOWED_NPUBS=npub1... \
-  -e MAX_TOTAL_SIZE=1000 \
-  -e MAX_FILE_AGE_DAYS=7 \
-  -e UPSTREAM_SERVERS=https://backup1.com,https://backup2.com \
-  -e MAX_UPSTREAM_DOWNLOAD_SIZE_MB=500 \
-  -e MAX_CHUNK_SIZE_MB=200 \
-  -e CHUNK_CLEANUP_TIMEOUT_MINUTES=60 \
-  almond
+sudo chown -R 10001:10001 /data/almond
+sudo find /data/almond -type d -exec chmod 0750 {} +
+sudo find /data/almond -type f -exec chmod 0640 {} +
+```
+
+The default image user may be overridden for a host-specific deployment. Docker
+does not change bind-mount ownership, so the chosen pair must own the host
+directory. This is useful for a local operator account; it is not needed for
+the fixed-image default.
+
+```yaml
+services:
+  almond:
+    image: ghcr.io/flox1an/almond:v0.4.2
+    user: "${PUID:-10001}:${PGID:-10001}"
+    ports:
+      - "3000:3000"
+    volumes:
+      - /data/almond:/app/files
+    environment:
+      STORAGE_PATH: /app/files
+```
+
+```bash
+PUID=$(id -u) PGID=$(id -g) docker compose up -d
+```
+
+The standard image never recursively changes host-volume ownership at startup.
+For optional TLS auto-generation or Cashu payments, mount persistent state
+separately and give it the same UID/GID:
+
+```bash
+sudo install -d -o 10001 -g 10001 -m 0750 /data/almond-state
+docker run --rm -p 3000:3000 \
+  -v /data/almond:/app/files \
+  -v /data/almond-state:/app/state \
+  -e ENABLE_HTTPS=true \
+  ghcr.io/flox1an/almond:v0.4.2
 ```
 
 ### FIPS-enabled Docker Image
+
+This non-root identity contract applies to the standard image only. The FIPS
+image currently requires root plus `NET_ADMIN` and `/dev/net/tun` because its
+entrypoint configures the TUN interface, DNS, and iptables rules.
 
 GitHub Actions also builds `ghcr.io/flox1an/almond-fips`, a variant that runs
 FIPS, dnsmasq, and Almond in the same container. It can serve the same Almond

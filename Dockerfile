@@ -41,31 +41,37 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates libssl3 && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy the binary from builder (copied to /tmp during build to escape cache mount)
-COPY --from=builder /tmp/almond /app/almond
+# Use a fixed numeric identity. Host bind mounts retain host ownership, so
+# operators can prepare them predictably for UID/GID 10001.
+RUN groupadd --gid 10001 almond && \
+    useradd \
+      --uid 10001 \
+      --gid 10001 \
+      --home-dir /app \
+      --no-create-home \
+      --shell /usr/sbin/nologin \
+      almond && \
+    mkdir -p /app/files /app/state && \
+    chown 10001:10001 /app /app/files /app/state
 
-# Copy entrypoint script
-COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+# Copy runtime files with their final ownership; the runtime never needs root.
+COPY --from=builder --chown=10001:10001 /tmp/almond /app/almond
+COPY --chown=10001:10001 docker-entrypoint.sh /app/docker-entrypoint.sh
 
-# The runtime only needs its binary and the explicitly writable blob volume.
-RUN chmod +x /app/almond /app/docker-entrypoint.sh && \
-    addgroup --system almond && \
-    adduser --system --ingroup almond --home /app --no-create-home almond && \
-    mkdir -p /app/files && \
-    chown -R almond:almond /app
+RUN chmod 0555 /app/almond /app/docker-entrypoint.sh
 
 # Set environment variables
 ENV RUST_LOG=info
 ENV BIND_ADDR=0.0.0.0:3000
 ENV PUBLIC_URL=http://localhost:3000
+ENV STORAGE_PATH=/app/files
 ENV MAX_TOTAL_SIZE=99999
 ENV MAX_TOTAL_FILES=1000000
 ENV CLEANUP_INTERVAL_SECS=60
 ENV MAX_FILE_AGE_DAYS=0
-
 # Expose the port
 EXPOSE 3000
-USER almond
+USER 10001:10001
 
 # Use entrypoint script for better logging and debugging
 ENTRYPOINT ["/app/docker-entrypoint.sh"] 

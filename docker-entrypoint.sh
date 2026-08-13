@@ -1,6 +1,12 @@
 #!/bin/sh
 set -e
 
+# Writable optional state belongs outside the application directory. Keep
+# operator-provided paths intact while supplying Docker-safe defaults.
+export TLS_CERT_PATH="${TLS_CERT_PATH:-/app/state/cert.pem}"
+export TLS_KEY_PATH="${TLS_KEY_PATH:-/app/state/key.pem}"
+export CASHU_WALLET_PATH="${CASHU_WALLET_PATH:-/app/state/cashu_wallet.db}"
+
 echo "========================================"
 echo "Starting Almond Blossom Server"
 echo "========================================"

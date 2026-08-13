@@ -16,5 +16,6 @@ export MAX_FILE_AGE_DAYS=300
 export MAX_UPSTREAM_DOWNLOAD_SIZE_MB=500
 
 export STORAGE_PATH=./storage5
+export METRICS_BEARER_TOKEN=test
 
 ./target/release/almond
