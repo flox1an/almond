@@ -2,17 +2,16 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use hashtree_core::{store::StoreStats, Hash, Store, StoreError};
-use hashtree_network::{
-    MeshRouter, MeshStoreCore, NostrRelayTransport, PoolSettings, SignalingTransport,
+use hashtree_webrtc::{
+    GenericStore, MeshRouter, NostrRelayTransport, PoolSettings, RealPeerConnectionFactory,
+    SignalingTransport,
 };
 use nostr_sdk::prelude::Keys;
 use tokio::fs;
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
-use crate::{
-    models::AppState,
-    services::{blob_index::BlobIndex, p2p_webrtc::RealPeerConnectionFactory},
-};
+use crate::{models::AppState, services::blob_index::BlobIndex};
 
 #[derive(Clone)]
 struct AlmondLocalBlobStore {
@@ -113,9 +112,10 @@ async fn run_p2p_serve(state: AppState) -> Result<(), String> {
     };
 
     let pubkey = keys.public_key().to_hex();
-    let peer_id = pubkey.clone();
+    let peer_uuid = Uuid::new_v4().to_string();
+    let peer_id = format!("{pubkey}:{peer_uuid}");
 
-    let transport = Arc::new(NostrRelayTransport::new(keys, state.p2p_debug));
+    let transport = Arc::new(NostrRelayTransport::new(keys, peer_uuid, state.p2p_debug));
     transport
         .connect(&relays)
         .await
@@ -124,13 +124,14 @@ async fn run_p2p_serve(state: AppState) -> Result<(), String> {
     let factory = Arc::new(RealPeerConnectionFactory::with_stun_servers(stun_servers));
     let router = Arc::new(MeshRouter::new(
         peer_id.clone(),
+        pubkey,
         transport.clone(),
         factory,
         PoolSettings::default(),
         state.p2p_debug,
     ));
     let local_store = Arc::new(AlmondLocalBlobStore::new(&state));
-    let store = Arc::new(MeshStoreCore::new(
+    let store = Arc::new(GenericStore::new(
         local_store,
         router,
         Duration::from_millis(state.p2p_request_timeout_ms),
