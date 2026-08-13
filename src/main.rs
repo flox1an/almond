@@ -29,6 +29,8 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod config;
+#[cfg(test)]
+mod config_editor_tests;
 pub mod constants;
 pub mod error;
 pub mod handlers;
@@ -136,6 +138,26 @@ async fn serve_filter_test() -> Result<axum::response::Response<axum::body::Body
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+async fn serve_config_editor(
+    State(state): State<AppState>,
+) -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
+    use axum::{http::header, response::Response};
+
+    // Shares the homepage flag rather than introducing a dedicated one: this
+    // is a static, self-contained page with no server-side state of its own,
+    // so whoever turns off the homepage has already opted out of Almond
+    // serving browser-facing pages at all.
+    if !state.feature_homepage_enabled {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(axum::body::Body::from(include_str!("config-editor.html")))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 pub async fn create_app(state: AppState) -> Router {
     let max_blob_size = usize::try_from(state.max_blob_size_bytes)
         .expect("MAX_BLOB_SIZE_MB does not fit the platform request-body limit");
@@ -162,6 +184,7 @@ pub async fn create_app(state: AppState) -> Router {
         .route("/", get(serve_index))
         .route("/index.html", get(serve_index))
         .route("/filter-test.html", get(serve_filter_test))
+        .route("/config", get(serve_config_editor))
         .route("/{filename}", delete(delete_blob))
         .route(
             "/{filename}",

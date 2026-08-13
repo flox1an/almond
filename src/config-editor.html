@@ -1,0 +1,2156 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Almond Configuration Editor</title>
+    <!--
+      frame-ancestors, sandbox and report-uri are intentionally omitted: the
+      CSP spec does not let a <meta> tag enforce them, so listing them here
+      would be a no-op that looks like protection. If clickjacking protection
+      is wanted for the /config route, it has to be an HTTP response header
+      set by the server, not this file.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'sha256-0uHRJbASZMbh39lam9p1XkIPKtWEUbxjuLdu+ZcvkmI='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
+    />
+    <style>
+      /*
+       * Two-tier palette: --pink is chrome (labels, borders, buttons,
+       * branding) and stays fully saturated throughout. Anything the user
+       * has to actually READ AT LENGTH — typed values, help text, the
+       * export preview — uses --text, a near-white, deliberately
+       * desaturated tone instead. Saturated magenta reads fine for short
+       * bold labels but is fatiguing for paragraphs and long values on a
+       * near-black background; --text fixes that without abandoning the
+       * pink/black identity.
+       */
+      :root {
+        color-scheme: dark;
+        --pink: rgb(255, 73, 133);
+        --pink-dim: rgba(255, 73, 133, 0.55);
+        --pink-border: rgba(255, 73, 133, 0.45);
+        --pink-border-dim: rgba(255, 73, 133, 0.25);
+        --text: #f4eef1;
+        --text-dim: rgba(244, 238, 241, 0.68);
+        --text-faint: rgba(244, 238, 241, 0.4);
+        --bg: #060406;
+        --bg-input: #170f15;
+        --bg-input-disabled: #100a0d;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: "Courier New", Courier, monospace;
+        background: linear-gradient(to bottom, #120b10, var(--bg));
+        color: var(--pink);
+        padding: 20px 20px 80px;
+        min-height: 100vh;
+        font-size: 15px;
+        line-height: 1.55;
+      }
+      a {
+        color: rgb(120, 210, 255);
+      }
+      .wrap {
+        max-width: 980px;
+        margin: 0 auto;
+      }
+      h1 {
+        letter-spacing: 0.06em;
+        font-size: 1.4em;
+        margin-bottom: 4px;
+        color: var(--pink);
+      }
+      .subtitle {
+        color: var(--text-dim);
+        margin-bottom: 20px;
+        font-size: 0.9em;
+      }
+      .subtitle strong {
+        color: var(--pink);
+      }
+      section {
+        background: rgba(255, 73, 133, 0.05);
+        border: 1px solid var(--pink-border-dim);
+        border-radius: 5px;
+        padding: 16px 18px;
+        margin-bottom: 16px;
+      }
+      section > h2 {
+        font-size: 1.05em;
+        color: rgb(255, 145, 180);
+        margin-bottom: 10px;
+        cursor: default;
+      }
+      section > h2 .count {
+        color: var(--text-faint);
+        font-weight: normal;
+        font-size: 0.85em;
+      }
+      .field-category summary {
+        cursor: pointer;
+        list-style: none;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: rgb(255, 145, 180);
+      }
+      .field-category summary::-webkit-details-marker {
+        display: none;
+      }
+      .field-category summary::before {
+        content: "▸";
+        display: inline-block;
+        transition: transform 0.15s;
+      }
+      .field-category[open] summary::before {
+        transform: rotate(90deg);
+      }
+      .field-category {
+        border: 1px solid var(--pink-border-dim);
+        border-radius: 4px;
+        padding: 10px 14px;
+        margin-bottom: 10px;
+      }
+      .field-category > .fields {
+        margin-top: 12px;
+      }
+      .field-row {
+        border-top: 1px solid rgba(255, 73, 133, 0.15);
+        padding: 12px 0;
+        display: grid;
+        grid-template-columns: minmax(220px, 280px) 1fr;
+        gap: 6px 16px;
+      }
+      .field-row:first-child {
+        border-top: none;
+      }
+      .field-name {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 6px;
+        font-weight: bold;
+        word-break: break-all;
+        color: var(--pink);
+      }
+      .field-help {
+        grid-column: 1 / -1;
+        color: var(--text-dim);
+        font-size: 0.85em;
+      }
+      .badge {
+        font-size: 0.7em;
+        padding: 1px 6px;
+        border-radius: 3px;
+        font-weight: normal;
+        letter-spacing: 0.03em;
+        white-space: nowrap;
+      }
+      .badge-sensitive {
+        background: rgba(255, 200, 0, 0.15);
+        color: rgb(255, 210, 60);
+        border: 1px solid rgba(255, 200, 0, 0.4);
+      }
+      .badge-risk {
+        background: rgba(255, 60, 60, 0.15);
+        color: rgb(255, 130, 130);
+        border: 1px solid rgba(255, 60, 60, 0.4);
+      }
+      .badge-ref {
+        background: rgba(120, 210, 255, 0.15);
+        color: rgb(120, 210, 255);
+        border: 1px solid rgba(120, 210, 255, 0.4);
+      }
+      /* The one control that decides a variable's fate: checked writes the
+         line, unchecked leaves it out. It sits in front of the name so a
+         column of ticks reads as "what this .env actually sets". */
+      .field-name input[type="checkbox"] {
+        appearance: none;
+        flex: 0 0 auto;
+        width: 14px;
+        height: 14px;
+        position: relative;
+        top: 2px;
+        border: 1px solid var(--pink-border);
+        border-radius: 3px;
+        background: var(--bg-input);
+        cursor: pointer;
+      }
+      .field-name input[type="checkbox"]:checked {
+        background: var(--pink);
+        border-color: var(--pink);
+      }
+      .field-name input[type="checkbox"]:checked::after {
+        content: "✓";
+        position: absolute;
+        inset: 0;
+        text-align: center;
+        font-size: 11px;
+        line-height: 12px;
+        color: #1a0510;
+      }
+      .field-name input[type="checkbox"]:focus-visible {
+        outline: none;
+        box-shadow: 0 0 0 3px rgba(255, 73, 133, 0.25);
+      }
+      /* An unset variable stays legible but recedes, so scanning a category
+         shows at a glance which lines the .env will actually contain. */
+      .field-row.is-default .var-name {
+        color: var(--text-dim);
+        font-weight: normal;
+      }
+      /* Actual entered/read content — the part of the UI this theme most
+         needs to stay legible for — gets --text, not --pink. */
+      .value-cell input[type="text"],
+      .value-cell input[type="password"],
+      .value-cell input[type="number"],
+      .value-cell textarea,
+      .value-cell select {
+        width: 100%;
+        padding: 8px 10px;
+        background: var(--bg-input);
+        border: 1px solid var(--pink-border);
+        border-radius: 3px;
+        color: var(--text);
+        font-family: "Courier New", Courier, monospace;
+        font-size: 0.95em;
+      }
+      .value-cell textarea {
+        resize: vertical;
+        min-height: 2.4em;
+      }
+      .value-cell input::placeholder,
+      .value-cell textarea::placeholder,
+      #import-area textarea::placeholder,
+      .toolbar input::placeholder {
+        color: var(--text-faint);
+        opacity: 1;
+      }
+      /* An unset field's control is deliberately NOT `disabled`: clicking
+         straight into it is how the variable gets switched on, and a
+         disabled input cannot be clicked into at all. It only looks
+         inactive — dimmed text and border, but a readable placeholder
+         showing the default that currently applies. */
+      .value-cell .inactive {
+        background: var(--bg-input-disabled);
+        border-color: rgba(255, 73, 133, 0.2);
+        color: var(--text-faint);
+      }
+      .value-cell input:focus,
+      .value-cell textarea:focus,
+      .value-cell select:focus {
+        outline: none;
+        border-color: var(--pink);
+        box-shadow: 0 0 0 3px rgba(255, 73, 133, 0.2);
+      }
+      .value-cell select option {
+        background: var(--bg-input);
+        color: var(--text);
+      }
+      .unit {
+        color: var(--text-faint);
+        font-size: 0.8em;
+        margin-left: 6px;
+      }
+      .secret-row {
+        display: flex;
+        gap: 6px;
+      }
+      .secret-row input {
+        flex: 1;
+      }
+      button.small {
+        font-family: inherit;
+        font-size: 0.78em;
+        padding: 6px 10px;
+        background: rgba(255, 73, 133, 0.15);
+        border: 1px solid var(--pink);
+        color: var(--pink);
+        border-radius: 3px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      button.small:hover {
+        background: rgba(255, 73, 133, 0.35);
+      }
+      button.small:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .field-error {
+        grid-column: 1 / -1;
+        color: rgb(255, 130, 130);
+        font-size: 0.82em;
+      }
+      .field-hint {
+        grid-column: 1 / -1;
+        color: rgb(140, 215, 255);
+        font-size: 0.82em;
+      }
+      .ref-warning {
+        grid-column: 1 / -1;
+        color: rgb(140, 215, 255);
+        font-size: 0.82em;
+      }
+      .toolbar {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+        align-items: center;
+      }
+      .toolbar input[type="text"],
+      .toolbar select {
+        padding: 8px 10px;
+        background: var(--bg-input);
+        border: 1px solid var(--pink-border);
+        border-radius: 3px;
+        color: var(--text);
+        font-family: inherit;
+      }
+      .mode-tabs {
+        display: flex;
+        gap: 0;
+        margin-bottom: 12px;
+      }
+      .mode-tabs button {
+        font-family: inherit;
+        padding: 8px 16px;
+        background: rgba(255, 73, 133, 0.08);
+        border: 1px solid var(--pink-border);
+        color: var(--text-dim);
+        cursor: pointer;
+        font-size: 0.9em;
+      }
+      .mode-tabs button.active {
+        background: var(--pink);
+        color: #1a0510;
+        font-weight: bold;
+      }
+      #import-area {
+        display: none;
+      }
+      #import-area.visible {
+        display: block;
+      }
+      #import-area textarea {
+        width: 100%;
+        min-height: 160px;
+        background: var(--bg-input);
+        color: var(--text);
+        border: 1px solid var(--pink-border);
+        border-radius: 3px;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 0.95em;
+        padding: 10px;
+        margin-top: 8px;
+      }
+      .panel-list {
+        list-style: none;
+      }
+      .panel-list li {
+        padding: 6px 0;
+        border-top: 1px solid rgba(255, 73, 133, 0.15);
+        font-size: 0.88em;
+        color: var(--text-dim);
+      }
+      .panel-list li:first-child {
+        border-top: none;
+      }
+      .risk-warn {
+        color: rgb(255, 165, 110);
+      }
+      .risk-info {
+        color: rgb(140, 215, 255);
+      }
+      .empty-note {
+        color: var(--text-faint);
+        font-style: italic;
+      }
+      pre#preview {
+        white-space: pre-wrap;
+        word-break: break-all;
+        background: var(--bg-input);
+        border: 1px solid var(--pink-border);
+        border-radius: 3px;
+        padding: 12px;
+        max-height: 420px;
+        overflow-y: auto;
+        font-size: 0.86em;
+        color: var(--text);
+      }
+      .export-actions {
+        display: flex;
+        gap: 10px;
+        margin-top: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .export-blocked {
+        color: rgb(255, 130, 130);
+        margin-bottom: 10px;
+      }
+      .secrets-warning {
+        background: rgba(255, 200, 0, 0.08);
+        border: 1px solid rgba(255, 200, 0, 0.4);
+        color: rgb(255, 210, 60);
+        padding: 10px 12px;
+        border-radius: 4px;
+        margin-bottom: 12px;
+        font-size: 0.85em;
+      }
+      footer {
+        text-align: center;
+        color: var(--text-faint);
+        font-size: 0.78em;
+        margin-top: 30px;
+      }
+      .selftest-pass {
+        color: rgb(140, 235, 140);
+      }
+      .selftest-fail {
+        color: rgb(255, 120, 120);
+      }
+      .selftest-summary {
+        font-size: 1.1em;
+        margin-bottom: 14px;
+      }
+      .hidden {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div id="app"></div>
+      <footer>
+        Almond Configuration Editor &middot; runs entirely in this browser tab
+        &middot; no network requests after load
+      </footer>
+    </div>
+
+    <script>
+      "use strict";
+
+      /* ======================================================================
+       * SCHEMA
+       *
+       * One entry per variable Config::from_map (src/config.rs) reads. This
+       * table is not generated. Its correctness against config.rs is proven
+       * by drift tests in src/config_editor_tests.rs, which extract the
+       * literal below (between the START/END markers) and exercise
+       * Config::from_map with each field's `default` and `probe` value.
+       *
+       * Field meaning:
+       *   kind      "bool" | "number" | "string" | "path" | "socketaddr" |
+       *             "url" | "list" | "list_u16" | "list_npub" | "enum" | "secret"
+       *   default   literal default as config.rs would apply it, or null if
+       *             there is no literal default (unset-by-default fields, or
+       *             PUBLIC_URL whose default depends on ENABLE_HTTPS)
+       *   empty     behaviour of Config::from_map when the var is present but
+       *             empty ("KEY="):
+       *               like_unset   -> same as not being set at all
+       *               empty_value  -> a literal empty value, not the default
+       *               hard_error   -> Almond refuses to start
+       *   probe     a value that differs from the default/absence, used only
+       *             to prove the field is actually wired up
+       *   unit      display-only unit suffix, or null
+       *   sensitive true if the value is a secret and should be masked
+       *   generatable true if a "Generate" button (crypto.getRandomValues)
+       *             applies to this field
+       *   conditionalDefault true only for PUBLIC_URL, whose default flips
+       *             with ENABLE_HTTPS (handled as a special case, not via
+       *             `default`)
+       *   values    allowed values for kind "enum"
+       *   boolWords ["on","off"] override for the paid-feature fields, which
+       *             follow .env.example's idiom even though parse_bool
+       *             accepts the same true/false/1/0/on/off set everywhere
+       * ==================================================================== */
+
+      /* ALMOND_SCHEMA_JSON_START */
+      const ALMOND_SCHEMA = [
+        { "name": "BIND_ADDR", "category": "network", "kind": "socketaddr", "default": "127.0.0.1:3000", "empty": "hard_error", "probe": "0.0.0.0:8080", "help": "Address Almond listens on. Must be a literal IP:port \u2014 Rust's socket-address parser does not accept hostnames." },
+        { "name": "PUBLIC_URL", "category": "network", "kind": "url", "default": null, "conditionalDefault": true, "empty": "empty_value", "probe": "https://blossom.example.com", "help": "Public origin used in blob descriptors. No trailing slash. Defaults to http://127.0.0.1:3000, or https://127.0.0.1:3000 when ENABLE_HTTPS is true." },
+        { "name": "CORS_ALLOWED_ORIGINS", "category": "network", "kind": "list", "default": null, "empty": "like_unset", "probe": "https://app.example.com", "help": "Comma-separated exact origins allowed to read discovery and metrics responses cross-origin. Blob GET/HEAD is always public regardless of this setting." },
+
+        { "name": "ENABLE_HTTPS", "category": "tls", "kind": "bool", "default": "false", "empty": "hard_error", "probe": "true", "help": "Set true only when Almond terminates TLS itself. Leave false behind a reverse proxy." },
+        { "name": "TLS_CERT_PATH", "category": "tls", "kind": "path", "default": "./cert.pem", "empty": "empty_value", "probe": "/etc/almond/cert.pem", "help": "Certificate path, used only when ENABLE_HTTPS is true." },
+        { "name": "TLS_KEY_PATH", "category": "tls", "kind": "path", "default": "./key.pem", "empty": "empty_value", "probe": "/etc/almond/key.pem", "help": "Private key path, used only when ENABLE_HTTPS is true." },
+        { "name": "TLS_AUTO_GENERATE", "category": "tls", "kind": "bool", "default": "true", "empty": "hard_error", "probe": "false", "help": "Replace a missing cert/key pair with a self-signed one. Development only." },
+
+        { "name": "STORAGE_PATH", "category": "storage", "kind": "path", "default": "./files", "empty": "empty_value", "probe": "/data/almond", "help": "Storage root. Almond creates uploads/, upstream-cache/, temp/ and quarantine/ underneath it." },
+
+        { "name": "ALMOND_S3_ENDPOINT", "category": "s3", "kind": "url", "default": null, "empty": "like_unset", "probe": "https://s3.example.com", "help": "S3-compatible endpoint. All four ALMOND_S3_* variables must be set together, or none at all." },
+        { "name": "ALMOND_S3_BUCKET", "category": "s3", "kind": "string", "default": null, "empty": "like_unset", "probe": "almond-blobs", "help": "Bucket name for native S3 storage." },
+        { "name": "ALMOND_S3_ACCESS_KEY_ID", "category": "s3", "kind": "secret", "default": null, "empty": "like_unset", "probe": "AKIAEXAMPLE1234", "sensitive": true, "help": "S3 access key id." },
+        { "name": "ALMOND_S3_SECRET_ACCESS_KEY", "category": "s3", "kind": "secret", "default": null, "empty": "like_unset", "probe": "exampleSecretAccessKey", "sensitive": true, "help": "S3 secret access key." },
+
+        { "name": "SERVE_FILES_PATH", "category": "serve_files", "kind": "path", "default": null, "empty": "like_unset", "probe": "./public", "help": "Optional directory of static files served alongside blobs." },
+        { "name": "SERVE_FILES_MANIFEST_NAME", "category": "serve_files", "kind": "string", "default": "manifest-sha256.txt", "empty": "empty_value", "probe": "checksums.txt", "help": "Filename of the generated SHA-256 manifest." },
+        { "name": "SERVE_FILES_REFRESH_INTERVAL_SECS", "category": "serve_files", "kind": "number", "unit": "seconds", "default": "3600", "empty": "hard_error", "probe": "60", "help": "How often the static-file manifest is rebuilt." },
+
+        { "name": "MAX_TOTAL_SIZE", "category": "limits", "kind": "number", "unit": "MiB", "default": "99999", "empty": "hard_error", "probe": "1024", "help": "Aggregate size limit across uploads and upstream-cache. The default is practically unbounded." },
+        { "name": "MAX_TOTAL_FILES", "category": "limits", "kind": "number", "unit": "files", "default": "99999999", "empty": "hard_error", "probe": "10000", "help": "Aggregate completed-blob count limit. The default is practically unbounded." },
+        { "name": "MAX_BLOB_SIZE_MB", "category": "limits", "kind": "number", "unit": "MiB", "default": "100", "empty": "hard_error", "probe": "50", "help": "Absolute per-blob size ceiling. MAX_CHUNK_SIZE_MB must not exceed this." },
+        { "name": "MIN_FREE_DISK_MB", "category": "limits", "kind": "number", "unit": "MiB", "default": "256", "empty": "hard_error", "probe": "512", "help": "Minimum free disk space; breaching it returns HTTP 507." },
+        { "name": "CLEANUP_INTERVAL_SECS", "category": "limits", "kind": "number", "unit": "seconds", "default": "30", "empty": "hard_error", "probe": "60", "min": 1, "help": "Expiry and capacity cleanup cadence. Must be greater than zero." },
+        { "name": "MAX_FILE_AGE_DAYS", "category": "limits", "kind": "number", "unit": "days", "default": "0", "empty": "hard_error", "probe": "30", "help": "Age expiry for uploaded content. 0 disables age expiry entirely." },
+        { "name": "MAX_UPSTREAM_CACHE_TTL_DAYS", "category": "limits", "kind": "number", "unit": "days", "default": "1", "empty": "hard_error", "probe": "7", "help": "TTL for the transparent upstream cache. 0 disables it." },
+        { "name": "MAX_UPSTREAM_DOWNLOAD_SIZE_MB", "category": "limits", "kind": "number", "unit": "MiB", "default": "100", "empty": "hard_error", "probe": "500", "help": "Maximum body accepted from one transparent upstream fetch." },
+        { "name": "MAX_CHUNK_SIZE_MB", "category": "limits", "kind": "number", "unit": "MiB", "default": "100", "empty": "hard_error", "probe": "50", "help": "Resumable-upload chunk ceiling. Must not exceed MAX_BLOB_SIZE_MB." },
+        { "name": "CHUNK_CLEANUP_TIMEOUT_MINUTES", "category": "limits", "kind": "number", "unit": "minutes", "default": "30", "empty": "hard_error", "probe": "15", "help": "Abandoned chunked-upload sessions are cleaned up after this long." },
+        { "name": "MAX_CHUNK_UPLOAD_SESSIONS", "category": "limits", "kind": "number", "unit": "sessions", "default": "128", "empty": "hard_error", "probe": "64", "help": "Global cap on concurrent chunked-upload sessions." },
+        { "name": "MAX_CHUNK_UPLOAD_SESSIONS_PER_PUBKEY", "category": "limits", "kind": "number", "unit": "sessions/pubkey", "default": "8", "empty": "hard_error", "probe": "4", "help": "Per-pubkey cap on concurrent chunked-upload sessions." },
+        { "name": "HLS_MIRROR_CONCURRENCY", "category": "limits", "kind": "number", "unit": "parallel fetches", "default": "4", "empty": "hard_error", "probe": "2", "help": "Parallel segment fetches for an explicit HLS mirror." },
+
+        { "name": "UPSTREAM_SERVERS", "category": "upstream", "kind": "list", "default": null, "empty": "like_unset", "probe": "https://cdn.satellite.earth", "help": "Comma-separated trusted upstream Blossom origins. Leave unset to disable this source." },
+        { "name": "UPSTREAM_MODE", "category": "upstream", "kind": "enum", "values": ["proxy", "redirect", "redirect_and_cache"], "default": "proxy", "empty": "like_unset", "probe": "redirect", "help": "proxy streams while caching; redirect returns 302; redirect_and_cache returns 302 and fills the cache in the background. Almond silently falls back to proxy on an unrecognized value \u2014 this editor rejects it instead." },
+
+        { "name": "FEATURE_UPLOAD_ENABLED", "category": "features", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "public", "empty": "like_unset", "probe": "wot", "help": "Almond silently falls back to public on an unrecognized value \u2014 this editor rejects it instead." },
+        { "name": "FEATURE_MIRROR_ENABLED", "category": "features", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "public", "empty": "like_unset", "probe": "wot", "help": "Almond silently falls back to public on an unrecognized value \u2014 this editor rejects it instead." },
+        { "name": "FEATURE_LIST_ENABLED", "category": "features", "kind": "bool", "default": "true", "empty": "hard_error", "probe": "false", "help": "/list endpoint. Unlike the other FEATURE_* flags this is a plain boolean, not a mode." },
+        { "name": "FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED", "category": "features", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "off", "empty": "like_unset", "probe": "wot", "help": "Allows an authorized request to supply a custom upstream origin." },
+        { "name": "FEATURE_HOMEPAGE_ENABLED", "category": "features", "kind": "bool", "default": "true", "empty": "hard_error", "probe": "false", "help": "Controls the homepage. This editor is served by Almond on the same flag \u2014 disabling it also disables the /config route on that server." },
+        { "name": "FEATURE_P2P_SERVE_ENABLED", "category": "features", "kind": "bool", "default": "false", "empty": "hard_error", "probe": "true", "help": "Enable Hashtree P2P serving of hashes already local to Almond." },
+
+        { "name": "P2P_NSEC", "category": "p2p", "kind": "secret", "default": null, "empty": "like_unset", "probe": "nsec1exampleexampleexampleexampleexampleexampleexampleexamz3k5", "sensitive": true, "help": "Nostr private key (bech32 nsec) identifying this P2P node. Not generated here \u2014 it needs a real secp256k1 keypair; use a dedicated Nostr key tool." },
+        { "name": "P2P_RELAYS", "category": "p2p", "kind": "list", "default": null, "empty": "like_unset", "probe": "wss://relay.example.com", "help": "Comma-separated relay URLs for P2P peer discovery." },
+        { "name": "P2P_STUN_SERVERS", "category": "p2p", "kind": "list", "default": null, "empty": "like_unset", "probe": "stun:stun.l.google.com:19302", "help": "Comma-separated STUN servers for NAT traversal." },
+        { "name": "P2P_REQUEST_TIMEOUT_MS", "category": "p2p", "kind": "number", "unit": "ms", "default": "10000", "empty": "hard_error", "probe": "5000", "help": "Timeout for a single P2P request." },
+        { "name": "P2P_HELLO_INTERVAL_MS", "category": "p2p", "kind": "number", "unit": "ms", "default": "3000", "empty": "hard_error", "probe": "1000", "help": "Interval between P2P hello/keepalive messages." },
+        { "name": "P2P_DEBUG", "category": "p2p", "kind": "bool", "default": "false", "empty": "hard_error", "probe": "true", "help": "Verbose P2P logging." },
+
+        { "name": "FEATURE_REPORT_ENABLED", "category": "reports", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "off", "empty": "like_unset", "probe": "public", "help": "Almond silently falls back to off on an unrecognized value \u2014 this editor rejects it instead." },
+        { "name": "REPORT_ACTION", "category": "reports", "kind": "enum", "values": ["quarantine", "delete"], "default": "quarantine", "empty": "like_unset", "probe": "delete", "help": "quarantine moves a reported blob to quarantine/; delete removes it. Almond silently falls back to quarantine on an unrecognized value \u2014 this editor rejects it instead." },
+
+        { "name": "FEATURE_PAID_UPLOAD", "category": "paid", "kind": "bool", "boolWords": ["on", "off"], "default": "off", "empty": "hard_error", "probe": "on", "help": "Requires payment for uploads (BUD-07). Requires exactly one CASHU_ACCEPTED_MINTS entry." },
+        { "name": "FEATURE_PAID_MIRROR", "category": "paid", "kind": "bool", "boolWords": ["on", "off"], "default": "off", "empty": "hard_error", "probe": "on", "help": "Requires payment for mirror requests (BUD-07). Requires exactly one CASHU_ACCEPTED_MINTS entry." },
+        { "name": "FEATURE_PAID_DOWNLOAD", "category": "paid", "kind": "bool", "boolWords": ["on", "off"], "default": "off", "empty": "hard_error", "probe": "on", "help": "Requires payment for downloads (BUD-07). Requires exactly one CASHU_ACCEPTED_MINTS entry." },
+        { "name": "CASHU_PRICE_PER_MB", "category": "paid", "kind": "number", "unit": "sats/MiB", "default": "1", "empty": "hard_error", "probe": "5", "help": "Price used for all enabled paid operations." },
+        { "name": "CASHU_ACCEPTED_MINTS", "category": "paid", "kind": "list", "default": null, "empty": "like_unset", "probe": "https://mint.example.com", "help": "Exactly one mint is required when any paid feature is on." },
+        { "name": "CASHU_WALLET_PATH", "category": "paid", "kind": "path", "default": "./cashu_wallet.db", "empty": "empty_value", "probe": "./data/cashu_wallet.db", "help": "Local Cashu wallet database path." },
+
+        { "name": "BLOSSOM_SERVER_LIST_CACHE_TTL_HOURS", "category": "filters", "kind": "number", "unit": "hours", "default": "24", "empty": "hard_error", "probe": "12", "help": "How long an author's Blossom server list is cached locally." },
+        { "name": "FILTER_ALGORITHM", "category": "filters", "kind": "enum", "values": ["bloom", "binary-fuse-8", "binary-fuse-16", "binary-fuse-32"], "default": "binary-fuse-16", "empty": "like_unset", "probe": "binary-fuse-8", "help": "BUD-11 filter algorithm. Almond silently falls back to binary-fuse-16 on an unrecognized value \u2014 this editor rejects it instead." },
+
+        { "name": "DVM_ALLOWED_KINDS", "category": "dvm", "kind": "list_u16", "default": null, "empty": "like_unset", "probe": "5207", "help": "Comma-separated Nostr event kinds. Required when any FEATURE_*_ENABLED uses dvm mode." },
+        { "name": "DVM_RELAYS", "category": "dvm", "kind": "list", "default": null, "empty": "like_unset", "probe": "wss://nos.lol", "help": "Comma-separated relays polled for DVM job requests." },
+        { "name": "DVM_REFRESH_INTERVAL_MINS", "category": "dvm", "kind": "number", "unit": "minutes", "default": "5", "empty": "hard_error", "probe": "10", "help": "How often the DVM-authorized pubkey set is refreshed." },
+
+        { "name": "ALLOWED_NPUBS", "category": "auth", "kind": "list_npub", "default": null, "empty": "like_unset", "probe": "npub14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w4scf6zts", "help": "Comma-separated allowed npubs. When non-empty, restricts public upload/mirror access to this list. Almond silently drops any entry that fails to parse \u2014 this editor checks the bech32 checksum, but (unlike Almond) does not verify the decoded bytes are a valid secp256k1 point." },
+        { "name": "AUTH_MAX_TTL_SECS", "category": "auth", "kind": "number", "unit": "seconds", "default": "300", "empty": "hard_error", "probe": "600", "help": "Maximum validity window of an authorization event." },
+        { "name": "AUTH_MAX_AGE_SECS", "category": "auth", "kind": "number", "unit": "seconds", "default": "300", "empty": "hard_error", "probe": "600", "help": "Maximum age of an authorization event's created_at." },
+        { "name": "AUTH_CLOCK_SKEW_SECS", "category": "auth", "kind": "number", "unit": "seconds", "default": "30", "empty": "hard_error", "probe": "60", "help": "Tolerated clock skew when validating authorization timestamps." },
+        { "name": "AUTH_REQUIRE_SERVER_TAG", "category": "auth", "kind": "bool", "default": "false", "empty": "hard_error", "probe": "true", "help": "Require authorization events to contain a matching server tag." },
+        { "name": "METRICS_BEARER_TOKEN", "category": "auth", "kind": "secret", "default": null, "empty": "like_unset", "probe": "replace-with-a-long-random-secret", "sensitive": true, "generatable": true, "help": "/metrics is disabled until this is set. Keep it off public networks even when set." }
+      ];
+      /* ALMOND_SCHEMA_JSON_END */
+
+      const CATEGORIES = [
+        { id: "network", title: "Network & Public Identity" },
+        { id: "tls", title: "HTTPS / TLS" },
+        { id: "storage", title: "Local Storage" },
+        { id: "s3", title: "S3-Compatible Storage (optional)" },
+        { id: "serve_files", title: "Static File Serving (optional)" },
+        { id: "limits", title: "Limits & Retention" },
+        { id: "upstream", title: "Upstream & Caching" },
+        { id: "features", title: "Feature Flags" },
+        { id: "p2p", title: "Hashtree P2P Serving" },
+        { id: "reports", title: "Reports" },
+        { id: "paid", title: "Paid Operations (Cashu / BUD-07)" },
+        { id: "filters", title: "BUD-11 Filters" },
+        { id: "dvm", title: "DVM (Data Vending Machine)" },
+        { id: "auth", title: "Authorization" },
+      ];
+
+      const SCHEMA_BY_NAME = Object.fromEntries(ALMOND_SCHEMA.map((f) => [f.name, f]));
+
+      /* ======================================================================
+       * DOTENV PARSER
+       *
+       * Ports dotenvy 0.15.7's line-grouping and value state machines
+       * (src/iter.rs, src/parse.rs) faithfully enough to determine, for any
+       * imported document: line boundaries (including multi-line quoted
+       * values), which lines are comments/blank, which are KEY=VALUE
+       * assignments, and the literal value of any assignment whose value
+       * contains no ${VAR}/$VAR reference.
+       *
+       * Deliberately NOT ported: substitution resolution. Values containing
+       * an unescaped, non-single-quoted $ are flagged `hasReference` and
+       * treated as opaque text (see "Handling of ${VAR} references" in the
+       * spec) instead of being resolved, since the browser cannot see the
+       * target server's process environment and dotenvy checks that first.
+       * ==================================================================== */
+
+      function isWsNotNewline(c) {
+        return /\s/.test(c) && c !== "\n" && c !== "\r";
+      }
+
+      // Mirrors dotenvy's eval_end_state: given the state left over from the
+      // previous physical line and the next physical line's text (including
+      // its trailing \n if any), returns the new state and, if a `#` ended
+      // the value, the offset of that `#` within `chunk`.
+      function evalEndState(state, chunk) {
+        let cur = state;
+        let pos = 0;
+        for (let i = 0; i < chunk.length; i++) {
+          pos = i;
+          const c = chunk[i];
+          switch (cur) {
+            case "WhiteSpace":
+              if (c === "#") return { pos, state: "Comment" };
+              else if (c === "\\") cur = "Escape";
+              else if (c === '"') cur = "WeakOpen";
+              else if (c === "'") cur = "StrongOpen";
+              else cur = "Complete";
+              break;
+            case "Escape":
+              cur = "Complete";
+              break;
+            case "Complete":
+              if (isWsNotNewline(c)) cur = "WhiteSpace";
+              else if (c === "\\") cur = "Escape";
+              else if (c === '"') cur = "WeakOpen";
+              else if (c === "'") cur = "StrongOpen";
+              else cur = "Complete";
+              break;
+            case "WeakOpen":
+              if (c === "\\") cur = "WeakOpenEscape";
+              else if (c === '"') cur = "Complete";
+              else cur = "WeakOpen";
+              break;
+            case "WeakOpenEscape":
+              cur = "WeakOpen";
+              break;
+            case "StrongOpen":
+              if (c === "\\") cur = "StrongOpenEscape";
+              else if (c === "'") cur = "Complete";
+              else cur = "StrongOpen";
+              break;
+            case "StrongOpenEscape":
+              cur = "StrongOpen";
+              break;
+            default:
+              throw new Error("unreachable eval_end_state: " + cur);
+          }
+        }
+        return { pos, state: cur };
+      }
+
+      function nextPhysicalLineEnd(source, from) {
+        const idx = source.indexOf("\n", from);
+        return idx === -1 ? source.length : idx + 1;
+      }
+
+      // Splits `source` into logical-line entries. Each entry is one of:
+      //   {type:'comment', start, end}
+      //   {type:'blank', start, end}
+      //   {type:'assignment', start, end, parseEnd, key, rawValueText, isExport}
+      //   {type:'unsupported', start, end, reason}
+      // `end` always lands exactly where the next entry begins, so
+      // source.slice(entries[i].start, entries[i].end) for every i,
+      // concatenated, reconstructs `source` byte-for-byte.
+      function splitLogicalLines(source) {
+        const entries = [];
+        const n = source.length;
+        let i = 0;
+        while (i < n) {
+          const start = i;
+          const firstLineEnd = nextPhysicalLineEnd(source, i);
+          const firstLine = source.slice(i, firstLineEnd);
+          if (firstLine.replace(/^[\s]+/, "").startsWith("#")) {
+            entries.push({ type: "comment", start, end: firstLineEnd });
+            i = firstLineEnd;
+            continue;
+          }
+          let state = "Complete";
+          let cur = i;
+          let parseEnd = null; // where value text ends (before an inline comment)
+          let consumedEnd = null; // where the next entry starts
+          let unterminated = false;
+          for (;;) {
+            const lineEnd = nextPhysicalLineEnd(source, cur);
+            const chunk = source.slice(cur, lineEnd);
+            if (chunk.length === 0) {
+              unterminated = true;
+              consumedEnd = cur;
+              parseEnd = cur;
+              break;
+            }
+            const res = evalEndState(state, chunk);
+            state = res.state;
+            if (state === "Complete") {
+              consumedEnd = lineEnd;
+              parseEnd = lineEnd;
+              break;
+            } else if (state === "Comment") {
+              parseEnd = cur + res.pos;
+              consumedEnd = lineEnd;
+              break;
+            }
+            cur = lineEnd;
+            if (cur >= n) {
+              unterminated = true;
+              consumedEnd = cur;
+              parseEnd = cur;
+              break;
+            }
+          }
+          if (unterminated) {
+            entries.push({
+              type: "unsupported",
+              start,
+              end: consumedEnd,
+              reason: "unterminated quote or trailing escape",
+            });
+            i = consumedEnd;
+            continue;
+          }
+          const valueParseText = source.slice(start, parseEnd);
+          const trimmed = valueParseText.trimEnd();
+          if (trimmed.trim() === "") {
+            entries.push({ type: "blank", start, end: consumedEnd });
+            i = consumedEnd;
+            continue;
+          }
+          const parsed = parseAssignment(trimmed);
+          if (parsed.error) {
+            entries.push({
+              type: "unsupported",
+              start,
+              end: consumedEnd,
+              reason: parsed.error,
+            });
+          } else {
+            entries.push({
+              type: "assignment",
+              start,
+              end: consumedEnd,
+              key: parsed.key,
+              value: parsed.value,
+              hasReference: parsed.hasReference,
+              isExport: parsed.isExport,
+            });
+          }
+          i = consumedEnd;
+        }
+        return entries;
+      }
+
+      // Ports LineParser::parse_line + parse_key + parse_value from
+      // dotenvy's parse.rs. `text` is one logical line already joined across
+      // physical lines and right-trimmed, exactly as dotenvy hands it to
+      // parse_line.
+      function parseAssignment(text) {
+        let line = text;
+        let pos = 0;
+
+        function skipWs() {
+          const m = line.match(/^\s*/);
+          line = line.slice(m[0].length);
+          pos += m[0].length;
+        }
+        function parseKey() {
+          if (!/^[A-Za-z_]/.test(line)) return null;
+          const m = line.match(/^[A-Za-z0-9_.]+/);
+          const key = m[0];
+          line = line.slice(key.length);
+          pos += key.length;
+          return key;
+        }
+        function expectEqual() {
+          if (!line.startsWith("=")) return false;
+          line = line.slice(1);
+          pos += 1;
+          return true;
+        }
+
+        skipWs();
+        let key = parseKey();
+        if (key === null) return { error: "line does not start with a variable name" };
+        skipWs();
+
+        let isExport = false;
+        if (key === "export") {
+          if (!expectEqual()) {
+            isExport = true;
+            key = parseKey();
+            if (key === null) return { error: "`export` not followed by a variable name" };
+            skipWs();
+            if (!expectEqual()) return { error: "expected '=' after variable name" };
+          }
+        } else if (!expectEqual()) {
+          return { error: "expected '=' after variable name" };
+        }
+        skipWs();
+
+        if (line === "" || line.startsWith("#")) {
+          return { key, value: "", hasReference: false, isExport };
+        }
+
+        const rawValuePortion = line;
+        const parsedValue = parseValue(line);
+        if (parsedValue.error) return { error: parsedValue.error };
+        // For values containing a ${VAR}/$VAR reference, keep the exact
+        // source text (quotes and all) instead of the partially-built
+        // literal output: the editor does not resolve references, so the
+        // only thing it can safely preserve is what was actually written.
+        const value = parsedValue.hasReference ? rawValuePortion : parsedValue.value;
+        return { key, value, hasReference: parsedValue.hasReference, isExport };
+      }
+
+      // Ports parse_value. Faithfully tracks quote/escape state (so parse
+      // errors match dotenvy exactly) but does not resolve ${VAR}/$VAR: it
+      // only records that a reference occurred.
+      function parseValue(input) {
+        let strongQuote = false;
+        let weakQuote = false;
+        let escaped = false;
+        let expectingEnd = false;
+        let output = "";
+        let hasReference = false;
+        let subMode = "None"; // None | Block | EscapedBlock
+
+        const chars = Array.from(input);
+        for (let index = 0; index < chars.length; index++) {
+          const c = chars[index];
+          if (expectingEnd) {
+            if (c === " " || c === "\t") continue;
+            else if (c === "#") break;
+            else return { error: "unexpected character after value: '" + c + "'" };
+          } else if (escaped) {
+            if (c === "\\" || c === "'" || c === '"' || c === "$" || c === " ") output += c;
+            else if (c === "n") output += "\n";
+            else return { error: "invalid escape sequence \\" + c };
+            escaped = false;
+          } else if (strongQuote) {
+            if (c === "'") strongQuote = false;
+            else output += c;
+          } else if (subMode !== "None") {
+            if (/[a-zA-Z0-9]/.test(c)) {
+              // accumulate substitution name (value unused, see header note)
+            } else if (subMode === "Block") {
+              if (c === "{") {
+                subMode = "EscapedBlock";
+              } else {
+                hasReference = true;
+                if (c === "$") {
+                  subMode = !strongQuote && !escaped ? "Block" : "None";
+                } else {
+                  subMode = "None";
+                  output += c;
+                }
+              }
+            } else if (subMode === "EscapedBlock") {
+              if (c === "}") {
+                subMode = "None";
+                hasReference = true;
+              }
+              // else: still inside ${...}, keep consuming
+            }
+          } else if (c === "$") {
+            subMode = !strongQuote && !escaped ? "Block" : "None";
+          } else if (weakQuote) {
+            if (c === '"') weakQuote = false;
+            else if (c === "\\") escaped = true;
+            else output += c;
+          } else if (c === "'") {
+            strongQuote = true;
+          } else if (c === '"') {
+            weakQuote = true;
+          } else if (c === "\\") {
+            escaped = true;
+          } else if (c === " " || c === "\t") {
+            expectingEnd = true;
+          } else {
+            output += c;
+          }
+        }
+
+        if (subMode === "EscapedBlock" || strongQuote || weakQuote) {
+          return { error: "unterminated quote or ${...} reference" };
+        }
+        if (subMode === "Block") hasReference = true;
+        return { value: output, hasReference };
+      }
+
+      /* ======================================================================
+       * DOCUMENT MODEL
+       * ==================================================================== */
+
+      // Builds the working document from imported text (or an empty one for
+      // "new configuration"). `keyOccurrences[key]` lists, in document order,
+      // the entry indices where that key is assigned (dotenvy semantics: the
+      // first occurrence is effective, later ones are inert but preserved).
+      function buildDocument(source) {
+        const entries = source === null ? [] : splitLogicalLines(source);
+        const keyOccurrences = {};
+        entries.forEach((e, idx) => {
+          if (e.type === "assignment") {
+            (keyOccurrences[e.key] = keyOccurrences[e.key] || []).push(idx);
+          }
+        });
+        return { source: source || "", entries, keyOccurrences };
+      }
+
+      function firstOccurrenceValue(doc, key) {
+        const occ = doc.keyOccurrences[key];
+        if (!occ || occ.length === 0) return undefined;
+        return doc.entries[occ[0]];
+      }
+
+      /* ======================================================================
+       * bech32 (BIP-173) decoder, used only to validate npub checksums
+       * ==================================================================== */
+
+      const BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+      function bech32Polymod(values) {
+        const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+        let chk = 1;
+        for (const v of values) {
+          const b = chk >>> 25;
+          chk = ((chk & 0x1ffffff) << 5) ^ v;
+          for (let i = 0; i < 5; i++) {
+            if ((b >>> i) & 1) chk ^= GEN[i];
+          }
+        }
+        return chk >>> 0;
+      }
+      function bech32HrpExpand(hrp) {
+        const out = [];
+        for (let i = 0; i < hrp.length; i++) out.push(hrp.charCodeAt(i) >>> 5);
+        out.push(0);
+        for (let i = 0; i < hrp.length; i++) out.push(hrp.charCodeAt(i) & 31);
+        return out;
+      }
+      function isValidNpub(value) {
+        const v = value.trim().toLowerCase();
+        const pos = v.lastIndexOf("1");
+        if (pos < 1 || pos + 7 > v.length || v.length > 90) return false;
+        const hrp = v.slice(0, pos);
+        if (hrp !== "npub") return false;
+        const data = v.slice(pos + 1);
+        const values = [];
+        for (const ch of data) {
+          const idx = BECH32_CHARSET.indexOf(ch);
+          if (idx === -1) return false;
+          values.push(idx);
+        }
+        const polymod = bech32Polymod(bech32HrpExpand(hrp).concat(values));
+        if (polymod !== 1) return false;
+        // 32-byte pubkey encoded as 5-bit groups plus 6-char checksum: 52 + 6
+        return data.length === 58;
+      }
+
+      /* ======================================================================
+       * FIELD STATE + EFFECTIVE VALUE RESOLUTION
+       * ==================================================================== */
+
+      // fieldStates[name] = { enabled: bool, value: string,
+      //                        hasReference: bool, showSecret: bool }
+      //
+      // Two pieces of state, not three: `enabled` is whether the .env
+      // contains the line at all, `value` is what it says. An enabled field
+      // whose value is "" is therefore exactly the `KEY=` case, so there is
+      // no separate "explicit empty" state that could drift out of sync
+      // with the text in the box.
+      let fieldStates = {};
+      let doc = buildDocument(null);
+      let importDiagnostics = { duplicates: [], unknown: [], unsupported: [] };
+
+      function resetFieldStates() {
+        fieldStates = {};
+        for (const f of ALMOND_SCHEMA) {
+          fieldStates[f.name] = { enabled: false, value: "", hasReference: false, showSecret: false };
+        }
+      }
+      resetFieldStates();
+
+      function loadFromDocument() {
+        resetFieldStates();
+        const diagUnknown = [];
+        const diagDuplicates = [];
+        const diagUnsupported = [];
+        for (const key of Object.keys(doc.keyOccurrences)) {
+          const occ = doc.keyOccurrences[key];
+          if (occ.length > 1) diagDuplicates.push({ key, count: occ.length });
+          const entry = doc.entries[occ[0]];
+          if (!SCHEMA_BY_NAME[key]) {
+            diagUnknown.push(key);
+            continue;
+          }
+          fieldStates[key] = {
+            enabled: true,
+            value: entry.value,
+            hasReference: entry.hasReference,
+            showSecret: false,
+          };
+        }
+        for (const e of doc.entries) {
+          if (e.type === "unsupported") {
+            diagUnsupported.push({
+              start: e.start,
+              end: e.end,
+              reason: e.reason,
+              snippet: doc.source.slice(e.start, e.end).slice(0, 160),
+            });
+          }
+        }
+        importDiagnostics = { duplicates: diagDuplicates, unknown: diagUnknown, unsupported: diagUnsupported };
+      }
+
+      function effectiveDefault(name) {
+        const f = SCHEMA_BY_NAME[name];
+        if (f.conditionalDefault) {
+          const httpsState = fieldStates.ENABLE_HTTPS;
+          const httpsOn = httpsState.enabled && /^(true|1|on)$/i.test(httpsState.value.trim());
+          return httpsOn ? "https://127.0.0.1:3000" : "http://127.0.0.1:3000";
+        }
+        return f.default;
+      }
+
+      // Resolves what Config::from_map would compute for this field, as a
+      // string, or null when the field is not written and has no default,
+      // or {error} if the field's own state is invalid (an empty value on a
+      // hard_error field, or a value that fails validation). Does not
+      // attempt cross-field invariants.
+      function resolveEffective(name) {
+        const f = SCHEMA_BY_NAME[name];
+        const st = fieldStates[name];
+        if (!st.enabled) return { value: effectiveDefault(name) };
+        // A reference is resolved from the target machine's environment at
+        // startup, so there is nothing to compute here.
+        if (st.hasReference) return { value: null, opaque: true };
+        if (st.value === "") {
+          if (f.empty === "hard_error") return { error: f.name + " must not be empty" };
+          if (f.empty === "like_unset") return { value: effectiveDefault(name) };
+          return { value: "" };
+        }
+        const err = validateFieldValue(f, st.value);
+        if (err) return { error: err };
+        return { value: st.value };
+      }
+
+      function validateFieldValue(f, raw) {
+        const value = raw;
+        switch (f.kind) {
+          case "bool": {
+            if (!/^(true|false|1|0|on|off)$/i.test(value.trim())) {
+              return "must be one of true/false/1/0/on/off";
+            }
+            return null;
+          }
+          case "number": {
+            if (!/^\d+$/.test(value.trim())) return "must be a non-negative integer";
+            const n = Number(value.trim());
+            if (f.min !== undefined && n < f.min) return "must be at least " + f.min;
+            if (!Number.isSafeInteger(n)) return "value is too large";
+            return null;
+          }
+          case "socketaddr": {
+            const v = value.trim();
+            const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/;
+            const v6 = /^\[([0-9a-fA-F:]+)\]:(\d{1,5})$/;
+            const m4 = v.match(v4);
+            const m6 = v.match(v6);
+            if (m4) {
+              const octetsOk = [1, 2, 3, 4].every((i) => Number(m4[i]) <= 255);
+              const portOk = Number(m4[5]) <= 65535;
+              if (!octetsOk || !portOk) return "not a valid IPv4:port address";
+              return null;
+            }
+            if (m6) {
+              if (Number(m6[2]) > 65535) return "not a valid [IPv6]:port address";
+              return null;
+            }
+            return "must be a literal IP:port address, e.g. 127.0.0.1:3000 or [::]:80 (hostnames are not accepted)";
+          }
+          case "url": {
+            try {
+              // eslint-disable-next-line no-new
+              new URL(value);
+              return null;
+            } catch (e) {
+              return "not a valid URL";
+            }
+          }
+          case "string":
+          case "path":
+            return null;
+          case "secret":
+            return null;
+          case "enum": {
+            if (!f.values.includes(value)) {
+              return "must be one of: " + f.values.join(", ");
+            }
+            return null;
+          }
+          case "list": {
+            const items = splitList(value);
+            if (items.length === 0) return "must contain at least one entry, or be left unset";
+            return null;
+          }
+          case "list_u16": {
+            const items = splitList(value);
+            if (items.length === 0) return "must contain at least one entry, or be left unset";
+            for (const item of items) {
+              if (!/^\d+$/.test(item) || Number(item) > 65535) {
+                return "'" + item + "' is not a valid event kind (0-65535)";
+              }
+            }
+            return null;
+          }
+          case "list_npub": {
+            const items = splitList(value);
+            if (items.length === 0) return "must contain at least one entry, or be left unset";
+            for (const item of items) {
+              if (!isValidNpub(item)) return "'" + item + "' is not a valid npub (bad bech32 checksum)";
+            }
+            return null;
+          }
+          default:
+            return null;
+        }
+      }
+
+      function splitList(value) {
+        return value
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+      }
+
+      /* ======================================================================
+       * PER-FIELD VALIDATION ERRORS, aggregated
+       *
+       * resolveEffective() already computes a per-field error (bad type,
+       * empty on a hard_error field, invalid enum choice, ...) for the
+       * inline message under each field. This collects the same errors so
+       * the spec's "export is blocked while any known field is invalid"
+       * rule actually holds — crossFieldErrors() alone only covers the four
+       * multi-field invariants, not a single field being wrong on its own.
+       * ==================================================================== */
+
+      function perFieldErrors() {
+        const errors = [];
+        for (const f of ALMOND_SCHEMA) {
+          const st = fieldStates[f.name];
+          if (!st.enabled || st.hasReference) continue;
+          const r = resolveEffective(f.name);
+          if (r.error) errors.push(f.name + ": " + r.error);
+        }
+        return errors;
+      }
+
+      /* ======================================================================
+       * CROSS-FIELD VALIDATION (mirrors the invariants in Config::from_map)
+       * ==================================================================== */
+
+      function crossFieldErrors() {
+        const errors = [];
+        const eff = {};
+        for (const f of ALMOND_SCHEMA) {
+          const r = resolveEffective(f.name);
+          eff[f.name] = r;
+        }
+
+        // S3: all four or none.
+        const s3Fields = [
+          "ALMOND_S3_ENDPOINT",
+          "ALMOND_S3_BUCKET",
+          "ALMOND_S3_ACCESS_KEY_ID",
+          "ALMOND_S3_SECRET_ACCESS_KEY",
+        ];
+        const s3Set = s3Fields.filter((n) => fieldStates[n].enabled).length;
+        if (s3Set !== 0 && s3Set !== 4) {
+          errors.push(
+            "Incomplete S3 configuration: all of " + s3Fields.join(", ") + " must be set together, or none."
+          );
+        }
+
+        // MAX_CHUNK_SIZE_MB <= MAX_BLOB_SIZE_MB
+        if (!eff.MAX_CHUNK_SIZE_MB.error && !eff.MAX_BLOB_SIZE_MB.error) {
+          if (Number(eff.MAX_CHUNK_SIZE_MB.value) > Number(eff.MAX_BLOB_SIZE_MB.value)) {
+            errors.push("MAX_CHUNK_SIZE_MB cannot exceed MAX_BLOB_SIZE_MB.");
+          }
+        }
+
+        // Paid features require exactly one mint.
+        const paidOn = ["FEATURE_PAID_UPLOAD", "FEATURE_PAID_MIRROR", "FEATURE_PAID_DOWNLOAD"].some(
+          (n) => !eff[n].error && /^(true|1|on)$/i.test(String(eff[n].value).trim())
+        );
+        if (paidOn) {
+          const mints = eff.CASHU_ACCEPTED_MINTS.error || eff.CASHU_ACCEPTED_MINTS.value === null
+            ? []
+            : splitList(eff.CASHU_ACCEPTED_MINTS.value);
+          if (mints.length !== 1) {
+            errors.push("Exactly one CASHU_ACCEPTED_MINTS value is required when a paid feature is on.");
+          }
+        }
+
+        // DVM mode requires DVM_ALLOWED_KINDS.
+        const needsDvm = ["FEATURE_UPLOAD_ENABLED", "FEATURE_MIRROR_ENABLED"].some(
+          (n) => !eff[n].error && eff[n].value === "dvm"
+        );
+        if (needsDvm) {
+          const kinds = eff.DVM_ALLOWED_KINDS.error || eff.DVM_ALLOWED_KINDS.value === null
+            ? []
+            : splitList(eff.DVM_ALLOWED_KINDS.value);
+          if (kinds.length === 0) {
+            errors.push("DVM_ALLOWED_KINDS must be set when any feature uses 'dvm' mode.");
+          }
+        }
+
+        return errors;
+      }
+
+      /* ======================================================================
+       * RISK RULES (informational + warnings, never block export)
+       * ==================================================================== */
+
+      function riskFindings() {
+        const findings = [];
+        const eff = {};
+        for (const f of ALMOND_SCHEMA) eff[f.name] = resolveEffective(f.name);
+        const val = (n) => (eff[n] && !eff[n].error ? eff[n].value : null);
+        const isTrue = (n) => {
+          const v = val(n);
+          return v !== null && /^(true|1|on)$/i.test(String(v));
+        };
+        const listLen = (n) => {
+          const v = val(n);
+          return v ? splitList(v).length : 0;
+        };
+
+        const bindAddr = val("BIND_ADDR") || "";
+        const bindIsLocal = /^(127\.0\.0\.1|\[::1\]|localhost)/i.test(bindAddr);
+        if (!bindIsLocal) {
+          findings.push({
+            severity: "warn",
+            text: "BIND_ADDR (" + bindAddr + ") is not localhost \u2014 Almond will be reachable from outside this machine.",
+          });
+        }
+
+        const publicUrl = val("PUBLIC_URL") || "";
+        if (!bindIsLocal && /127\.0\.0\.1/.test(publicUrl)) {
+          findings.push({
+            severity: "warn",
+            text: "PUBLIC_URL still points at 127.0.0.1 while BIND_ADDR is not localhost \u2014 generated blob descriptors will point nowhere reachable.",
+          });
+        }
+
+        if (
+          (val("FEATURE_UPLOAD_ENABLED") === "public" || val("FEATURE_MIRROR_ENABLED") === "public") &&
+          listLen("ALLOWED_NPUBS") === 0
+        ) {
+          findings.push({
+            severity: "warn",
+            text: "Upload or mirror is public with no ALLOWED_NPUBS \u2014 write access relies on signature verification alone, open to anyone.",
+          });
+        }
+
+        if (listLen("CORS_ALLOWED_ORIGINS") > 0) {
+          findings.push({
+            severity: "info",
+            text: "CORS_ALLOWED_ORIGINS is set \u2014 those origins can read discovery and metrics responses cross-origin.",
+          });
+        }
+
+        if (val("METRICS_BEARER_TOKEN") && !bindIsLocal) {
+          findings.push({
+            severity: "info",
+            text: "METRICS_BEARER_TOKEN is set and BIND_ADDR is not localhost \u2014 /metrics is reachable externally; keep the token secret.",
+          });
+        }
+
+        if (String(val("MAX_TOTAL_SIZE")) === "99999" || String(val("MAX_TOTAL_FILES")) === "99999999") {
+          findings.push({
+            severity: "info",
+            text: "MAX_TOTAL_SIZE / MAX_TOTAL_FILES are at their default \u2014 storage is practically unbounded.",
+          });
+        }
+
+        if (String(val("MAX_FILE_AGE_DAYS")) === "0") {
+          findings.push({ severity: "info", text: "MAX_FILE_AGE_DAYS is 0 \u2014 uploads never expire by age." });
+        }
+
+        if (isTrue("ENABLE_HTTPS") && isTrue("TLS_AUTO_GENERATE")) {
+          findings.push({
+            severity: "warn",
+            text: "ENABLE_HTTPS with TLS_AUTO_GENERATE uses a self-signed certificate \u2014 development only.",
+          });
+        }
+
+        if (val("FEATURE_HOMEPAGE_ENABLED") !== null && !isTrue("FEATURE_HOMEPAGE_ENABLED")) {
+          findings.push({
+            severity: "info",
+            text: "FEATURE_HOMEPAGE_ENABLED is off \u2014 on the server that serves it, this also disables the /config editor route.",
+          });
+        }
+
+        return findings;
+      }
+
+      /* ======================================================================
+       * EXPORT / SERIALIZATION
+       * ==================================================================== */
+
+      function chooseQuoting(value) {
+        if (value === "") return "";
+        if (/^[A-Za-z0-9_.\-\/:@%+,]*$/.test(value)) return value;
+        if (!value.includes("'")) return "'" + value + "'";
+        const escaped = value
+          .replace(/\\/g, "\\\\")
+          .replace(/"/g, '\\"')
+          .replace(/\$/g, "\\$")
+          .replace(/\n/g, "\\n");
+        return '"' + escaped + '"';
+      }
+
+      function serializeAssignment(name, state) {
+        if (!state.enabled) return null;
+        // A reference-containing value is opaque: state.value is already the
+        // exact source text the user is editing (quotes included, if any),
+        // so it is emitted verbatim rather than re-quoted.
+        if (state.hasReference) return name + "=" + state.value;
+        return name + "=" + chooseQuoting(state.value);
+      }
+
+      function buildExport() {
+        const editedKeys = new Set(Object.keys(fieldStates).filter((k) => {
+          const st = fieldStates[k];
+          const original = firstOccurrenceValue(doc, k);
+          if (!original) return st.enabled;
+          if (!st.enabled) return true; // present in the import, now switched off
+          return original.value !== st.value;
+        }));
+
+        let out = "";
+        for (const entry of doc.entries) {
+          if (entry.type !== "assignment" || !SCHEMA_BY_NAME[entry.key]) {
+            out += doc.source.slice(entry.start, entry.end);
+            continue;
+          }
+          const occ = doc.keyOccurrences[entry.key];
+          const isFirst = doc.entries.indexOf(entry) === occ[0];
+          if (!isFirst || !editedKeys.has(entry.key)) {
+            out += doc.source.slice(entry.start, entry.end);
+            continue;
+          }
+          const line = serializeAssignment(entry.key, fieldStates[entry.key]);
+          const prefix = entry.isExport ? "export " : "";
+          out += line === null ? "" : prefix + line + "\n";
+        }
+
+        const newKeys = ALMOND_SCHEMA.map((f) => f.name).filter(
+          (name) => editedKeys.has(name) && !doc.keyOccurrences[name] && fieldStates[name].enabled
+        );
+        if (newKeys.length > 0) {
+          if (out.length > 0 && !out.endsWith("\n\n")) out += out.endsWith("\n") ? "\n" : "\n\n";
+          out += "# --- Almond configuration (added by config editor) ---\n";
+          for (const name of newKeys) {
+            out += serializeAssignment(name, fieldStates[name]) + "\n";
+          }
+          out += "# --- end Almond configuration ---\n";
+        }
+        return out;
+      }
+
+      /* ======================================================================
+       * UI RENDERING
+       * ==================================================================== */
+
+      const app = document.getElementById("app");
+      let searchQuery = "";
+      let mode = "new"; // 'new' | 'import'
+
+      function el(tag, attrs, children) {
+        const e = document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs || {})) {
+          // `setAttribute(name, undefined)` stringifies to "undefined" and
+          // therefore sets the attribute — which for a boolean attribute
+          // like `disabled` or `open` means "present" either way. Skipping
+          // undefined/false here is what makes `disabled: cond ? "" : undefined`
+          // actually mean "no disabled attribute" when cond is false.
+          if (v === undefined || v === false) continue;
+          if (k === "class") e.className = v;
+          else if (k === "text") e.textContent = v;
+          else if (k.startsWith("on") && typeof v === "function") e.addEventListener(k.slice(2), v);
+          else e.setAttribute(k, v);
+        }
+        for (const c of children || []) {
+          if (c) e.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+        }
+        return e;
+      }
+
+      // render() rebuilds the entire tree from scratch on every keystroke
+      // (simplest correct approach for a form this size: every input can
+      // affect validation, risk notes and the export preview at once). That
+      // would normally drop keyboard focus and cursor position after each
+      // character, since the focused DOM node gets thrown away and replaced.
+      // This wrapper saves which field was focused (by its stable
+      // data-field/data-role attribute, not a DOM reference) and its text
+      // selection before rebuilding, then restores both afterwards.
+      function render() {
+        const active = document.activeElement;
+        let restoreSelector = null;
+        let selStart = null;
+        let selEnd = null;
+        if (active && app.contains(active) && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) {
+          const field = active.getAttribute("data-field");
+          const role = active.getAttribute("data-role");
+          if (field) restoreSelector = '[data-field="' + CSS.escape(field) + '"]';
+          else if (role) restoreSelector = '[data-role="' + CSS.escape(role) + '"]';
+          try {
+            // Reading selectionStart on a password-type <input> throws in
+            // Chrome instead of returning undefined.
+            if (typeof active.selectionStart === "number") {
+              selStart = active.selectionStart;
+              selEnd = active.selectionEnd;
+            }
+          } catch (e) {
+            // Password inputs land here; selStart/selEnd simply stay null.
+          }
+        }
+        renderInner();
+        if (restoreSelector) {
+          const el = app.querySelector(restoreSelector);
+          if (el) {
+            el.focus();
+            if (selStart !== null && typeof el.setSelectionRange === "function") {
+              try {
+                el.setSelectionRange(selStart, selEnd);
+              } catch (e) {
+                // Some input types (e.g. number) don't support selection ranges.
+              }
+            }
+          }
+        }
+      }
+
+      function renderInner() {
+        if (location.hash === "#selftest") {
+          renderSelfTest();
+          return;
+        }
+        app.innerHTML = "";
+        app.appendChild(renderHeader());
+        app.appendChild(renderModeTabs());
+        if (mode === "import") app.appendChild(renderImportArea());
+        app.appendChild(renderToolbar());
+
+        const errors = perFieldErrors().concat(crossFieldErrors());
+        const risks = riskFindings();
+        if (mode === "import") {
+          app.appendChild(renderDiagnostics());
+        }
+        if (risks.length > 0) app.appendChild(renderRiskPanel(risks));
+        if (errors.length > 0) app.appendChild(renderErrorPanel(errors));
+
+        app.appendChild(renderCategories());
+        app.appendChild(renderExportPanel(errors));
+      }
+
+      function renderHeader() {
+        return el("div", {}, [
+          el("h1", { text: "🌸 Almond Configuration Editor" }),
+          el("div", { class: "subtitle" }, [
+            "Runs entirely in this browser tab. ",
+            el("strong", { text: "No data leaves this page." }),
+            " Build a fresh .env or import an existing one, then export.",
+          ]),
+        ]);
+      }
+
+      function renderModeTabs() {
+        const wrap = el("div", { class: "mode-tabs" });
+        const newBtn = el("button", {
+          class: mode === "new" ? "active" : "",
+          text: "New configuration",
+          onclick: () => {
+            mode = "new";
+            doc = buildDocument(null);
+            resetFieldStates();
+            render();
+          },
+        });
+        const importBtn = el("button", {
+          class: mode === "import" ? "active" : "",
+          text: "Import existing .env",
+          onclick: () => {
+            mode = "import";
+            render();
+          },
+        });
+        wrap.appendChild(newBtn);
+        wrap.appendChild(importBtn);
+        return wrap;
+      }
+
+      function renderImportArea() {
+        const wrap = el("section", {});
+        wrap.appendChild(el("h2", { text: "Import" }));
+        const fileInput = el("input", { type: "file", accept: ".env,text/plain" });
+        fileInput.addEventListener("change", async () => {
+          const file = fileInput.files[0];
+          if (!file) return;
+          const text = await file.text();
+          textarea.value = text;
+          applyImport(text);
+        });
+        const textarea = el("textarea", {
+          "data-role": "import-textarea",
+          placeholder: "Paste the contents of an existing .env file here, or choose a file above.",
+        });
+        const applyBtn = el("button", {
+          class: "small",
+          text: "Parse & load",
+          onclick: () => applyImport(textarea.value),
+        });
+        wrap.appendChild(fileInput);
+        wrap.appendChild(textarea);
+        wrap.appendChild(el("div", { style: "margin-top:8px" }, [applyBtn]));
+        return wrap;
+      }
+
+      function applyImport(text) {
+        doc = buildDocument(text);
+        loadFromDocument();
+        render();
+      }
+
+      function renderToolbar() {
+        const wrap = el("div", { class: "toolbar" });
+        const search = el("input", {
+          type: "text",
+          "data-role": "search",
+          placeholder: "Search variables\u2026",
+          value: searchQuery,
+        });
+        search.addEventListener("input", () => {
+          searchQuery = search.value;
+          render();
+        });
+        wrap.appendChild(search);
+        return wrap;
+      }
+
+      function renderDiagnostics() {
+        const wrap = el("section", {});
+        wrap.appendChild(el("h2", { text: "Import diagnostics" }));
+        const { duplicates, unknown, unsupported } = importDiagnostics;
+        if (duplicates.length === 0 && unknown.length === 0 && unsupported.length === 0) {
+          wrap.appendChild(el("p", { class: "empty-note", text: "Nothing unusual found in the imported file." }));
+          return wrap;
+        }
+        if (duplicates.length > 0) {
+          wrap.appendChild(
+            el("p", { text: "Duplicate keys (the first occurrence is effective; dotenvy ignores the rest \u2014 note that Docker Compose's own .env parser resolves duplicates the other way, last wins):" })
+          );
+          const ul = el("ul", { class: "panel-list" });
+          duplicates.forEach((d) => ul.appendChild(el("li", { text: d.key + " (" + d.count + "\u00d7)" })));
+          wrap.appendChild(ul);
+        }
+        if (unknown.length > 0) {
+          wrap.appendChild(
+            el("p", { text: "Variables not part of Almond's core schema (preserved unchanged on export, e.g. FIPS_* or RUST_LOG):" })
+          );
+          const ul = el("ul", { class: "panel-list" });
+          unknown.forEach((k) => ul.appendChild(el("li", { text: k })));
+          wrap.appendChild(ul);
+        }
+        if (unsupported.length > 0) {
+          wrap.appendChild(el("p", { text: "Lines this editor could not parse (preserved unchanged, not editable through the form):" }));
+          const ul = el("ul", { class: "panel-list" });
+          unsupported.forEach((u) =>
+            ul.appendChild(el("li", { text: u.reason + ": " + JSON.stringify(u.snippet) }))
+          );
+          wrap.appendChild(ul);
+        }
+        return wrap;
+      }
+
+      function renderRiskPanel(risks) {
+        const wrap = el("section", {});
+        wrap.appendChild(el("h2", { text: "Risk notes" }));
+        const ul = el("ul", { class: "panel-list" });
+        risks.forEach((r) => {
+          ul.appendChild(el("li", { class: r.severity === "warn" ? "risk-warn" : "risk-info", text: (r.severity === "warn" ? "\u26a0 " : "\u2139 ") + r.text }));
+        });
+        wrap.appendChild(ul);
+        return wrap;
+      }
+
+      function renderErrorPanel(errors) {
+        const wrap = el("section", {});
+        wrap.appendChild(el("h2", { text: "Blocking validation errors" }));
+        const ul = el("ul", { class: "panel-list" });
+        errors.forEach((e) => ul.appendChild(el("li", { class: "risk-warn", text: e })));
+        wrap.appendChild(ul);
+        return wrap;
+      }
+
+      function fieldMatchesSearch(f) {
+        if (!searchQuery.trim()) return true;
+        const q = searchQuery.toLowerCase();
+        return f.name.toLowerCase().includes(q) || (f.help || "").toLowerCase().includes(q);
+      }
+
+      // render() rebuilds every <details> element from scratch, which would
+      // otherwise silently re-collapse a category the user just opened the
+      // moment they interact with anything inside it (every keystroke calls
+      // render()). Manually opened categories are tracked here so rebuilds
+      // can restore them; this set is intentionally not cleared by a search,
+      // so a category opened while searching stays open once the search
+      // is cleared.
+      const manuallyOpenedCategories = new Set();
+
+      function renderCategories() {
+        const wrap = document.createDocumentFragment();
+        for (const cat of CATEGORIES) {
+          const fields = ALMOND_SCHEMA.filter((f) => f.category === cat.id && fieldMatchesSearch(f));
+          if (fields.length === 0) continue;
+          const isOpen = searchQuery.trim() !== "" || manuallyOpenedCategories.has(cat.id);
+          const details = el("details", { class: "field-category", open: isOpen ? "" : undefined });
+          details.addEventListener("toggle", () => {
+            if (details.open) manuallyOpenedCategories.add(cat.id);
+            else manuallyOpenedCategories.delete(cat.id);
+          });
+          const summary = el("summary", {});
+          summary.appendChild(el("span", { text: cat.title }));
+          const setCount = fields.filter((f) => fieldStates[f.name].enabled).length;
+          summary.appendChild(
+            el("span", {
+              class: "count",
+              text: setCount > 0 ? "(" + setCount + " of " + fields.length + " set)" : "(" + fields.length + ")",
+            })
+          );
+          details.appendChild(summary);
+          const fieldsWrap = el("div", { class: "fields" });
+          fields.forEach((f) => fieldsWrap.appendChild(renderField(f)));
+          details.appendChild(fieldsWrap);
+          wrap.appendChild(details);
+        }
+        return wrap;
+      }
+
+      // Clicking straight into a value control switches the variable on —
+      // that is the reason an unset field's control is not `disabled`.
+      // Keyboard traversal must not do the same, or tabbing through the
+      // form would quietly switch on fifty variables, so a focus only
+      // counts as intent when it arrived while a pointer button was down.
+      let pointerIsDown = false;
+      document.addEventListener("pointerdown", () => { pointerIsDown = true; }, true);
+      document.addEventListener("pointerup", () => { pointerIsDown = false; }, true);
+      document.addEventListener("pointercancel", () => { pointerIsDown = false; }, true);
+      document.addEventListener("keydown", () => { pointerIsDown = false; }, true);
+
+      function renderField(f) {
+        const st = fieldStates[f.name];
+        const row = el("div", { class: "field-row " + (st.enabled ? "is-set" : "is-default") });
+
+        const nameLine = el("div", { class: "field-name" });
+        nameLine.appendChild(renderEnableToggle(f, st));
+        nameLine.appendChild(el("span", { class: "var-name", text: f.name }));
+        if (f.sensitive) nameLine.appendChild(el("span", { class: "badge badge-sensitive", text: "secret" }));
+        if (st.hasReference) nameLine.appendChild(el("span", { class: "badge badge-ref", text: "\u2260 literal" }));
+        row.appendChild(nameLine);
+
+        const valueCell = el("div", { class: "value-cell" });
+        if (st.hasReference) {
+          const raw = el("input", { type: "text", "data-field": f.name, value: st.value });
+          raw.addEventListener("input", () => {
+            // Re-derive hasReference from the edited text: if the user
+            // removes the reference entirely, the field graduates back to
+            // a normal, validated control instead of staying opaque
+            // forever (which would otherwise let an unquoted, unsafe value
+            // through unquoted on export).
+            const reparsed = parseValue(raw.value);
+            if (!reparsed.error && !reparsed.hasReference) {
+              st.hasReference = false;
+              st.value = reparsed.value;
+            } else {
+              st.hasReference = true;
+              st.value = raw.value;
+            }
+            st.enabled = true;
+            render();
+          });
+          valueCell.appendChild(raw);
+        } else {
+          valueCell.appendChild(renderValueControl(f, st));
+        }
+        row.appendChild(valueCell);
+
+        row.appendChild(el("div", { class: "field-help", text: f.help }));
+
+        if (st.hasReference) {
+          const rawCheck = parseValue(st.value);
+          if (rawCheck.error) {
+            row.appendChild(
+              el("div", { class: "field-error", text: "\u2717 " + rawCheck.error + " (this line would fail to parse on export)" })
+            );
+          } else {
+            row.appendChild(
+              el("div", {
+                class: "ref-warning",
+                text: "\u2139 Contains a ${VAR} / $VAR reference. Kept exactly as written; Almond resolves it at startup, so this editor does not evaluate or validate it.",
+              })
+            );
+          }
+        } else if (st.enabled) {
+          const eff = resolveEffective(f.name);
+          if (eff.error) {
+            row.appendChild(el("div", { class: "field-error", text: "\u2717 " + eff.error }));
+          } else if (st.value === "") {
+            // Checked with nothing typed is the `KEY=` line — the one case
+            // where a blank-looking field is not "untouched", and Almond
+            // reads it differently per field, so it gets spelled out.
+            row.appendChild(
+              el("div", {
+                class: "field-hint",
+                text:
+                  f.empty === "like_unset"
+                    ? "Writes " + f.name + "= \u2014 Almond treats that exactly like leaving it out."
+                    : "Writes " + f.name + "= \u2014 a literal empty value here, not the default (" + (f.default ?? "unset") + ").",
+              })
+            );
+          }
+        }
+
+        return row;
+      }
+
+      function renderEnableToggle(f, st) {
+        const box = el("input", {
+          type: "checkbox",
+          "data-role": "toggle:" + f.name,
+          title: st.enabled
+            ? f.name + " is written to the .env. Uncheck to leave it out and let Almond's default apply."
+            : f.name + " is left out, so Almond's default applies. Check it, or just click the field, to set it.",
+        });
+        box.checked = st.enabled;
+        box.addEventListener("change", () => {
+          st.enabled = box.checked;
+          render();
+        });
+        return box;
+      }
+
+      function renderValueControl(f, st) {
+        // An unset control stands in for Almond's default and only *looks*
+        // inactive; clicking into it, typing in it or picking an option all
+        // switch the variable on.
+        const inactive = st.enabled ? undefined : "inactive";
+        const activate = () => {
+          if (st.enabled) return false;
+          st.enabled = true;
+          return true;
+        };
+        const onPointerFocus = () => {
+          if (pointerIsDown && activate()) render();
+        };
+        const onChange = (v) => {
+          st.value = v;
+          activate();
+          render();
+        };
+        const fallback = effectiveDefault(f.name);
+        const placeholder = st.enabled ? undefined : fallback === null ? "(not set)" : fallback;
+
+        if (f.kind === "bool" || f.kind === "enum") {
+          const options = f.kind === "bool" ? f.boolWords || ["true", "false"] : f.values;
+          const select = el("select", { "data-field": f.name, class: inactive });
+          options.forEach((v) => select.appendChild(el("option", { value: v, text: v })));
+          // A <select> has no placeholder, so an unset one simply displays
+          // the default it stands in for.
+          const shown = String((st.enabled ? st.value : fallback) ?? "");
+          const match = options.find((v) => v.toLowerCase() === shown.toLowerCase());
+          select.value = match === undefined ? options[0] : match;
+          select.addEventListener("focus", onPointerFocus);
+          select.addEventListener("change", () => onChange(select.value));
+          return select;
+        }
+
+        if (f.kind === "number") {
+          const wrap = el("div", {});
+          const input = el("input", { type: "text", "data-field": f.name, class: inactive, placeholder: placeholder, value: st.value });
+          input.addEventListener("focus", onPointerFocus);
+          input.addEventListener("input", () => onChange(input.value));
+          wrap.appendChild(input);
+          if (f.unit) wrap.appendChild(el("span", { class: "unit", text: f.unit }));
+          return wrap;
+        }
+
+        if (f.kind === "list" || f.kind === "list_u16" || f.kind === "list_npub") {
+          const textarea = el("textarea", {
+            "data-field": f.name,
+            class: inactive,
+            placeholder: placeholder === undefined ? "comma-separated" : placeholder,
+          });
+          textarea.value = st.value;
+          textarea.addEventListener("focus", onPointerFocus);
+          textarea.addEventListener("input", () => onChange(textarea.value));
+          return textarea;
+        }
+
+        if (f.kind === "secret") {
+          const wrap = el("div", { class: "secret-row" });
+          const input = el("input", {
+            type: st.showSecret ? "text" : "password",
+            "data-field": f.name,
+            class: inactive,
+            placeholder: placeholder,
+            value: st.value,
+          });
+          input.addEventListener("focus", onPointerFocus);
+          input.addEventListener("input", () => onChange(input.value));
+          wrap.appendChild(input);
+          wrap.appendChild(
+            el("button", {
+              class: "small",
+              text: st.showSecret ? "Hide" : "Show",
+              onclick: () => {
+                st.showSecret = !st.showSecret;
+                render();
+              },
+            })
+          );
+          if (f.generatable) {
+            wrap.appendChild(
+              el("button", {
+                class: "small",
+                text: "Generate",
+                onclick: () => {
+                  st.showSecret = true;
+                  onChange(generateToken());
+                },
+              })
+            );
+          }
+          return wrap;
+        }
+
+        // string / path / url / socketaddr
+        const input = el("input", { type: "text", "data-field": f.name, class: inactive, placeholder: placeholder, value: st.value });
+        input.addEventListener("focus", onPointerFocus);
+        input.addEventListener("input", () => onChange(input.value));
+        return input;
+      }
+
+      function generateToken() {
+        const bytes = new Uint8Array(32);
+        crypto.getRandomValues(bytes);
+        return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+      }
+
+      function renderExportPanel(errors) {
+        const wrap = el("section", {});
+        wrap.appendChild(el("h2", { text: "Export" }));
+
+        const anySecretSet = ALMOND_SCHEMA.some((f) => f.sensitive && fieldStates[f.name].enabled);
+        if (anySecretSet) {
+          wrap.appendChild(
+            el("div", {
+              class: "secrets-warning",
+              text: "\u26a0 This .env may contain secrets. Do not commit it to version control.",
+            })
+          );
+        }
+
+        const blocked = errors.length > 0;
+        if (blocked) {
+          wrap.appendChild(
+            el("div", {
+              class: "export-blocked",
+              text: "Export is blocked until the validation errors above are resolved.",
+            })
+          );
+        }
+
+        const text = buildExport();
+        const pre = el("pre", { id: "preview", text: text || "(empty)" });
+        wrap.appendChild(pre);
+
+        const actions = el("div", { class: "export-actions" });
+        const copyBtn = el("button", {
+          class: "small",
+          text: "Copy to clipboard",
+          disabled: blocked ? "" : undefined,
+          onclick: async () => {
+            try {
+              await navigator.clipboard.writeText(text);
+              copyBtn.textContent = "Copied!";
+              setTimeout(() => (copyBtn.textContent = "Copy to clipboard"), 1500);
+            } catch (e) {
+              copyBtn.textContent = "Copy failed \u2014 select the text above manually";
+            }
+          },
+        });
+        actions.appendChild(copyBtn);
+
+        const downloadBtn = el("button", {
+          class: "small",
+          text: "Download .env",
+          disabled: blocked ? "" : undefined,
+          onclick: () => {
+            try {
+              const blob = new Blob([text], { type: "text/plain" });
+              const url = URL.createObjectURL(blob);
+              const a = el("a", { href: url, download: ".env" });
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              setTimeout(() => URL.revokeObjectURL(url), 1000);
+            } catch (e) {
+              downloadBtn.textContent = "Download failed \u2014 use Copy instead";
+            }
+          },
+        });
+        actions.appendChild(downloadBtn);
+        wrap.appendChild(actions);
+
+        return wrap;
+      }
+
+      /* ======================================================================
+       * SELF-TEST HARNESS (#selftest)
+       *
+       * No build step means no Node test runner. This runs the same kind of
+       * assertions in-browser against the parser/exporter, using fixture
+       * text that mirrors testdata/config-editor/*.env byte-for-byte. Keep
+       * both in sync by hand when either changes.
+       * ==================================================================== */
+
+      function selfTestCases() {
+        const cases = [];
+        const add = (name, fn) => cases.push({ name, fn });
+
+        add("bare value", () => {
+          const d = buildDocument("KEY=value\n");
+          assertEq(d.entries.length, 1);
+          assertEq(d.entries[0].value, "value");
+        });
+
+        add("double-quoted with escapes", () => {
+          const d = buildDocument('KEY="awesome stuff \\"mang\\""\n');
+          assertEq(d.entries[0].value, 'awesome stuff "mang"');
+        });
+
+        add("single-quoted, no escaping, no substitution", () => {
+          const d = buildDocument("KEY='sweet $\\fgs'\\''fds'\n");
+          assertEq(d.entries[0].value, "sweet $\\fgs'fds");
+          assertEq(d.entries[0].hasReference, false);
+        });
+
+        add("inline comment stripped, value trimmed", () => {
+          const d = buildDocument("KEY=lol #well you see\nNEXT=x\n");
+          assertEq(d.entries[0].value, "lol");
+          assertEq(d.entries[1].value, "x");
+        });
+
+        add("multi-line double-quoted value", () => {
+          const d = buildDocument('KEY="line 1\nline 2"\n');
+          assertEq(d.entries[0].value, "line 1\nline 2");
+        });
+
+        add("unquoted multi-word value is a parse error", () => {
+          const d = buildDocument("KEY=v w\n");
+          assertEq(d.entries[0].type, "unsupported");
+        });
+
+        add("unterminated quote is preserved as unsupported, not lost", () => {
+          const src = 'KEY="unterminated\nNEXT=x\n';
+          const d = buildDocument(src);
+          assertEq(d.entries[0].type, "unsupported");
+          assertEq(d.source.slice(d.entries[0].start, d.entries[0].end), src);
+        });
+
+        add("$VAR and ${VAR} are flagged, not resolved", () => {
+          const d = buildDocument('KEY=">$FOO<>${BAR}<"\n');
+          assertEq(d.entries[0].hasReference, true);
+        });
+
+        add("escaped dollar is not a reference", () => {
+          const d = buildDocument("KEY=\\$notaref\n");
+          assertEq(d.entries[0].value, "$notaref");
+          assertEq(d.entries[0].hasReference, false);
+        });
+
+        add("comment and blank lines are preserved verbatim", () => {
+          const src = "# a comment\n\nKEY=value\n";
+          const d = buildDocument(src);
+          assertEq(d.entries[0].type, "comment");
+          assertEq(d.source.slice(d.entries[0].start, d.entries[0].end), "# a comment\n");
+          assertEq(d.entries[1].type, "blank");
+        });
+
+        add("export prefix is recognized", () => {
+          const d = buildDocument("export KEY=value\n");
+          assertEq(d.entries[0].key, "KEY");
+          assertEq(d.entries[0].value, "value");
+        });
+
+        add("duplicate keys: first occurrence is effective", () => {
+          const d = buildDocument("KEY=first\nKEY=second\n");
+          assertEq(d.keyOccurrences.KEY.length, 2);
+          assertEq(d.entries[d.keyOccurrences.KEY[0]].value, "first");
+        });
+
+        add("round trip: unedited import re-exports byte-identical", () => {
+          const src = "# header\nBIND_ADDR=127.0.0.1:4000\nUNKNOWN_VAR=kept\n";
+          doc = buildDocument(src);
+          loadFromDocument();
+          const out = buildExport();
+          assertEq(out, src);
+        });
+
+        add("round trip: editing one field only rewrites that line", () => {
+          const src = "# header\nBIND_ADDR=127.0.0.1:4000\nSTORAGE_PATH=./files\n";
+          doc = buildDocument(src);
+          loadFromDocument();
+          fieldStates.BIND_ADDR.value = "0.0.0.0:9000";
+          const out = buildExport();
+          assertEq(out, "# header\nBIND_ADDR=0.0.0.0:9000\nSTORAGE_PATH=./files\n");
+        });
+
+        add("reference field round-trips verbatim when untouched", () => {
+          const src = 'PUBLIC_URL="https://${HOST}"\n';
+          doc = buildDocument(src);
+          loadFromDocument();
+          assertEq(fieldStates.PUBLIC_URL.hasReference, true);
+          assertEq(fieldStates.PUBLIC_URL.value, '"https://${HOST}"');
+          const out = buildExport();
+          assertEq(out, src);
+        });
+
+        add("exporter quotes values containing $ or spaces", () => {
+          assertEq(chooseQuoting("plain-value_1.2:3/4"), "plain-value_1.2:3/4");
+          assertEq(chooseQuoting("has space"), "'has space'");
+          assertEq(chooseQuoting("has$dollar"), "'has$dollar'");
+          assertEq(chooseQuoting("can't"), '"can\'t"');
+        });
+
+        add("npub bech32 checksum validation", () => {
+          // A real, checksum-valid npub (bech32-encoded x-only pubkey
+          // 0xab repeated 32 times) — this string round-trips through
+          // nostr-relay-pool's PublicKey::from_bech32 in
+          // src/config_editor_tests.rs, which is stricter than this
+          // function: it also checks the bytes are a valid secp256k1
+          // curve point, something this bech32-only validator does not
+          // attempt to replicate in plain JS.
+          assertEq(isValidNpub("npub14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w4scf6zts"), true);
+          assertEq(isValidNpub("npub1invalidchecksumxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"), false);
+          assertEq(isValidNpub("not-an-npub"), false);
+        });
+
+        add("no cross-field errors for an untouched new configuration", () => {
+          doc = buildDocument(null);
+          resetFieldStates();
+          assertEq(crossFieldErrors().length, 0);
+        });
+
+        add("S3 all-or-nothing invariant", () => {
+          doc = buildDocument(null);
+          resetFieldStates();
+          fieldStates.ALMOND_S3_ENDPOINT.enabled = true;
+          fieldStates.ALMOND_S3_ENDPOINT.value = "https://s3.example.com";
+          assertEq(crossFieldErrors().length > 0, true);
+        });
+
+        add("a single invalid field blocks export on its own, not just cross-field invariants", () => {
+          // crossFieldErrors() only knows about the four multi-field
+          // invariants (S3, chunk<=blob, paid mints, dvm kinds); a lone
+          // field like AUTH_MAX_TTL_SECS switched on with an empty value
+          // (hard_error) has to show up through perFieldErrors() instead,
+          // or export would wrongly stay enabled.
+          doc = buildDocument(null);
+          resetFieldStates();
+          assertEq(crossFieldErrors().length, 0);
+          assertEq(perFieldErrors().length, 0);
+          fieldStates.AUTH_MAX_TTL_SECS.enabled = true;
+          assertEq(crossFieldErrors().length, 0);
+          assertEq(perFieldErrors().length > 0, true);
+        });
+
+        add("switched on with an empty box means an explicit KEY= line", () => {
+          doc = buildDocument(null);
+          resetFieldStates();
+          fieldStates.STORAGE_PATH.enabled = true;
+          assertEq(resolveEffective("STORAGE_PATH").value, "");
+          assertEq(perFieldErrors().length, 0);
+          assertEq(buildExport().includes("STORAGE_PATH=\n"), true);
+          // ...except for the like_unset family, where Almond reads `KEY=`
+          // as the variable not being there at all.
+          fieldStates.UPSTREAM_SERVERS.enabled = true;
+          assertEq(resolveEffective("UPSTREAM_SERVERS").value, null);
+        });
+
+        add("switching a variable off drops its imported line", () => {
+          doc = buildDocument("BIND_ADDR=0.0.0.0:80\nSTORAGE_PATH=./files\n");
+          loadFromDocument();
+          assertEq(fieldStates.BIND_ADDR.enabled, true);
+          fieldStates.BIND_ADDR.enabled = false;
+          assertEq(buildExport(), "STORAGE_PATH=./files\n");
+          assertEq(resolveEffective("BIND_ADDR").value, "127.0.0.1:3000");
+        });
+
+        return cases;
+      }
+
+      function assertEq(actual, expected) {
+        const a = JSON.stringify(actual);
+        const b = JSON.stringify(expected);
+        if (a !== b) throw new Error("expected " + b + " but got " + a);
+      }
+
+      function renderSelfTest() {
+        app.innerHTML = "";
+        app.appendChild(el("h1", { text: "🌸 Config Editor Self-Test" }));
+        const results = selfTestCases().map((c) => {
+          try {
+            c.fn();
+            return { name: c.name, pass: true };
+          } catch (e) {
+            return { name: c.name, pass: false, message: e.message };
+          }
+        });
+        const passed = results.filter((r) => r.pass).length;
+        app.appendChild(
+          el("div", {
+            class: "selftest-summary " + (passed === results.length ? "selftest-pass" : "selftest-fail"),
+            text: passed + " / " + results.length + " passed",
+          })
+        );
+        const ul = el("ul", { class: "panel-list" });
+        results.forEach((r) => {
+          ul.appendChild(
+            el("li", {
+              class: r.pass ? "selftest-pass" : "selftest-fail",
+              text: (r.pass ? "\u2713 " : "\u2717 ") + r.name + (r.message ? " \u2014 " + r.message : ""),
+            })
+          );
+        });
+        app.appendChild(ul);
+        app.appendChild(
+          el("p", { style: "margin-top:16px" }, [
+            el("a", { href: "#", text: "\u2190 back to editor", onclick: (e) => { e.preventDefault(); location.hash = ""; render(); } }),
+          ])
+        );
+        // Restore state for the normal editor after leaving self-test.
+        doc = buildDocument(null);
+        resetFieldStates();
+      }
+
+      window.addEventListener("hashchange", render);
+      render();
+    </script>
+  </body>
+</html>
