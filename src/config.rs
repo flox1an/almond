@@ -198,6 +198,9 @@ pub struct Config {
 
     // ── Serve-files ────────────────────────────────────────────────────────
     pub serve_files_path: Option<PathBuf>,
+    /// Fallback directory for the generated manifest when `serve_files_path`
+    /// is not writable. Defaults to `/tmp`.
+    pub serve_files_manifest_dir: PathBuf,
     pub serve_files_manifest_name: String,
     pub serve_files_refresh_interval_secs: u64,
 
@@ -336,6 +339,8 @@ impl Config {
             parse_opt(map, "SERVE_FILES_PATH", |s: &str| Ok(s.trim().to_owned()))?
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from);
+        let serve_files_manifest_dir =
+            parse_path(map, "SERVE_FILES_MANIFEST_DIR", "/tmp");
         let serve_files_manifest_name =
             parse_str(map, "SERVE_FILES_MANIFEST_NAME", "manifest-sha256.txt")?.to_owned();
         let serve_files_refresh_interval_secs =
@@ -484,6 +489,7 @@ impl Config {
             public_url,
             cors_allowed_origins,
             serve_files_path,
+            serve_files_manifest_dir,
             serve_files_manifest_name,
             serve_files_refresh_interval_secs,
             max_total_size,
@@ -586,6 +592,7 @@ mod tests {
         assert_eq!(cfg.public_url, "http://127.0.0.1:3000");
         assert!(cfg.cors_allowed_origins.is_empty());
         assert!(cfg.serve_files_path.is_none());
+        assert_eq!(cfg.serve_files_manifest_dir, PathBuf::from("/tmp"));
         assert_eq!(cfg.serve_files_manifest_name, "manifest-sha256.txt");
         assert_eq!(cfg.serve_files_refresh_interval_secs, 3600);
         assert!(cfg.upstream_servers.is_empty());

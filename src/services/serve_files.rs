@@ -20,6 +20,7 @@ pub async fn refresh_serve_file_index(
     root: &Path,
     manifest_name: &str,
     index: &RwLock<HashMap<String, Arc<ServeFileMetadata>>>,
+    fallback_dir: &Path,
 ) -> std::io::Result<()> {
     let root = root.to_path_buf();
     let files = collect_files(&root, manifest_name).await?;
@@ -51,12 +52,25 @@ pub async fn refresh_serve_file_index(
     }
 
     entries.sort_by(|a, b| a.1.cmp(&b.1));
-    if let Err(e) = write_manifest(&root.join(manifest_name), &entries).await {
-        warn!(
-            "⚠️ Failed to write serve files manifest {}: {}",
-            root.join(manifest_name).display(),
-            e
-        );
+
+    let primary = root.join(manifest_name);
+    if let Err(e) = write_manifest(&primary, &entries).await {
+        let fallback = fallback_dir.join(manifest_name);
+        match write_manifest(&fallback, &entries).await {
+            Ok(()) => info!(
+                "📁 Serve files manifest written to fallback {} (primary {} not writable: {})",
+                fallback.display(),
+                primary.display(),
+                e
+            ),
+            Err(fb_err) => warn!(
+                "⚠️ Failed to write serve files manifest to {} ({}), fallback {} ({})",
+                primary.display(),
+                e,
+                fallback.display(),
+                fb_err
+            ),
+        }
     }
 
     let indexed_count = next_index.len();
@@ -151,6 +165,7 @@ pub fn start_refresh_job(
     manifest_name: String,
     refresh_interval_secs: u64,
     index: Arc<RwLock<HashMap<String, Arc<ServeFileMetadata>>>>,
+    fallback_dir: PathBuf,
 ) {
     if refresh_interval_secs == 0 {
         info!("📁 Serve files periodic refresh disabled");
@@ -164,7 +179,9 @@ pub fn start_refresh_job(
 
         loop {
             interval.tick().await;
-            if let Err(e) = refresh_serve_file_index(&root, &manifest_name, &index).await {
+            if let Err(e) =
+                refresh_serve_file_index(&root, &manifest_name, &index, &fallback_dir).await
+            {
                 warn!(
                     "⚠️ Failed to refresh serve files index for {}: {}",
                     root.display(),
@@ -193,7 +210,7 @@ mod tests {
         fs::write(nested.join("world.txt"), b"world").unwrap();
 
         let index = Arc::new(RwLock::new(HashMap::new()));
-        refresh_serve_file_index(&root, "manifest-sha256.txt", &index)
+        refresh_serve_file_index(&root, "manifest-sha256.txt", &index, Path::new("/tmp"))
             .await
             .unwrap();
 
@@ -215,7 +232,7 @@ mod tests {
         fs::write(git.join("secret"), b"ignored").unwrap();
 
         let index = Arc::new(RwLock::new(HashMap::new()));
-        refresh_serve_file_index(&root, "manifest-sha256.txt", &index)
+        refresh_serve_file_index(&root, "manifest-sha256.txt", &index, Path::new("/tmp"))
             .await
             .unwrap();
 
@@ -226,5 +243,31 @@ mod tests {
         assert_eq!(index.read().await.len(), 1);
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_serve_file_index_falls_back_when_manifest_path_not_writable() {
+        let root = std::env::temp_dir().join(format!("almond-serve-files-{}", Uuid::new_v4()));
+        let fallback =
+            std::env::temp_dir().join(format!("almond-serve-files-fb-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&fallback).unwrap();
+        fs::write(root.join("media.bin"), b"payload").unwrap();
+        // A directory occupying the manifest path makes the primary write fail
+        // without needing platform-specific read-only permissions.
+        fs::create_dir_all(root.join("manifest-sha256.txt")).unwrap();
+
+        let index = Arc::new(RwLock::new(HashMap::new()));
+        refresh_serve_file_index(&root, "manifest-sha256.txt", &index, &fallback)
+            .await
+            .unwrap();
+
+        assert!(root.join("manifest-sha256.txt").is_dir());
+        let manifest = fs::read_to_string(fallback.join("manifest-sha256.txt")).unwrap();
+        assert!(manifest.contains("  ./media.bin\n"));
+        assert_eq!(index.read().await.len(), 1);
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(fallback).unwrap();
     }
 }

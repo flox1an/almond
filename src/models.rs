@@ -332,6 +332,7 @@ pub struct AppState {
     pub native_s3: Option<crate::services::native_storage::SharedNativeS3Storage>,
     pub serve_file_index: Arc<RwLock<HashMap<String, Arc<ServeFileMetadata>>>>,
     pub serve_files_path: Option<PathBuf>,
+    pub serve_files_manifest_dir: PathBuf,
     pub serve_files_manifest_name: String,
     pub serve_files_refresh_interval_secs: u64,
     pub max_total_size: u64,

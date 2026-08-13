@@ -303,6 +303,7 @@ async fn build_app_state(cfg: &config::Config) -> AppState {
             path,
             &cfg.serve_files_manifest_name,
             &serve_file_index,
+            &cfg.serve_files_manifest_dir,
         )
         .await
         {
@@ -415,6 +416,7 @@ async fn build_app_state(cfg: &config::Config) -> AppState {
         file_index,
         serve_file_index,
         serve_files_path: cfg.serve_files_path.clone(),
+        serve_files_manifest_dir: cfg.serve_files_manifest_dir.clone(),
         serve_files_manifest_name: cfg.serve_files_manifest_name.clone(),
         serve_files_refresh_interval_secs: cfg.serve_files_refresh_interval_secs,
         cors_allowed_origins: cfg.cors_allowed_origins.clone(),
@@ -609,6 +611,7 @@ async fn main() {
             cfg.serve_files_manifest_name.clone(),
             cfg.serve_files_refresh_interval_secs,
             state.serve_file_index.clone(),
+            cfg.serve_files_manifest_dir.clone(),
         );
     }
 

@@ -13,7 +13,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'sha256-0uHRJbASZMbh39lam9p1XkIPKtWEUbxjuLdu+ZcvkmI='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
+      content="default-src 'none'; script-src 'sha256-ReQ56xwTsNpArykhkZYdXEVmNL5KLvleuUwUBfrNjY4='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
     />
     <style>
       /*
@@ -492,6 +492,7 @@
         { "name": "ALMOND_S3_SECRET_ACCESS_KEY", "category": "s3", "kind": "secret", "default": null, "empty": "like_unset", "probe": "exampleSecretAccessKey", "sensitive": true, "help": "S3 secret access key." },
 
         { "name": "SERVE_FILES_PATH", "category": "serve_files", "kind": "path", "default": null, "empty": "like_unset", "probe": "./public", "help": "Optional directory of static files served alongside blobs." },
+        { "name": "SERVE_FILES_MANIFEST_DIR", "category": "serve_files", "kind": "path", "default": "/tmp", "empty": "empty_value", "probe": "/var/lib/almond", "help": "Fallback directory for the generated SHA-256 manifest when SERVE_FILES_PATH is read-only." },
         { "name": "SERVE_FILES_MANIFEST_NAME", "category": "serve_files", "kind": "string", "default": "manifest-sha256.txt", "empty": "empty_value", "probe": "checksums.txt", "help": "Filename of the generated SHA-256 manifest." },
         { "name": "SERVE_FILES_REFRESH_INTERVAL_SECS", "category": "serve_files", "kind": "number", "unit": "seconds", "default": "3600", "empty": "hard_error", "probe": "60", "help": "How often the static-file manifest is rebuilt." },
 
