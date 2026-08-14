@@ -164,7 +164,8 @@ ALMOND_S3_SECRET_ACCESS_KEY=<b2-application-key>
   - `proxy`: Stream from upstream while saving locally. Client receives data immediately while the file is cached.
   - `redirect`: Issue 302 redirect to upstream. No local caching. Reduces bandwidth/CPU on the Almond server.
   - `redirect_and_cache`: Issue 302 redirect to upstream, but also download in the background for future requests.
-- `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: 100)
+- `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: 100).
+  Larger blobs are still served, but proxied through without being cached.
 
 ### Upload Configuration
 - `MAX_CHUNK_SIZE_MB`: Maximum size for individual chunks in chunked uploads in MB (default: 100)

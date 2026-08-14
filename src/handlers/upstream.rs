@@ -515,21 +515,41 @@ async fn handle_successful_upstream_response(
         return proxy_upstream_response(response, &content_type, filename).await;
     }
 
-    let total_len = upstream_response_total_len(&response);
-    let Some(total_len) = total_len else {
+    let Some(total_len) = upstream_response_total_len(&response) else {
         // A compliant 206 carries the complete length in Content-Range. If the
         // origin supplied neither it nor Content-Length, issue the original
         // range request so the client still receives correct range semantics.
-        if let Some(negotiation) = negotiation {
-            negotiation.finish(NegotiationPhase::Failed).await;
-        }
-        let request = copy_headers_to_reqwest(headers, client.get(file_url));
-        let response = request.send().await.map_err(|error| {
-            warn!("Failed range fallback for {}: {}", file_url, error);
-            StatusCode::BAD_GATEWAY
-        })?;
-        return proxy_upstream_response(response, &content_type, filename).await;
+        drop(response);
+        return proxy_original_range(
+            client,
+            file_url,
+            headers,
+            &content_type,
+            filename,
+            negotiation,
+        )
+        .await;
     };
+
+    // Above the intake limit no cacheable download will ever exist, so this
+    // request has nothing to follow. Answering the client's own range from
+    // origin beats promising a `206` that the aborted download cannot fill.
+    if total_len > intake::size_limit(state, intake::Intake::UpstreamFetch) {
+        debug!(
+            "Blob {} is {} bytes, above the upstream cache limit: proxying the range instead",
+            file_hash, total_len
+        );
+        drop(response);
+        return proxy_original_range(
+            client,
+            file_url,
+            headers,
+            &content_type,
+            filename,
+            negotiation,
+        )
+        .await;
+    }
 
     let prepared = prepare_download_state(state, file_hash, &content_type, Some(total_len)).await?;
     let handle = prepared.handle.clone();
@@ -564,6 +584,34 @@ fn upstream_response_total_len(response: &reqwest::Response) -> Option<u64> {
         .and_then(|value| value.rsplit_once('/'))
         .and_then(|(_, total)| total.parse::<u64>().ok())
         .or_else(|| response.content_length())
+}
+
+/// Re-ask the origin with the client's own `Range` and proxy that answer.
+///
+/// A coalescible range was rewritten to `bytes=0-` for the cold fetch
+/// (`copy_headers_for_cold_fetch`) so one download could both serve and fill
+/// the cache. Once that download turns out to be impossible, the response in
+/// hand answers a different question than the client asked, and the only
+/// correct reply is a fresh, correctly ranged request.
+async fn proxy_original_range(
+    client: &Client,
+    file_url: &str,
+    headers: &HeaderMap,
+    content_type: &str,
+    filename: &str,
+    negotiation: Option<NegotiationGuard>,
+) -> Result<Response, StatusCode> {
+    // No attachable download will be registered, so parked followers must stop
+    // waiting and run their own lookup.
+    if let Some(negotiation) = negotiation {
+        negotiation.finish(NegotiationPhase::Failed).await;
+    }
+    let request = copy_headers_to_reqwest(headers, client.get(file_url));
+    let response = request.send().await.map_err(|error| {
+        warn!("Failed range fallback for {}: {}", file_url, error);
+        StatusCode::BAD_GATEWAY
+    })?;
+    proxy_upstream_response(response, content_type, filename).await
 }
 
 async fn open_download_file(handle: &DownloadHandle) -> std::io::Result<File> {
@@ -902,10 +950,21 @@ async fn stream_and_save_from_upstream(
     let content_length = upstream_resp.content_length();
     let max_size_bytes = intake::size_limit(state, intake::Intake::UpstreamFetch);
     if content_length.is_some_and(|length| length > max_size_bytes) {
+        // Too large to cache, but the response in hand is exactly the
+        // representation the client asked for: proxy it rather than turning a
+        // storage policy into a client error.
         let temp_path = prepared.handle.temp_path.clone();
-        drop(prepared); // guard drop → map removal
+        let content_type = prepared.handle.content_type.clone();
+        drop(prepared); // DownloadGuard drop removes the ongoing-downloads entry
         let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        if let Some(negotiation) = negotiation {
+            negotiation.finish(NegotiationPhase::Failed).await;
+        }
+        debug!(
+            "Blob {} is {:?} bytes, above the upstream cache limit: proxying without caching",
+            filename, content_length
+        );
+        return proxy_upstream_response(upstream_resp, &content_type, filename).await;
     }
 
     let reader = match File::open(&prepared.handle.temp_path).await {

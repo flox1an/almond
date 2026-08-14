@@ -213,7 +213,9 @@ Standard Cashu token string starting with `cashuA` or `cashuB`.
   - `proxy`: Stream from upstream while saving locally (current behavior)
   - `redirect`: Issue 302 redirect to upstream, no local caching
   - `redirect_and_cache`: Issue 302 redirect to upstream, download in background for future requests
-- `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: `100`)
+- `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: `100`).
+  A blob above the limit is proxied to the client without a cache fill, including
+  range requests, so the limit never turns a reachable blob into an error.
 
 #### Chunked Upload Configuration
 - `MAX_CHUNK_SIZE_MB`: Maximum size for individual chunks in MB (default: `100`)
