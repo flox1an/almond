@@ -1,7 +1,4 @@
-use base64::{
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-    Engine as _,
-};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use nostr_relay_pool::prelude::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info};
@@ -36,7 +33,6 @@ pub fn parse_auth_header(auth_header: &str) -> AppResult<Event> {
     let base64_str = &auth_header[6..]; // Remove "Nostr " prefix
     let decoded_bytes = URL_SAFE_NO_PAD
         .decode(base64_str)
-        .or_else(|_| STANDARD.decode(base64_str))
         .map_err(|e| AppError::Unauthorized(format!("Failed to decode base64: {}", e)))?;
 
     let json_str = String::from_utf8(decoded_bytes)
@@ -48,11 +44,8 @@ pub fn parse_auth_header(auth_header: &str) -> AppResult<Event> {
     Ok(event)
 }
 
-/// Verify event signature and expiration (BUD-11).  The `created_at` past
-/// check lives in [`verify_event_with_policy`], where the operator's clock
-/// skew tolerance applies.
+/// Verify the BUD-11 signature, creation time, and expiration.
 pub fn verify_event(event: &Event) -> AppResult<()> {
-    // Verify the event signature
     event
         .verify()
         .map_err(|e| AppError::Unauthorized(format!("Invalid event signature: {}", e)))?;
@@ -62,7 +55,13 @@ pub fn verify_event(event: &Event) -> AppResult<()> {
         .unwrap_or_default()
         .as_secs();
 
-    // BUD-11: expiration tag MUST be present and in the future
+    if event.created_at.as_secs() > now {
+        return Err(AppError::Unauthorized(
+            "Authorization event is in the future".to_string(),
+        ));
+    }
+
+    // BUD-11: expiration tag MUST be present and in the future.
     let expiration = event
         .tags
         .find(TagKind::Expiration)
@@ -73,30 +72,18 @@ pub fn verify_event(event: &Event) -> AppResult<()> {
         .and_then(|s| s.parse::<u64>().ok())
         .ok_or_else(|| AppError::Unauthorized("Invalid expiration tag value".to_string()))?;
 
-    if now > exp_time {
+    if now >= exp_time {
         return Err(AppError::Unauthorized("Event expired".to_string()));
     }
 
     Ok(())
 }
 
-/// Apply the deployment's freshness and server-binding policy after signature
-/// verification.  The BUD-11 signature alone is intentionally not reusable
-/// indefinitely.
+/// Apply the deployment's TTL and server-binding policy after BUD-11 validation.
 pub fn verify_event_with_policy(event: &Event, state: &AppState) -> AppResult<u64> {
     verify_event(event)?;
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
     let created_at = event.created_at.as_secs();
-    if created_at > now.saturating_add(state.auth_clock_skew_secs) {
-        return Err(AppError::Unauthorized(
-            "Authorization event is in the future".to_string(),
-        ));
-    }
-
     let expiration = event
         .tags
         .find(TagKind::Expiration)
@@ -235,8 +222,10 @@ pub fn validate_t_tag(event: &Event, expected_verb: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Validate `server` tags if present (BUD-11)
-/// If the event has server tags, the server's domain must match at least one.
+/// Validate `server` tags if present (BUD-11).
+///
+/// Every supplied tag must be a canonical lowercase domain; at least one must
+/// match this server.
 pub fn validate_server_tags(event: &Event, public_url: &str) -> AppResult<()> {
     let server_tags: Vec<_> = event
         .tags
@@ -248,15 +237,22 @@ pub fn validate_server_tags(event: &Event, public_url: &str) -> AppResult<()> {
         return Ok(());
     }
 
-    // Extract domain from public_url by stripping scheme and path
+    for tag in &server_tags {
+        let domain = tag.content().ok_or_else(|| {
+            AppError::Unauthorized("Auth event server tag has no domain".to_string())
+        })?;
+        if !is_lowercase_domain(domain) {
+            return Err(AppError::Unauthorized(
+                "Auth event server tag must be a lowercase domain name".to_string(),
+            ));
+        }
+    }
+
     let server_domain = extract_domain(public_url);
-
-    let matches = server_tags.iter().any(|tag| {
-        tag.content()
-            .is_some_and(|content| content.to_lowercase() == server_domain)
-    });
-
-    if !matches {
+    if !server_tags
+        .iter()
+        .any(|tag| tag.content() == Some(server_domain.as_str()))
+    {
         return Err(AppError::Unauthorized(
             "Auth event server tag does not match this server".to_string(),
         ));
@@ -265,13 +261,28 @@ pub fn validate_server_tags(event: &Event, public_url: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Extract lowercase domain from a URL string (e.g. "<https://example.com:3000/path>" -> "example.com")
+/// Return whether `domain` is a canonical ASCII domain name.
+fn is_lowercase_domain(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= 253
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+}
+
+/// Extract lowercase domain from a URL string (e.g. "<https://example.com:3000/path>" -> "example.com").
 fn extract_domain(url: &str) -> String {
     let without_scheme = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .unwrap_or(url);
-    // Take everything before the first '/' or ':'
+    // Take everything before the first '/' or ':'.
     without_scheme
         .split(&['/', ':'][..])
         .next()
@@ -412,6 +423,7 @@ pub async fn is_pubkey_authorized(pubkey: &PublicKey, state: &AppState) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     const TEST_HASH: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
 
@@ -425,6 +437,13 @@ mod tests {
     /// Build a signed event with given tags, kind 24242, `created_at` = now
     fn build_event(keys: &Keys, tags: Vec<Tag>) -> Event {
         EventBuilder::new(Kind::Custom(24242), "test auth event")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    fn build_event_with_content(keys: &Keys, tags: Vec<Tag>, content: &str) -> Event {
+        EventBuilder::new(Kind::Custom(24242), content)
             .tags(tags)
             .sign_with_keys(keys)
             .unwrap()
@@ -493,11 +512,31 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_event_rejects_expiration_at_current_time() {
+        let keys = Keys::generate();
+        let event = build_event(
+            &keys,
+            vec![Tag::expiration(Timestamp::from_secs(now_secs()))],
+        );
+        let err = verify_event(&event).unwrap_err();
+        assert!(matches!(err, AppError::Unauthorized(msg) if msg.contains("expired")));
+    }
+
+    #[test]
     fn test_verify_event_created_at_in_past() {
         let keys = Keys::generate();
         let event =
             build_event_with_created_at(&keys, vec![valid_expiration_tag()], now_secs() - 60);
         assert!(verify_event(&event).is_ok());
+    }
+
+    #[test]
+    fn test_verify_event_rejects_future_created_at() {
+        let keys = Keys::generate();
+        let event =
+            build_event_with_created_at(&keys, vec![valid_expiration_tag()], now_secs() + 60);
+        let err = verify_event(&event).unwrap_err();
+        assert!(matches!(err, AppError::Unauthorized(msg) if msg.contains("future")));
     }
 
     // ── validate_event_kind tests ──
@@ -600,13 +639,29 @@ mod tests {
     }
 
     #[test]
-    fn test_server_tag_case_insensitive() {
+    fn test_server_tag_rejects_uppercase_domain() {
         let keys = Keys::generate();
         let event = build_event(
             &keys,
             vec![valid_expiration_tag(), server_tag("Example.COM")],
         );
-        assert!(validate_server_tags(&event, "https://example.com").is_ok());
+        let err = validate_server_tags(&event, "https://example.com").unwrap_err();
+        assert!(matches!(err, AppError::Unauthorized(msg) if msg.contains("lowercase")));
+    }
+
+    #[test]
+    fn test_server_tag_rejects_url() {
+        let keys = Keys::generate();
+        let event = build_event(
+            &keys,
+            vec![
+                valid_expiration_tag(),
+                server_tag("https://example.com"),
+                server_tag("example.com"),
+            ],
+        );
+        let err = validate_server_tags(&event, "https://example.com").unwrap_err();
+        assert!(matches!(err, AppError::Unauthorized(msg) if msg.contains("lowercase")));
     }
 
     #[test]
@@ -785,14 +840,34 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_auth_header_valid() {
+    fn test_parse_auth_header_valid_base64url_without_padding() {
         let keys = Keys::generate();
         let event = build_event(&keys, vec![valid_expiration_tag()]);
         let json = serde_json::to_string(&event).unwrap();
-        let b64 = STANDARD.encode(json.as_bytes());
-        let header = format!("Nostr {}", b64);
+        let b64 = URL_SAFE_NO_PAD.encode(json.as_bytes());
+        let header = format!("Nostr {b64}");
         let parsed = parse_auth_header(&header).unwrap();
         assert_eq!(parsed.id, event.id);
+    }
+
+    #[test]
+    fn test_parse_auth_header_rejects_padding() {
+        let keys = Keys::generate();
+        let event = build_event(&keys, vec![valid_expiration_tag()]);
+        let json = serde_json::to_string(&event).unwrap();
+        let header = format!("Nostr {}=", URL_SAFE_NO_PAD.encode(json.as_bytes()));
+        assert!(parse_auth_header(&header).is_err());
+    }
+
+    #[test]
+    fn test_parse_auth_header_rejects_standard_alphabet() {
+        let keys = Keys::generate();
+        let event = build_event_with_content(&keys, vec![valid_expiration_tag()], "~~~");
+        let json = serde_json::to_string(&event).unwrap();
+        let standard = STANDARD.encode(json.as_bytes());
+        assert!(standard.contains('+'));
+        let header = format!("Nostr {standard}");
+        assert!(parse_auth_header(&header).is_err());
     }
 
     // ── extract_domain tests ──

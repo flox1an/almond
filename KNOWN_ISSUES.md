@@ -114,86 +114,18 @@ whether reports are retained/actioned.
 **Resolution:** Publish a stable policy URL from the homepage or add a dedicated
 report-policy endpoint.
 
-### BUD-11 — Authorization header parser accepts non-canonical Base64
 
-**Requirement:** `Authorization: Nostr …` **MUST** use unpadded URL-safe
-Base64url.
-
-**Current behavior:** `src/services/auth.rs:parse_auth_header` first accepts
-Base64url without padding, then falls back to standard Base64.
-
-**Impact:** Non-conforming padded or standard-alphabet tokens are accepted.
-
-**Resolution:** Remove the `STANDARD.decode` fallback and reject non-canonical
-encodings.
-
-### BUD-11 — Future `created_at` timestamps are accepted within clock skew
-
-**Requirement:** Authorization event `created_at` **MUST** be in the past.
-
-**Current behavior:** `src/services/auth.rs:verify_event_with_policy` permits a
-future timestamp through `AUTH_CLOCK_SKEW_SECS` (30 seconds by default).
-
-**Impact:** Tokens are accepted before their declared creation time.
-
-**Resolution:** Require `created_at <= now`; retain clock skew only where the
-spec permits tolerance, not for this validity predicate.
-
-### BUD-11 — Tokens expiring exactly now are accepted
-
-**Requirement:** The `expiration` tag **MUST** be in the future.
-
-**Current behavior:** `src/services/auth.rs:verify_event` rejects only when
-`now > exp_time`, so `exp_time == now` remains valid.
-
-**Impact:** An already non-future token can authorize a request during that
-second.
-
-**Resolution:** Reject when `now >= exp_time`.
-
-### BUD-11 — Authorization token content is not validated
+### BUD-11 — Authorization token content is not machine-verifiable
 
 **Requirement:** Authorization event `content` **MUST** be a human-readable
 string explaining intended use.
 
-**Current behavior:** `src/services/auth.rs:verify_event` verifies signature and
-expiration but never checks `event.content`.
+**Decision:** Almond does not infer whether arbitrary Unicode text is
+human-readable or explains an action. BUD-11 defines neither a grammar nor a
+language-independent predicate for that semantic claim; its example event also
+uses empty `content`. Empty or non-explanatory content therefore remains a
+client-side protocol responsibility.
 
-**Impact:** Empty or non-explanatory authorization tokens are accepted.
-
-**Resolution:** Reject empty or non-human-readable content before authorizing an
-operation.
-
-### BUD-11 — Invalid server-tag spelling is accepted
-
-**Requirement:** A `server` tag, when present, **MUST** be a lowercase domain
-name only.
-
-**Current behavior:** `src/services/auth.rs:validate_server_tags` lowercases tag
-content before comparing it to the configured domain. An uppercase domain is
-therefore accepted rather than rejected as malformed.
-
-**Impact:** The server accepts tokens outside the canonical BUD-11 grammar.
-
-**Resolution:** Validate that each `server` tag is an already-lowercase bare
-domain before matching it.
-
-### BUD-11 — PUT /upload is not bound to the X-SHA-256 request header
-
-**Requirement:** With BUD-11 authorization, `PUT /upload` has an implied hash
-from `X-SHA-256`, and a matching `x` tag is required.
-
-**Current behavior:** `src/handlers/upload.rs:upload_file` does not require or
-compare `X-SHA-256`; it streams the body and binds authorization to the computed
-hash instead.
-
-**Impact:** A token cannot be validated against the request's protocol-defined
-implied hash. This also differs from `HEAD /upload`, which does require the
-header.
-
-**Resolution:** Require a lowercase `X-SHA-256` for BUD-11-authorized upload,
-validate it against the computed hash with `409 Conflict`, and bind the `x` tag
-to that header value.
 
 ### BUD-12 — /list/<pubkey> is not an uploader-specific list
 
