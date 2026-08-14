@@ -265,7 +265,6 @@ pub struct Config {
     // ── Auth ───────────────────────────────────────────────────────────────
     pub allowed_pubkeys: Vec<PublicKey>,
     pub auth_max_ttl_secs: u64,
-    pub auth_max_age_secs: u64,
     pub auth_clock_skew_secs: u64,
     pub auth_require_server_tag: bool,
     pub metrics_bearer_token: Option<String>,
@@ -339,8 +338,7 @@ impl Config {
             parse_opt(map, "SERVE_FILES_PATH", |s: &str| Ok(s.trim().to_owned()))?
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from);
-        let serve_files_manifest_dir =
-            parse_path(map, "SERVE_FILES_MANIFEST_DIR", "/tmp");
+        let serve_files_manifest_dir = parse_path(map, "SERVE_FILES_MANIFEST_DIR", "/tmp");
         let serve_files_manifest_name =
             parse_str(map, "SERVE_FILES_MANIFEST_NAME", "manifest-sha256.txt")?.to_owned();
         let serve_files_refresh_interval_secs =
@@ -466,8 +464,7 @@ impl Config {
             })
             .collect();
 
-        let auth_max_ttl_secs = parse_u64(map, "AUTH_MAX_TTL_SECS", "300")?;
-        let auth_max_age_secs = parse_u64(map, "AUTH_MAX_AGE_SECS", "300")?;
+        let auth_max_ttl_secs = parse_u64(map, "AUTH_MAX_TTL_SECS", "86400")?;
         let auth_clock_skew_secs = parse_u64(map, "AUTH_CLOCK_SKEW_SECS", "30")?;
         let auth_require_server_tag = parse_bool(map, "AUTH_REQUIRE_SERVER_TAG", "false")?;
         let metrics_bearer_token = parse_opt(map, "METRICS_BEARER_TOKEN", |s: &str| {
@@ -534,7 +531,6 @@ impl Config {
             dvm_refresh_interval_mins,
             allowed_pubkeys,
             auth_max_ttl_secs,
-            auth_max_age_secs,
             auth_clock_skew_secs,
             auth_require_server_tag,
             metrics_bearer_token,
@@ -623,8 +619,7 @@ mod tests {
         assert!(cfg.dvm_relays.is_empty());
         assert_eq!(cfg.dvm_refresh_interval_mins, 5);
         assert!(cfg.allowed_pubkeys.is_empty());
-        assert_eq!(cfg.auth_max_ttl_secs, 300);
-        assert_eq!(cfg.auth_max_age_secs, 300);
+        assert_eq!(cfg.auth_max_ttl_secs, 86400);
         assert_eq!(cfg.auth_clock_skew_secs, 30);
         assert!(!cfg.auth_require_server_tag);
         assert!(cfg.metrics_bearer_token.is_none());

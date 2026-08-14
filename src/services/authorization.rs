@@ -31,6 +31,7 @@ pub enum Operation {
     Mirror,
     ChunkUpload,
     Delete,
+    List,
 }
 
 impl Operation {
@@ -40,6 +41,7 @@ impl Operation {
             Self::Upload | Self::ChunkUpload => "Upload",
             Self::Mirror => "Mirror",
             Self::Delete => "Delete",
+            Self::List => "List",
         }
     }
 
@@ -55,9 +57,9 @@ impl Operation {
         match self {
             Self::Upload | Self::ChunkUpload => Some(state.feature_upload_enabled),
             Self::Mirror => Some(state.feature_mirror_enabled),
-            // Deletion is never public: it is whitelist-only whatever the
-            // upload feature is set to.
-            Self::Delete => None,
+            // Deletion and listing describe the operator's catalogue. Neither
+            // is public: both require an explicit ALLOWED_NPUBS member.
+            Self::Delete | Self::List => None,
         }
     }
 }
@@ -123,6 +125,11 @@ impl Authorized {
                 auth::validate_chunk_upload_auth(&self.event, sha256)?;
             }
             Operation::Delete => auth::validate_delete_auth(&self.event, sha256)?,
+            Operation::List => {
+                return Err(AppError::InternalError(
+                    "List authorization must be bound without a blob hash".to_owned(),
+                ));
+            }
         }
 
         if self.operation.is_destructive() {
@@ -134,6 +141,20 @@ impl Authorized {
             .await?;
         }
         Ok(())
+    }
+
+    /// Bind an authorization for an operation that has no implied blob hash.
+    ///
+    /// BUD-11 defines `x` as not applicable to `/list`; forcing this through
+    /// [`Self::bind`] would either invent a fake hash or accidentally weaken
+    /// the verb check. Keep the one hashless operation explicit instead.
+    pub fn bind_without_hash(&self) -> AppResult<()> {
+        match self.operation {
+            Operation::List => auth::validate_t_tag(&self.event, "list"),
+            _ => Err(AppError::InternalError(
+                "A blob hash is required to bind this authorization".to_owned(),
+            )),
+        }
     }
 }
 

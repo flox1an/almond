@@ -314,7 +314,7 @@ pub async fn finalize_upload(
     extension: Option<String>,
     mime_type: Option<String>,
     expiration: Option<u64>,
-) -> AppResult<()> {
+) -> AppResult<file_storage::StoredBlob> {
     crate::services::intake::accept(
         state,
         temp,
@@ -327,8 +327,7 @@ pub async fn finalize_upload(
             expiration,
         },
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 /// Fetch a URL using the exact public address set that passed validation.
@@ -350,7 +349,7 @@ pub async fn fetch_from_url(url: &str) -> AppResult<reqwest::Response> {
         .await
         .map_err(|error| {
             if error.is_timeout() {
-                AppError::Timeout("Upstream request timed out".to_string())
+                AppError::BadGateway("Upstream request timed out".to_string())
             } else {
                 AppError::BadGateway("Failed to fetch upstream URL".to_string())
             }

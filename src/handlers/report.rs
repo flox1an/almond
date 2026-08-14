@@ -123,9 +123,7 @@ pub async fn report_blob(
         .unwrap_or_default()
         .as_secs();
     let created_at = u64::try_from(report.created_at).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if created_at > now.saturating_add(state.auth_clock_skew_secs)
-        || now.saturating_sub(created_at) > state.auth_max_age_secs
-    {
+    if created_at > now.saturating_add(state.auth_clock_skew_secs) {
         return Err(StatusCode::UNAUTHORIZED);
     }
     authorization::consume_single_use(

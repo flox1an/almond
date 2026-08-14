@@ -426,27 +426,15 @@ async fn delete_cleanup_candidate(
     }
 }
 
-/// Extract the SHA-256 hash from `<hash>` or `<hash>.<ext>`.
+/// Extract the SHA-256 hash from `<hash>` or `<hash>.<extension>`.
 ///
-/// Hand-rolled rather than regex-backed: this runs on every blob request, and
-/// the borrowed return keeps the hot path allocation-free.
+/// The extension is client-facing decoration. It is deliberately not parsed or
+/// used for lookup: BUD-01 only requires it to be optional, while storage is
+/// content-addressed by the 64-character hash.
 #[must_use]
 pub fn get_sha256_hash_from_filename(filename: &str) -> Option<&str> {
-    let (hash, extension) = match filename.split_once('.') {
-        Some((hash, extension)) => (hash, Some(extension)),
-        None => (filename, None),
-    };
-
-    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    if let Some(extension) = extension {
-        if extension.is_empty() || !extension.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            return None;
-        }
-    }
-
-    Some(hash)
+    let hash = filename.split_once('.').map_or(filename, |(hash, _)| hash);
+    (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(hash)
 }
 
 pub async fn find_file(index: &BlobIndex, base_name: &str) -> Option<Arc<FileMetadata>> {
@@ -697,6 +685,28 @@ mod range_tests {
     #[test]
     fn inverted_range_is_unsatisfiable() {
         assert_eq!(parse("bytes=800-100", 1000), RangeSpec::Unsatisfiable);
+    }
+}
+
+#[cfg(test)]
+mod blob_filename_tests {
+    use super::get_sha256_hash_from_filename;
+
+    const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn extension_is_decorative_for_blob_lookup() {
+        assert_eq!(get_sha256_hash_from_filename(HASH), Some(HASH));
+        assert_eq!(
+            get_sha256_hash_from_filename(&format!("{HASH}.tar.gz")),
+            Some(HASH)
+        );
+    }
+
+    #[test]
+    fn malformed_hash_is_not_a_blob() {
+        assert!(get_sha256_hash_from_filename(&"z".repeat(64)).is_none());
+        assert!(get_sha256_hash_from_filename("favicon.ico").is_none());
     }
 }
 

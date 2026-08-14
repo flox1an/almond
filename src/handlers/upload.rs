@@ -30,7 +30,7 @@ pub async fn upload_file(
     // Extract content type, extension, and expiration
     let content_type = extract_content_type(&headers);
     let extension = get_extension_from_mime(&content_type);
-    let expiration = extract_expiration(&headers);
+    let expiration = extract_expiration(&headers, state.max_file_age_days)?;
     let declared_size = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
@@ -54,12 +54,15 @@ pub async fn upload_file(
 
     // Validate authorization matches the hash (must come before payment check)
     authorized.bind(&state, &sha256).await?;
+    file_storage::ensure_not_quarantined(&state, &sha256).await?;
 
     // Check payment if required (after we know the size and auth is validated)
     cashu::charge(&state, &headers, cashu::PaidOperation::Upload, total_bytes).await?;
 
-    // Finalize upload
-    upload::finalize_upload(
+    // Finalize upload. The returned metadata is the server's authoritative
+    // representation: a re-upload retains its original MIME, expiration, and
+    // upload time.
+    let stored = upload::finalize_upload(
         &state,
         temp,
         &sha256,
@@ -70,18 +73,19 @@ pub async fn upload_file(
     )
     .await?;
 
-    // Track statistics
     track_upload_stats(&state);
 
-    // Create response
-    let descriptor =
-        state.create_blob_descriptor(&sha256, total_bytes, Some(content_type), expiration);
+    let descriptor = state.create_blob_descriptor(&sha256, &stored.metadata);
 
     let json_body = serde_json::to_string(&descriptor)
         .map_err(|e| AppError::InternalError(format!("Failed to serialize response: {}", e)))?;
 
     Response::builder()
-        .status(StatusCode::CREATED)
+        .status(if stored.created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        })
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(json_body))
         .map_err(|e| AppError::InternalError(format!("Failed to build response: {}", e)))
@@ -104,7 +108,7 @@ pub async fn mirror_blob(
     let expected_sha256 = auth::extract_sha256_from_event(auth_event).ok_or_else(|| {
         AppError::Unauthorized("No valid SHA-256 hash found in auth event".to_string())
     })?;
-    let expiration = extract_expiration(&headers);
+    let expiration = extract_expiration(&headers, state.max_file_age_days)?;
 
     const MAX_MIRROR_JSON_BYTES: usize = 64 * 1024;
     let body_bytes = axum::body::to_bytes(req.into_body(), MAX_MIRROR_JSON_BYTES)
@@ -125,17 +129,6 @@ pub async fn mirror_blob(
     let content_length = response.content_length();
     let max_size_bytes = intake::size_limit(&state, intake::Intake::UpstreamFetch);
     upload::check_size_limit(content_length, max_size_bytes)?;
-    let declared_size = content_length.ok_or_else(|| {
-        AppError::BadRequest("Mirror source must provide Content-Length".to_string())
-    })?;
-    cashu::charge(
-        &state,
-        &headers,
-        cashu::PaidOperation::Mirror,
-        declared_size,
-    )
-    .await?;
-    file_storage::ensure_storage_capacity(&state, declared_size).await?;
 
     // Prepare temp file
     file_storage::ensure_temp_dir(&state).await?;
@@ -148,6 +141,9 @@ pub async fn mirror_blob(
     let (calculated_sha256, body_size) =
         upload::stream_response_to_temp_file(response, temp.path(), max_size_bytes).await?;
 
+    // Charge only after hash verification below, so a failed mirror cannot
+    // redeem a token and quarantined content is rejected without payment.
+
     info!(
         "🔐 SHA256 verification: calculated {} vs expected {}",
         calculated_sha256, expected_sha256
@@ -155,16 +151,19 @@ pub async fn mirror_blob(
 
     // Validate hash matches
     if calculated_sha256 != expected_sha256 {
-        return Err(AppError::Unauthorized(format!(
+        return Err(AppError::Conflict(format!(
             "SHA256 hash mismatch: expected {}, got {}",
             expected_sha256, calculated_sha256
         )));
     }
 
+    file_storage::ensure_not_quarantined(&state, &expected_sha256).await?;
+    cashu::charge(&state, &headers, cashu::PaidOperation::Mirror, body_size).await?;
+
     info!("✅ SHA256 verification passed");
 
-    // Finalize upload
-    upload::finalize_upload(
+    // Finalize upload and retain the authoritative metadata for the response.
+    let stored = upload::finalize_upload(
         &state,
         temp,
         &expected_sha256,
@@ -175,7 +174,6 @@ pub async fn mirror_blob(
     )
     .await?;
 
-    // Track statistics
     track_upload_stats(&state);
 
     // HLS recursive mirror: if this is a playlist, mirror referenced segments in background
@@ -207,9 +205,7 @@ pub async fn mirror_blob(
         }
     }
 
-    // Create response
-    let descriptor =
-        state.create_blob_descriptor(&expected_sha256, body_size, Some(content_type), expiration);
+    let descriptor = state.create_blob_descriptor(&expected_sha256, &stored.metadata);
 
     info!(
         "🎉 Mirror operation completed successfully: {} -> {} ({} bytes)",
@@ -220,7 +216,11 @@ pub async fn mirror_blob(
         .map_err(|e| AppError::InternalError(format!("Failed to serialize response: {}", e)))?;
 
     Response::builder()
-        .status(StatusCode::CREATED)
+        .status(if stored.created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        })
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(json_body))
         .map_err(|e| AppError::InternalError(format!("Failed to build response: {}", e)))
@@ -292,6 +292,7 @@ pub async fn patch_upload(
     let authorized =
         authorization::authorize(&headers, &state, authorization::Operation::ChunkUpload).await?;
     authorized.bind(&state, &sha256).await?;
+    file_storage::ensure_not_quarantined(&state, &sha256).await?;
     let owner = *authorized.pubkey();
     let key = ChunkUploadKey {
         pubkey: owner,
@@ -303,7 +304,7 @@ pub async fn patch_upload(
         owner,
         upload_type: upload_type.clone(),
         upload_length,
-        expiration: extract_expiration(&headers),
+        expiration: extract_expiration(&headers, state.max_file_age_days)?,
     };
 
     // Reserve capacity before writing the body. The ticket is released on
@@ -537,7 +538,7 @@ async fn reconstruct_blob(
             AppError::IoError(format!("Failed to sync reconstruction: {error}"))
         })?;
         drop(target);
-        upload::finalize_upload(
+        let stored = upload::finalize_upload(
             state,
             temp,
             expected_sha256,
@@ -547,12 +548,7 @@ async fn reconstruct_blob(
             chunk_upload.expiration,
         )
         .await?;
-        Ok(state.create_blob_descriptor(
-            expected_sha256,
-            total_written,
-            Some(chunk_upload.upload_type.clone()),
-            chunk_upload.expiration,
-        ))
+        Ok(state.create_blob_descriptor(expected_sha256, &stored.metadata))
     }
     .await;
     discard_chunk_files(&chunks).await;

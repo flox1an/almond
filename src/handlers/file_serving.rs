@@ -17,7 +17,7 @@ use crate::constants::{
     FILE_STREAM_MIN_BUFFER_SIZE,
 };
 use crate::error::AppError;
-use crate::helpers::{get_mime_type, track_download_stats};
+use crate::helpers::{get_mime_type, sunset_header, track_download_stats};
 use crate::models::{AppState, FileLocation, FileRequestQuery};
 use crate::services::blossom_servers;
 use crate::services::cashu;
@@ -76,8 +76,15 @@ pub async fn handle_file_request(
     Query(query): Query<FileRequestQuery>,
     req: Request,
 ) -> Result<Response, AppError> {
+    let hash_prefix = filename
+        .split_once('.')
+        .map_or(filename.as_str(), |(hash, _)| hash);
     let Some(file_hash) = crate::utils::get_sha256_hash_from_filename(&filename) else {
-        return Err(AppError::NotFound("Invalid filename format".to_string()));
+        return Err(if hash_prefix.len() == 64 {
+            AppError::BadRequest("Invalid SHA-256 hash".to_owned())
+        } else {
+            AppError::NotFound("Blob not found".to_owned())
+        });
     };
 
     // Split the request up front: a borrowed `Request` is not `Send`, because
@@ -104,6 +111,7 @@ pub async fn handle_file_request(
                 file_hash,
                 metadata.size,
                 metadata.mime_type.as_deref(),
+                metadata.expiration,
                 bytes,
             )
             .await
@@ -116,6 +124,7 @@ pub async fn handle_file_request(
                 file_hash,
                 metadata.size,
                 metadata.mime_type.as_deref(),
+                None,
                 BlobBytes::LocalFile(&metadata.path),
             )
             .await
@@ -281,8 +290,6 @@ async fn fetch_from_upstream(
 /// Turn a resolved blob into a response.
 ///
 /// Written once, whatever holds the bytes: revalidation, HEAD, payment and
-/// statistics used to be repeated per source, and the payment step had already
-/// drifted between the copies.
 async fn serve_blob(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -290,26 +297,33 @@ async fn serve_blob(
     file_hash: &str,
     size: u64,
     mime_type: Option<&str>,
+    expiration: Option<u64>,
     bytes: BlobBytes<'_>,
 ) -> Result<Response, AppError> {
     let etag = blob_etag(file_hash);
-    if let Some(response) = check_not_modified(headers, &etag)? {
-        return Ok(response);
-    }
+    let response = if let Some(response) = check_not_modified(headers, &etag)? {
+        response
+    } else if method == Method::HEAD {
+        build_blob_head_response(mime_type, size, &etag)?
+    } else {
+        cashu::charge(state, headers, cashu::PaidOperation::Download, size).await?;
+        track_download_stats(state, size);
 
-    if method == Method::HEAD {
-        return build_blob_head_response(mime_type, size, &etag);
-    }
-
-    cashu::charge(state, headers, cashu::PaidOperation::Download, size).await?;
-    track_download_stats(state, size);
-
-    match bytes {
-        BlobBytes::LocalFile(path) => serve_file_with_range(path, mime_type, headers, &etag).await,
-        BlobBytes::Native { storage, key } => {
-            serve_s3_with_range(storage, key, mime_type, size, headers, &etag).await
+        match bytes {
+            BlobBytes::LocalFile(path) => {
+                serve_file_with_range(path, mime_type, headers, &etag).await?
+            }
+            BlobBytes::Native { storage, key } => {
+                serve_s3_with_range(storage, key, mime_type, size, headers, &etag).await?
+            }
         }
+    };
+
+    let mut response = response;
+    if let Some(sunset) = sunset_header(expiration) {
+        response.headers_mut().insert("Sunset", sunset);
     }
+    Ok(response)
 }
 
 /// `ETag` for a content-addressed blob. The SHA-256 *is* the strong validator,
@@ -401,13 +415,20 @@ async fn serve_file_with_range(
     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let content_disposition = format!("inline; filename=\"{}\"", filename);
 
-    let mut file = File::open(path)
-        .await
-        .map_err(|e| AppError::IoError(format!("Failed to open file: {}", e)))?;
-    let metadata = file
-        .metadata()
-        .await
-        .map_err(|e| AppError::IoError(format!("Failed to read file metadata: {}", e)))?;
+    let mut file = File::open(path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotFound(format!("Blob file no longer exists: {error}"))
+        } else {
+            AppError::IoError(format!("Failed to open file: {error}"))
+        }
+    })?;
+    let metadata = file.metadata().await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotFound(format!("Blob file no longer exists: {error}"))
+        } else {
+            AppError::IoError(format!("Failed to read file metadata: {error}"))
+        }
+    })?;
     let total_size = metadata.len();
 
     // A stale `If-Range` validator means the client's partial copy is not the

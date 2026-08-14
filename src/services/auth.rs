@@ -48,7 +48,9 @@ pub fn parse_auth_header(auth_header: &str) -> AppResult<Event> {
     Ok(event)
 }
 
-/// Verify event signature, `created_at`, and expiration (BUD-11)
+/// Verify event signature and expiration (BUD-11).  The `created_at` past
+/// check lives in [`verify_event_with_policy`], where the operator's clock
+/// skew tolerance applies.
 pub fn verify_event(event: &Event) -> AppResult<()> {
     // Verify the event signature
     event
@@ -59,13 +61,6 @@ pub fn verify_event(event: &Event) -> AppResult<()> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-
-    // BUD-11: created_at must be in the past
-    if event.created_at.as_secs() > now {
-        return Err(AppError::Unauthorized(
-            "Event created_at is in the future".to_string(),
-        ));
-    }
 
     // BUD-11: expiration tag MUST be present and in the future
     let expiration = event
@@ -96,11 +91,9 @@ pub fn verify_event_with_policy(event: &Event, state: &AppState) -> AppResult<u6
         .unwrap_or_default()
         .as_secs();
     let created_at = event.created_at.as_secs();
-    if created_at > now.saturating_add(state.auth_clock_skew_secs)
-        || now.saturating_sub(created_at) > state.auth_max_age_secs
-    {
+    if created_at > now.saturating_add(state.auth_clock_skew_secs) {
         return Err(AppError::Unauthorized(
-            "Authorization event is outside the allowed clock window".to_string(),
+            "Authorization event is in the future".to_string(),
         ));
     }
 
@@ -497,15 +490,6 @@ mod tests {
         let event = build_event(&keys, vec![expired_tag()]);
         let err = verify_event(&event).unwrap_err();
         assert!(matches!(err, AppError::Unauthorized(msg) if msg.contains("expired")));
-    }
-
-    #[test]
-    fn test_verify_event_created_at_in_future() {
-        let keys = Keys::generate();
-        let event =
-            build_event_with_created_at(&keys, vec![valid_expiration_tag()], now_secs() + 3600);
-        let err = verify_event(&event).unwrap_err();
-        assert!(matches!(err, AppError::Unauthorized(msg) if msg.contains("future")));
     }
 
     #[test]

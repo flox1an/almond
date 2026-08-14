@@ -46,8 +46,9 @@ pub mod utils;
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::signal;
 
+use crate::error::AppError;
 use crate::models::AppState;
-use crate::services::cashu;
+use crate::services::{authorization, cashu, file_storage, intake};
 use crate::trust_network::{refresh_dvm_pubkeys, refresh_trust_network};
 use crate::utils::{
     build_file_index, cleanup_abandoned_chunks, cleanup_expired_blossom_server_lists,
@@ -62,8 +63,9 @@ use tracing::{error, info, warn};
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware::from_fn_with_state,
+    response::IntoResponse,
     routing::{delete, get, put},
 };
 use handlers::{
@@ -75,36 +77,84 @@ use tower::limit::ConcurrencyLimitLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
-// HEAD /upload handler for price discovery (BUD-07)
+/// Evaluate the same admission policy as `PUT /upload` without accepting bytes.
+///
+/// BUD-06 defines this as a preflight only: a client may skip it, and any
+/// Cashu token on this HEAD request is ignored rather than redeemed.
 async fn head_upload(
     State(state): State<AppState>,
-) -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
-    use axum::http::header;
-    use axum::response::Response;
+    headers: HeaderMap,
+) -> Result<axum::response::Response<axum::body::Body>, AppError> {
+    let sha256 = headers
+        .get("X-SHA-256")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| AppError::BadRequest("Missing X-SHA-256 header".to_owned()))?;
+    file_storage::validate_sha256_format(sha256)?;
 
-    // Build response with server capabilities
-    let mut builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::ACCEPT, "application/octet-stream");
+    let _content_type = headers
+        .get("X-Content-Type")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest("Missing X-Content-Type header".to_owned()))?;
+    let declared_size = headers
+        .get("X-Content-Length")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| AppError::LengthRequired("Missing X-Content-Length header".to_owned()))?
+        .parse::<u64>()
+        .map_err(|_| AppError::BadRequest("Invalid X-Content-Length header".to_owned()))?;
 
-    // Price discovery renders the same quote the 402 would, so a client cannot
-    // derive a price the server disagrees with. One megabyte is the unit the
-    // header advertises.
+    let authorized =
+        authorization::authorize(&headers, &state, authorization::Operation::Upload).await?;
+    authorized.bind(&state, sha256).await?;
+
+    let max_size = intake::size_limit(&state, intake::Intake::ClientUpload);
+    if declared_size > max_size {
+        return Err(AppError::PayloadTooLarge(format!(
+            "Blob size {declared_size} exceeds the {max_size}-byte limit"
+        )));
+    }
+    file_storage::ensure_storage_capacity(&state, declared_size).await?;
+
     if state.feature_paid_upload {
         let quote = cashu::quote(
             state.cashu_price_per_mb,
             &state.cashu_accepted_mints,
-            1024 * 1024,
+            declared_size,
         );
-        builder = builder
-            .header("X-Price-Per-MB", quote.amount_sats.to_string())
-            .header("X-Price-Unit", quote.unit)
-            .header("X-Accepted-Mints", quote.mints.join(","));
+        let mut response = AppError::PaymentRequired {
+            amount_sats: quote.amount_sats,
+            unit: quote.unit.to_owned(),
+            mints: quote.mints.clone(),
+        }
+        .into_response();
+        let response_headers = response.headers_mut();
+        response_headers.insert(
+            "X-Price-Per-MB",
+            quote
+                .amount_sats
+                .to_string()
+                .parse()
+                .expect("price is a valid header value"),
+        );
+        response_headers.insert(
+            "X-Price-Unit",
+            quote.unit.parse().expect("unit is a valid header value"),
+        );
+        response_headers.insert(
+            "X-Accepted-Mints",
+            quote
+                .mints
+                .join(",")
+                .parse()
+                .expect("mint list is a valid header value"),
+        );
+        return Ok(response);
     }
 
-    builder
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
         .body(axum::body::Body::empty())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|_| AppError::InternalError("Failed to build HEAD /upload response".to_owned()))
 }
 
 async fn options_upload() -> &'static str {
@@ -191,12 +241,12 @@ pub async fn create_app(state: AppState) -> Router {
             get(handle_file_request).head(handle_file_request),
         )
         .layer(RequestBodyLimitLayer::new(max_blob_size))
-        .layer(from_fn_with_state(state.clone(), cors_middleware))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(60),
         ))
         .layer(ConcurrencyLimitLayer::new(256))
+        .layer(from_fn_with_state(state.clone(), cors_middleware))
         .with_state(state)
 }
 
@@ -474,7 +524,6 @@ async fn build_app_state(cfg: &config::Config) -> AppState {
         report_action: cfg.report_action,
         feature_report_enabled: cfg.feature_report_enabled,
         auth_max_ttl_secs: cfg.auth_max_ttl_secs,
-        auth_max_age_secs: cfg.auth_max_age_secs,
         auth_clock_skew_secs: cfg.auth_clock_skew_secs,
         auth_require_server_tag: cfg.auth_require_server_tag,
         metrics_bearer_token: cfg.metrics_bearer_token.clone(),

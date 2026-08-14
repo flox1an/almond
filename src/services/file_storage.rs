@@ -20,6 +20,16 @@ pub struct BlobPublication {
     pub expiration: Option<u64>,
 }
 
+/// The authoritative result of one storage publication.
+///
+/// A content-addressed blob may already exist. In that case `metadata`
+/// describes the incumbent bytes and `created` is false; callers must not
+/// report request metadata that storage deliberately retained.
+pub struct StoredBlob {
+    pub metadata: Arc<FileMetadata>,
+    pub created: bool,
+}
+
 impl BlobPublication {
     fn metadata(&self, location: FileLocation) -> FileMetadata {
         FileMetadata {
@@ -82,6 +92,48 @@ async fn remove_local_file(path: &Path) -> AppResult<()> {
     }
 }
 
+/// Reject a hash previously quarantined by report moderation.
+///
+/// Quarantine keeps the original blob filename, which may carry a retention
+/// suffix or an extension; a hash prefix followed by `_`, `.`, or end-of-name
+/// is therefore the only accepted match.
+pub async fn ensure_not_quarantined(state: &AppState, sha256: &str) -> AppResult<()> {
+    validate_sha256_format(sha256)?;
+    let mut entries = match fs::read_dir(&state.storage.quarantine).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(AppError::IoError(format!(
+                "Failed to inspect quarantine directory {}: {error}",
+                state.storage.quarantine.display()
+            )));
+        }
+    };
+
+    while let Some(entry) = entries.next_entry().await.map_err(|error| {
+        AppError::IoError(format!(
+            "Failed to read quarantine directory {}: {error}",
+            state.storage.quarantine.display()
+        ))
+    })? {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if quarantine_name_matches(sha256, name) {
+            return Err(AppError::Forbidden(
+                "Blob is quarantined and cannot be uploaded".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn quarantine_name_matches(sha256: &str, name: &str) -> bool {
+    name.strip_prefix(sha256).is_some_and(|suffix| {
+        suffix.is_empty() || suffix.starts_with('_') || suffix.starts_with('.')
+    })
+}
 async fn remove_physical_file(state: &AppState, metadata: &FileMetadata) -> AppResult<()> {
     match &metadata.location {
         FileLocation::Local(path) => remove_local_file(path).await,
@@ -106,16 +158,21 @@ pub async fn publish_blob(
     state: &AppState,
     temp: TempBlob,
     publication: BlobPublication,
-) -> AppResult<Arc<FileMetadata>> {
+) -> AppResult<StoredBlob> {
     let temp_path = temp.path().to_path_buf();
     validate_sha256_format(&publication.sha256)?;
     let _guard = state.blob_mutation_locks.lock(&publication.sha256).await;
+
+    ensure_not_quarantined(state, &publication.sha256).await?;
 
     if let Some(existing) = state.file_index.get(&publication.sha256).await {
         if publication.origin == BlobOrigin::UpstreamCache || existing.origin == BlobOrigin::Upload
         {
             // `temp` unlinks the redundant copy as it drops out of scope.
-            return Ok(existing);
+            return Ok(StoredBlob {
+                metadata: existing,
+                created: false,
+            });
         }
     }
 
@@ -180,14 +237,14 @@ pub async fn publish_existing_metadata(
     metadata: FileMetadata,
 ) -> AppResult<Arc<FileMetadata>> {
     let _guard = state.blob_mutation_locks.lock(&sha256).await;
-    publish_metadata(state, sha256, metadata).await
+    Ok(publish_metadata(state, sha256, metadata).await?.metadata)
 }
 
 async fn publish_metadata(
     state: &AppState,
     sha256: String,
     metadata: FileMetadata,
-) -> AppResult<Arc<FileMetadata>> {
+) -> AppResult<StoredBlob> {
     match state.file_index.publish(sha256.clone(), metadata).await {
         PublishResult::Published { displaced } => {
             let published = state
@@ -207,13 +264,19 @@ async fn publish_metadata(
                 }
             }
             mark_changes_pending(state).await;
-            Ok(published)
+            Ok(StoredBlob {
+                metadata: published,
+                created: true,
+            })
         }
         PublishResult::Retained { existing } => {
             // This should only be reachable if a caller bypassed the per-hash
             // guard. Keep the incumbent visible rather than replacing it.
             warn!(sha256, "Discarded redundant upstream cache publication");
-            Ok(existing)
+            Ok(StoredBlob {
+                metadata: existing,
+                created: false,
+            })
         }
     }
 }
@@ -571,6 +634,17 @@ mod tests {
 
     fn scratch_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("almond_temp_blob_{label}_{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn quarantine_match_requires_a_complete_hash_prefix() {
+        let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(quarantine_name_matches(hash, hash));
+        assert!(quarantine_name_matches(
+            hash,
+            &format!("{hash}_1234.tar.gz")
+        ));
+        assert!(!quarantine_name_matches(hash, &format!("{hash}suffix")));
     }
 
     fn written_scratch(label: &str) -> PathBuf {
