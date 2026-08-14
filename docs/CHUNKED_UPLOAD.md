@@ -1,6 +1,7 @@
-# Chunked Upload Implementation (BUD-10)
+# Chunked Upload Extension
 
-This implementation adds support for multi-part uploads according to the BUD-10 specification.
+This is an Almond-specific resumable upload protocol; BUD-10 specifies the
+client-side `blossom:` URI scheme and does not define multipart uploads.
 
 ## Features
 

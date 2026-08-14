@@ -11,7 +11,7 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 
 ## Overview
 - Anyone can upload by default, can be locked down by specifying allowed NPUBs or additionally with a web of trust for those NPUBs.
-- Ownership of blobs is NOT tracked, that's why deletion is not supported.
+- Deletion requires a signed, single-use BUD-11 authorization bound to the blob hash.
 - The project is best for some specific Blossom usecases:
   - Personal server locked to one or a few users (`ALLOWED_NPUBS`)
   - Public upload server with very limited TTL (`MAX_FILE_AGE_DAYS`) or limited size (`MAX_TOTAL_SIZE`).
@@ -19,21 +19,22 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
   - [Local Blossom Cache](#local-blossom-cache) on `127.0.0.1:24242` that proxies and caches blobs from remote servers via `?xs=` and `?as=` hints.
 
 ## Features
- - 🌸 Blossom API (BUD-1, BUD-2, BUD-4)
+ - 🌸 Blossom API (BUD-01, BUD-02, BUD-04, BUD-06, BUD-11, BUD-12)
  - 🌸 Temporary file storage with automatic cleanup, first in; first out
- - 🌸 No ownership, no manual delete
  - 🌸 Filesystem only, no database
  - 🌸 Web of trust authorization 
 
 ## API Endpoints
 
 ### File Operations
-- `PUT /upload` - Upload a file (BUD-1)
-- `PATCH /upload` - Chunked upload (BUD-2) 
-- `GET /:filename` - Download a file by SHA256 hash (supports `?origin=` parameter when `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=true`)
-- `HEAD /:filename` - Get file metadata
+- `PUT /upload` - Upload a file (BUD-02)
+- `HEAD /upload` - Validate upload metadata and discover whether the same admission policy permits an upload (BUD-06)
+- `PATCH /upload` - Almond resumable-upload extension
+- `GET /:filename` - Download a blob by SHA-256; an optional filename extension is accepted and ignored for lookup (BUD-01)
+- `HEAD /:filename` - Get blob metadata (BUD-01)
 - `GET /list` / `GET /list/<pubkey>` - List stored files with BUD-12 cursor pagination (`?limit=100&cursor=<last_sha256>`). Optional `?since=` and `?until=` filters are supported but should not be used for pagination.
-- `PUT /mirror` - Mirror a file from another server (BUD-4)
+- `PUT /mirror` - Mirror a file from another server (BUD-04)
+- `DELETE /:filename` - Delete a blob with a BUD-11 authorization (BUD-12)
 
 ### Blob Delivery Semantics
 
@@ -53,6 +54,10 @@ with aggressive, safe caching:
 - **`If-Range`** — a stale validator falls back to the full `200` body.
 - Multi-range requests (`bytes=0-9,20-29`) are answered with the full `200`
   representation; `multipart/byteranges` is not implemented.
+
+When a stored blob has an expiration, `GET` and `HEAD` also return RFC 8594
+`Sunset`. `X-Expiration` can shorten retention; `MAX_FILE_AGE_DAYS` is the
+server-side upper bound. Report-quarantined hashes cannot be re-uploaded.
 
 `GET /filter` (BUD-11) is rendered once per index change and served from cache,
 so it also carries an `ETag` and answers `If-None-Match` with `304`. The

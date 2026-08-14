@@ -6,10 +6,11 @@ use axum::{
 use reqwest::header as reqwest_header;
 use std::path::Path;
 use std::sync::{LazyLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::info;
 
 use crate::constants::{DEFAULT_CONTENT_TYPE, DEFAULT_MIME_TYPE, X_EXPIRATION_HEADER};
+use crate::error::{AppError, AppResult};
 use crate::models::AppState;
 
 /// Get MIME type from file path with proper handling for HLS and other media types
@@ -87,13 +88,60 @@ pub fn extract_content_type_from_response(headers: &HeaderMap) -> String {
         .to_string()
 }
 
-/// Extract expiration timestamp from X-Expiration header
+/// Resolve the blob's effective expiration from client and server retention.
+///
+/// A client-provided `X-Expiration` must name a future Unix timestamp. When
+/// `MAX_FILE_AGE_DAYS` is configured, that deadline is authoritative: client
+/// retention may shorten it but never extend it. With no client header, persist
+/// the server deadline so descriptors and `Sunset` can describe actual policy.
+pub fn extract_expiration(headers: &HeaderMap, max_file_age_days: u64) -> AppResult<Option<u64>> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let client_expiration = match headers.get(X_EXPIRATION_HEADER) {
+        None => None,
+        Some(value) => {
+            let value = value
+                .to_str()
+                .map_err(|_| AppError::BadRequest("Invalid X-Expiration header".to_owned()))?;
+            Some(
+                value
+                    .parse::<u64>()
+                    .map_err(|_| AppError::BadRequest("Invalid X-Expiration header".to_owned()))?,
+            )
+        }
+    };
+    resolve_expiration(now, client_expiration, max_file_age_days)
+}
+
+fn resolve_expiration(
+    now: u64,
+    client_expiration: Option<u64>,
+    max_file_age_days: u64,
+) -> AppResult<Option<u64>> {
+    if client_expiration.is_some_and(|expiration| expiration <= now) {
+        return Err(AppError::BadRequest(
+            "X-Expiration must be a future Unix timestamp".to_owned(),
+        ));
+    }
+    let server_expiration = (max_file_age_days > 0)
+        .then(|| now.saturating_add(max_file_age_days.saturating_mul(86_400)));
+
+    Ok(match (client_expiration, server_expiration) {
+        (Some(client), Some(server)) => Some(client.min(server)),
+        (Some(client), None) => Some(client),
+        (None, Some(server)) => Some(server),
+        (None, None) => None,
+    })
+}
+
+/// Render a blob expiration as an RFC 8594 `Sunset` HTTP-date.
 #[must_use]
-pub fn extract_expiration(headers: &HeaderMap) -> Option<u64> {
-    headers
-        .get(X_EXPIRATION_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
+pub fn sunset_header(expiration: Option<u64>) -> Option<HeaderValue> {
+    let expiration = i64::try_from(expiration?).ok()?;
+    let timestamp = chrono::DateTime::from_timestamp(expiration, 0)?;
+    HeaderValue::from_str(&timestamp.format("%a, %d %b %Y %H:%M:%S GMT").to_string()).ok()
 }
 
 /// How often the cached `Expires` value is re-rendered.
@@ -287,14 +335,14 @@ pub fn server_url_candidates(url: &str) -> Vec<String> {
 }
 
 /// Build a public blob URL without duplicating the separator slash.
+///
+/// BUD-02 requires every descriptor URL to carry an extension. `bin` is the
+/// stable fallback when no metadata-derived extension is available.
 #[must_use]
 pub fn build_public_blob_url(public_url: &str, sha256: &str, extension: Option<&str>) -> String {
     let base_url = public_url.trim_end_matches('/');
-
-    match extension {
-        Some(ext) => format!("{}/{}.{}", base_url, sha256, ext),
-        None => format!("{}/{}", base_url, sha256),
-    }
+    let extension = extension.filter(|value| !value.is_empty()).unwrap_or("bin");
+    format!("{base_url}/{sha256}.{extension}")
 }
 
 /// Combine and normalize server lists from multiple sources
@@ -348,7 +396,7 @@ pub fn combine_server_lists(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_public_blob_url, server_url_candidates};
+    use super::{build_public_blob_url, resolve_expiration, server_url_candidates, sunset_header};
 
     #[test]
     fn build_public_blob_url_removes_duplicate_separator() {
@@ -368,7 +416,7 @@ mod tests {
     fn build_public_blob_url_preserves_scheme_separator() {
         let url = build_public_blob_url("https://example.com", "abc123", None);
 
-        assert_eq!(url, "https://example.com/abc123");
+        assert_eq!(url, "https://example.com/abc123.bin");
     }
 
     #[test]
@@ -384,6 +432,24 @@ mod tests {
         assert_eq!(
             server_url_candidates("http://media.example.fips"),
             ["http://media.example.fips"]
+        );
+    }
+
+    #[test]
+    fn expiration_cap_never_exceeds_server_retention() {
+        assert_eq!(
+            resolve_expiration(100, Some(100_000), 1).unwrap(),
+            Some(86_500)
+        );
+        assert_eq!(resolve_expiration(100, Some(200), 1).unwrap(), Some(200));
+        assert!(resolve_expiration(100, Some(100), 0).is_err());
+    }
+
+    #[test]
+    fn sunset_uses_an_http_date() {
+        assert_eq!(
+            sunset_header(Some(0)).unwrap(),
+            "Thu, 01 Jan 1970 00:00:00 GMT"
         );
     }
 }

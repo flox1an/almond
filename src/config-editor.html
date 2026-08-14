@@ -13,7 +13,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'sha256-0uHRJbASZMbh39lam9p1XkIPKtWEUbxjuLdu+ZcvkmI='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
+      content="default-src 'none'; script-src 'sha256-cgUpc3TbFUsy5aDp8Q59or/mOMfhz+1m3DaOKaiLFeQ='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
     />
     <style>
       /*
@@ -544,8 +544,7 @@
         { "name": "DVM_REFRESH_INTERVAL_MINS", "category": "dvm", "kind": "number", "unit": "minutes", "default": "5", "empty": "hard_error", "probe": "10", "help": "How often the DVM-authorized pubkey set is refreshed." },
 
         { "name": "ALLOWED_NPUBS", "category": "auth", "kind": "list_npub", "default": null, "empty": "like_unset", "probe": "npub14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w4scf6zts", "help": "Comma-separated allowed npubs. When non-empty, restricts public upload/mirror access to this list. Almond silently drops any entry that fails to parse \u2014 this editor checks the bech32 checksum, but (unlike Almond) does not verify the decoded bytes are a valid secp256k1 point." },
-        { "name": "AUTH_MAX_TTL_SECS", "category": "auth", "kind": "number", "unit": "seconds", "default": "300", "empty": "hard_error", "probe": "600", "help": "Maximum validity window of an authorization event." },
-        { "name": "AUTH_MAX_AGE_SECS", "category": "auth", "kind": "number", "unit": "seconds", "default": "300", "empty": "hard_error", "probe": "600", "help": "Maximum age of an authorization event's created_at." },
+        { "name": "AUTH_MAX_TTL_SECS", "category": "auth", "kind": "number", "unit": "seconds", "default": "86400", "empty": "hard_error", "probe": "3600", "help": "Maximum validity window of an authorization event. Set 0 to honor the token's own expiration." },
         { "name": "AUTH_CLOCK_SKEW_SECS", "category": "auth", "kind": "number", "unit": "seconds", "default": "30", "empty": "hard_error", "probe": "60", "help": "Tolerated clock skew when validating authorization timestamps." },
         { "name": "AUTH_REQUIRE_SERVER_TAG", "category": "auth", "kind": "bool", "default": "false", "empty": "hard_error", "probe": "true", "help": "Require authorization events to contain a matching server tag." },
         { "name": "METRICS_BEARER_TOKEN", "category": "auth", "kind": "secret", "default": null, "empty": "like_unset", "probe": "replace-with-a-long-random-secret", "sensitive": true, "generatable": true, "help": "/metrics is disabled until this is set. Keep it off public networks even when set." }

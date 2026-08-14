@@ -8,30 +8,24 @@ use axum::{
 
 use crate::models::AppState;
 
-static CORS_HEADERS: HeaderValue = HeaderValue::from_static(
-    "Content-Type, authorization, x-sha-256, x-content-length, Content-Length, x-content-type, upload-type, upload-length, upload-offset, x-cashu, x-expiration",
-);
+/// Response headers a browser may read back via JavaScript.  `X-Reason` is
+/// added so error diagnostics survive the same-origin policy; the cashu and
+/// price headers are exposed so a payment-preflight client can read them.
 static CORS_EXPOSE: HeaderValue = HeaderValue::from_static(
-    "Content-Length, Allow, X-Cashu, X-Price-Per-MB, X-Price-Unit, X-Accepted-Mints, X-Expiration",
+    "Content-Length, Allow, X-Cashu, X-Price-Per-MB, X-Price-Unit, X-Accepted-Mints, X-Expiration, X-Reason",
 );
 
-fn is_public_blob_path(path: &str) -> bool {
-    if !path.starts_with('/') || path[1..].contains('/') {
-        return false;
-    }
-    !matches!(
+/// Almond's own administrative surface, held apart from the Blossom endpoints
+/// that BUD-01 requires to answer with `Access-Control-Allow-Origin: *`.
+///
+/// The distinction is deliberate: blob bytes and the standard Blossom API are
+/// meant to be reachable from any origin, while `/config`, metrics, and the
+/// web-of-trust / upstream diagnostics describe this specific operator's
+/// instance and stay behind the `cors_allowed_origins` allowlist.
+fn is_internal_path(path: &str) -> bool {
+    matches!(
         path,
-        "/" | "/upload"
-            | "/mirror"
-            | "/list"
-            | "/filter"
-            | "/report"
-            | "/metrics"
-            | "/_metrics"
-            | "/_wot"
-            | "/_upstream"
-            | "/index.html"
-            | "/filter-test.html"
+        "/config" | "/metrics" | "/_metrics" | "/_wot" | "/_upstream" | "/filter-test.html"
     )
 }
 
@@ -48,62 +42,64 @@ fn allowed_origin<'a>(
         .then_some(origin)
 }
 
-fn cors_response(status: StatusCode, origin: HeaderValue, methods: &'static str) -> Response {
+/// Build a preflight response.  `Access-Control-Allow-Headers: Authorization, *`
+/// is the exact pair BUD-01 mandates: `*` does not cover `Authorization` on its
+/// own, so the literal token must sit beside it.
+fn preflight_response(status: StatusCode, origin: HeaderValue) -> Response {
     Response::builder()
         .status(status)
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin)
-        .header(header::ACCESS_CONTROL_ALLOW_METHODS, methods)
-        .header(header::ACCESS_CONTROL_ALLOW_HEADERS, CORS_HEADERS.clone())
+        .header(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            "GET, HEAD, PUT, DELETE, PATCH, OPTIONS",
+        )
+        .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "Authorization, *")
         .header(header::ACCESS_CONTROL_EXPOSE_HEADERS, CORS_EXPOSE.clone())
         .header(header::ACCESS_CONTROL_MAX_AGE, "86400")
         .body(Body::empty())
         .expect("static CORS response is valid")
 }
 
-/// Blob bytes remain shareable cross-origin.  API, discovery, and diagnostics
-/// require an explicit operator allowlist, preventing a website from reading a
-/// user's local or administrative Almond instance.
 pub async fn cors_middleware(
     State(state): State<AppState>,
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    let public_blob = is_public_blob_path(req.uri().path())
-        && matches!(
-            req.method(),
-            &Method::GET | &Method::HEAD | &Method::OPTIONS
-        );
+    let internal = is_internal_path(req.uri().path());
+
+    // OPTIONS is a CORS preflight and must not fall through to a handler: the
+    // registered `options_upload` route is therefore unreachable by design.
     if req.method() == Method::OPTIONS {
-        if public_blob {
-            return cors_response(
-                StatusCode::NO_CONTENT,
-                HeaderValue::from_static("*"),
-                "GET, HEAD",
-            );
+        if internal {
+            return match allowed_origin(&state, req.headers().get(header::ORIGIN)) {
+                Some(origin) => preflight_response(StatusCode::NO_CONTENT, origin.clone()),
+                None => StatusCode::FORBIDDEN.into_response(),
+            };
         }
-        return match allowed_origin(&state, req.headers().get(header::ORIGIN)) {
-            Some(origin) => cors_response(
-                StatusCode::NO_CONTENT,
-                origin.clone(),
-                "GET, PUT, DELETE, PATCH, OPTIONS",
-            ),
-            None => StatusCode::FORBIDDEN.into_response(),
-        };
+        return preflight_response(StatusCode::NO_CONTENT, HeaderValue::from_static("*"));
     }
-    let allowed_origin = allowed_origin(&state, req.headers().get(header::ORIGIN)).cloned();
-    let mut response = next.run(req).await;
-    if public_blob {
+
+    if internal {
+        let allowed = allowed_origin(&state, req.headers().get(header::ORIGIN)).cloned();
+        let mut response = next.run(req).await;
+        if let Some(origin) = allowed {
+            response
+                .headers_mut()
+                .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+            response
+                .headers_mut()
+                .insert(header::ACCESS_CONTROL_EXPOSE_HEADERS, CORS_EXPOSE.clone());
+        }
+        response
+    } else {
+        let mut response = next.run(req).await;
         response.headers_mut().insert(
             header::ACCESS_CONTROL_ALLOW_ORIGIN,
             HeaderValue::from_static("*"),
         );
-    } else if let Some(origin) = allowed_origin {
-        response
-            .headers_mut()
-            .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
         response
             .headers_mut()
             .insert(header::ACCESS_CONTROL_EXPOSE_HEADERS, CORS_EXPOSE.clone());
+        response
     }
-    response
 }

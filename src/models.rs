@@ -1,4 +1,5 @@
-use crate::helpers::{build_public_blob_url, get_extension_from_mime};
+use crate::constants::DEFAULT_MIME_TYPE;
+use crate::helpers::build_public_blob_url;
 use crate::metrics::Metrics;
 use crate::services::blob_index::BlobIndex;
 use cdk::wallet::Wallet as CdkWallet;
@@ -8,7 +9,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, OnceLock, Weak},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::Instant,
 };
 use tokio::sync::{watch, Mutex, OwnedMutexGuard, RwLock};
 
@@ -398,9 +399,8 @@ pub struct AppState {
     pub report_action: ReportAction,
     /// Whether reports feature is enabled
     pub feature_report_enabled: FeatureMode,
-    /// Maximum acceptable authorization event age, expiration window, and clock skew.
+    /// Maximum acceptable authorization event expiration window and clock skew.
     pub auth_max_ttl_secs: u64,
-    pub auth_max_age_secs: u64,
     pub auth_clock_skew_secs: u64,
     /// Reject authorization events without a matching `server` tag.
     pub auth_require_server_tag: bool,
@@ -422,29 +422,28 @@ pub struct AppState {
 
 impl AppState {
     #[must_use]
-    pub fn create_blob_descriptor(
-        &self,
-        sha256: &str,
-        size: u64,
-        content_type: Option<String>,
-        expiration: Option<u64>,
-    ) -> BlobDescriptor {
-        let extension = content_type
-            .as_ref()
-            .and_then(|ct| get_extension_from_mime(ct));
-
-        let url = build_public_blob_url(&self.public_url, sha256, extension.as_deref());
+    pub fn create_blob_descriptor(&self, sha256: &str, metadata: &FileMetadata) -> BlobDescriptor {
+        let content_type = metadata
+            .mime_type
+            .as_deref()
+            .unwrap_or(DEFAULT_MIME_TYPE)
+            .to_owned();
+        let url = build_public_blob_url(&self.public_url, sha256, metadata.extension.as_deref());
+        let nip94 = vec![
+            vec!["url".to_owned(), url.clone()],
+            vec!["m".to_owned(), content_type.clone()],
+            vec!["x".to_owned(), sha256.to_owned()],
+            vec!["size".to_owned(), metadata.size.to_string()],
+        ];
 
         BlobDescriptor {
             url,
-            sha256: sha256.to_string(),
-            size,
+            sha256: sha256.to_owned(),
+            size: metadata.size,
             r#type: content_type,
-            uploaded: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            expiration,
+            uploaded: metadata.created_at,
+            expiration: metadata.expiration,
+            nip94,
         }
     }
 
@@ -475,21 +474,20 @@ pub struct BlobDescriptor {
     pub url: String,
     pub sha256: String,
     pub size: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<String>,
+    pub r#type: String,
     pub uploaded: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expiration: Option<u64>,
+    pub nip94: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListQuery {
     pub since: Option<u64>,
     pub until: Option<u64>,
     pub cursor: Option<String>,
     pub limit: Option<usize>,
-    #[serde(rename = "as")]
-    pub author: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

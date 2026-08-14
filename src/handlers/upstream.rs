@@ -254,7 +254,7 @@ pub async fn try_upstream_servers(
     Err(StatusCode::NOT_FOUND)
 }
 
-/// Try to find file on upstream servers and return a 302 redirect response
+/// Try to find file on upstream servers and return a 307 redirect response
 /// Prioritization: `custom_origin` → `xs_servers` → `UPSTREAM_SERVERS` → user servers (lazy fetch)
 /// Uses HEAD requests to verify file exists before redirecting
 pub async fn try_upstream_redirect(
@@ -359,7 +359,7 @@ async fn try_head_and_redirect(
                 }
             }
 
-            // Build 302 redirect response
+            // Build 307 redirect response.
             match build_redirect_response(file_url, filename) {
                 Ok(response) => Some(response),
                 Err(e) => {
@@ -383,7 +383,7 @@ async fn try_head_and_redirect(
     }
 }
 
-/// Build a 302 redirect response to the upstream URL
+/// Build a 307 redirect response to the upstream URL.
 fn build_redirect_response(
     upstream_url: &str,
     filename: &str,
@@ -397,7 +397,7 @@ fn build_redirect_response(
         .unwrap_or("file");
 
     Response::builder()
-        .status(StatusCode::FOUND) // 302
+        .status(StatusCode::TEMPORARY_REDIRECT)
         .header(header::LOCATION, upstream_url)
         .header(header::CACHE_CONTROL, "private, no-store")
         .header(
@@ -1073,7 +1073,7 @@ async fn run_download(
         .map_err(|error| error.to_string())?;
         // Followers tail the file on disk, so there is only a path to publish
         // when the filesystem adapter is the one that took the blob.
-        if let Some(path) = crate::services::file_storage::local_path(&published) {
+        if let Some(path) = crate::services::file_storage::local_path(&published.metadata) {
             let _ = handle.final_path.set(path.to_path_buf());
         }
         Ok((sha256, body_size))

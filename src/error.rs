@@ -19,6 +19,7 @@ pub enum AppError {
 
     /// Validation errors
     BadRequest(String),
+    LengthRequired(String),
     PayloadTooLarge(String),
 
     /// Resource errors
@@ -58,6 +59,7 @@ impl fmt::Display for AppError {
                 )
             }
             AppError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
+            AppError::LengthRequired(msg) => write!(f, "Length required: {}", msg),
             AppError::PayloadTooLarge(msg) => write!(f, "Payload too large: {}", msg),
             AppError::NotFound(msg) => write!(f, "Not found: {}", msg),
             AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
@@ -93,9 +95,11 @@ impl IntoResponse for AppError {
             // Encode as cashuA (base64url of JSON)
             let encoded = format!("cashuA{}", URL_SAFE.encode(payment_request.to_string()));
 
+            let reason = self.to_string();
             return Response::builder()
                 .status(StatusCode::PAYMENT_REQUIRED)
                 .header("X-Cashu", encoded)
+                .header("X-Reason", &reason)
                 .body(Body::from(format!(
                     "Payment required: {} {}",
                     amount_sats, unit
@@ -107,15 +111,15 @@ impl IntoResponse for AppError {
         let status = match &self {
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
-            // Note: PaymentRequired is handled with early return above, this arm is kept for exhaustiveness
             AppError::PaymentRequired { .. } => StatusCode::PAYMENT_REQUIRED,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::LengthRequired(_) => StatusCode::LENGTH_REQUIRED,
             AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::InsufficientStorage(_) => StatusCode::INSUFFICIENT_STORAGE,
             AppError::IoError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::NetworkError(_) => StatusCode::BAD_REQUEST,
+            AppError::NetworkError(_) => StatusCode::BAD_GATEWAY,
             AppError::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
             AppError::BadGateway(_) => StatusCode::BAD_GATEWAY,
             AppError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -124,7 +128,11 @@ impl IntoResponse for AppError {
 
         let body = self.to_string();
 
-        (status, body).into_response()
+        Response::builder()
+            .status(status)
+            .header("X-Reason", body.as_str())
+            .body(Body::from(body))
+            .expect("building an error response cannot fail")
     }
 }
 
@@ -148,12 +156,13 @@ impl From<AppError> for StatusCode {
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
             AppError::PaymentRequired { .. } => StatusCode::PAYMENT_REQUIRED,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::LengthRequired(_) => StatusCode::LENGTH_REQUIRED,
             AppError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::InsufficientStorage(_) => StatusCode::INSUFFICIENT_STORAGE,
             AppError::IoError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::NetworkError(_) => StatusCode::BAD_REQUEST,
+            AppError::NetworkError(_) => StatusCode::BAD_GATEWAY,
             AppError::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
             AppError::BadGateway(_) => StatusCode::BAD_GATEWAY,
             AppError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,

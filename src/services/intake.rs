@@ -1,5 +1,4 @@
 //! The blob intake pipeline: one place that decides how much a blob may weigh
-//! and one interface that admits it into storage.
 //!
 //! Almond accepts blobs through five doors — `PUT /upload`, `PATCH /upload`
 //! reconstruction, `PUT /mirror`, the recursive HLS mirror, and the upstream
@@ -8,12 +7,9 @@
 //! and the upstream paths applied only `MAX_UPSTREAM_DOWNLOAD_SIZE_MB` without
 //! ever consulting the absolute `MAX_BLOB_SIZE_MB` ceiling that uploads are
 //! held to.
-
-use std::sync::Arc;
-
 use crate::error::AppResult;
-use crate::models::{AppState, BlobOrigin, FileMetadata};
-use crate::services::file_storage::{self, BlobPublication, TempBlob};
+use crate::models::{AppState, BlobOrigin};
+use crate::services::file_storage::{self, BlobPublication, StoredBlob, TempBlob};
 
 /// Which door a blob is arriving through.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,11 +70,7 @@ pub struct Accepted {
 /// Consumes the `TempBlob`: after this returns the bytes either live at their
 /// final location or have been unlinked, and no caller is left holding a path
 /// it has to remember to clean up.
-pub async fn accept(
-    state: &AppState,
-    temp: TempBlob,
-    accepted: Accepted,
-) -> AppResult<Arc<FileMetadata>> {
+pub async fn accept(state: &AppState, temp: TempBlob, accepted: Accepted) -> AppResult<StoredBlob> {
     file_storage::publish_blob(
         state,
         temp,
