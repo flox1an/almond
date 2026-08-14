@@ -10,6 +10,7 @@ use axum::{
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
+use crate::constants::X_SHA_256_HEADER;
 use crate::error::AppError;
 use crate::helpers::{
     extract_content_type, extract_content_type_from_response, extract_expiration,
@@ -26,6 +27,9 @@ pub async fn upload_file(
 ) -> Result<Response, AppError> {
     let authorized =
         authorization::authorize(&headers, &state, authorization::Operation::Upload).await?;
+
+    let declared_sha256 = extract_declared_upload_hash(&headers)?;
+    auth::validate_upload_auth(authorized.event(), declared_sha256)?;
 
     // Extract content type, extension, and expiration
     let content_type = extract_content_type(&headers);
@@ -52,8 +56,8 @@ pub async fn upload_file(
     )
     .await?;
 
-    // Validate authorization matches the hash (must come before payment check)
-    authorized.bind(&state, &sha256).await?;
+    ensure_upload_hash_matches(declared_sha256, &sha256)?;
+    authorized.bind(&state, declared_sha256).await?;
     file_storage::ensure_not_quarantined(&state, &sha256).await?;
 
     // Check payment if required (after we know the size and auth is validated)
@@ -89,6 +93,30 @@ pub async fn upload_file(
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(json_body))
         .map_err(|e| AppError::InternalError(format!("Failed to build response: {}", e)))
+}
+
+/// Extract the BUD-11 implied hash for `PUT /upload`.
+fn extract_declared_upload_hash(headers: &HeaderMap) -> Result<&str, AppError> {
+    let sha256 = headers
+        .get(X_SHA_256_HEADER)
+        .ok_or_else(|| AppError::BadRequest("Missing X-SHA-256 header".to_string()))?
+        .to_str()
+        .map_err(|_| AppError::BadRequest("X-SHA-256 header must be ASCII".to_string()))?;
+    file_storage::validate_sha256_format(sha256)?;
+    Ok(sha256)
+}
+
+/// Require the streamed bytes to equal the BUD-11 declared upload hash.
+fn ensure_upload_hash_matches(
+    declared_sha256: &str,
+    calculated_sha256: &str,
+) -> Result<(), AppError> {
+    if declared_sha256 != calculated_sha256 {
+        return Err(AppError::Conflict(
+            "Uploaded blob does not match X-SHA-256".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Handle blob mirroring - REFACTORED VERSION
@@ -562,5 +590,45 @@ async fn reconstruct_blob(
 async fn discard_chunk_files(chunks: &[crate::models::ChunkInfo]) {
     for chunk in chunks {
         let _ = tokio::fs::remove_file(&chunk.chunk_path).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue};
+
+    use super::*;
+
+    const TEST_HASH: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+
+    #[test]
+    fn extract_declared_upload_hash_requires_header() {
+        let err = extract_declared_upload_hash(&HeaderMap::new()).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(message) if message.contains("Missing")));
+    }
+
+    #[test]
+    fn extract_declared_upload_hash_requires_lowercase_hex() {
+        let mut headers = HeaderMap::new();
+        headers.insert(X_SHA_256_HEADER, HeaderValue::from_static("A1B2"));
+        let err = extract_declared_upload_hash(&headers).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(message) if message.contains("lowercase")));
+    }
+
+    #[test]
+    fn extract_declared_upload_hash_accepts_canonical_hash() {
+        let mut headers = HeaderMap::new();
+        headers.insert(X_SHA_256_HEADER, HeaderValue::from_static(TEST_HASH));
+        assert_eq!(extract_declared_upload_hash(&headers).unwrap(), TEST_HASH);
+    }
+
+    #[test]
+    fn ensure_upload_hash_matches_returns_conflict() {
+        let err = ensure_upload_hash_matches(
+            TEST_HASH,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap_err();
+        assert!(matches!(err, AppError::Conflict(message) if message.contains("X-SHA-256")));
     }
 }
