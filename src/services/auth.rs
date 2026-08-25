@@ -423,7 +423,7 @@ pub async fn is_pubkey_authorized(pubkey: &PublicKey, state: &AppState) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::engine::general_purpose::STANDARD;
 
     const TEST_HASH: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
 
