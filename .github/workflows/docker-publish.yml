@@ -124,12 +124,45 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    timeout-minutes: 5
+    env:
+      COOLIFY_TAILNET_HOST: ${{ vars.COOLIFY_TAILNET_HOST }}
 
     steps:
-      - name: Deploy to CapRover
-        uses: caprover/deploy-from-github@v1.1.2
+      - name: Join Tailnet as tag:ci
+        uses: tailscale/github-action@v4
         with:
-          server: 'https://captain.apps3.slidestr.net'
-          app: 'almond'
-          token: '${{ secrets.CAPROVER_APP_TOKEN }}'
-          image: 'ghcr.io/flox1an/almond:main'
+          authkey: ${{ secrets.TS_AUTHKEY }}
+
+      - name: Verify CI network boundary
+        run: |
+          curl --fail --show-error --connect-timeout 10 \
+            "http://${COOLIFY_TAILNET_HOST}:8000/api/v1/health"
+
+          blocked() {
+            if timeout 5 bash -c "</dev/tcp/$1/$2"; then
+              echo "Unexpectedly reached $1:$2" >&2
+              return 1
+            fi
+          }
+
+          blocked 100.85.228.8 22
+          blocked 100.108.139.111 8006
+
+      - name: Deploy almond (production)
+        run: |
+          curl --fail --show-error --request POST \
+            "http://${COOLIFY_TAILNET_HOST}:8000/api/v1/deploy?uuid=ysf66ufnvzl1wzxchxmhhuqu" \
+            --header "Authorization: Bearer ${{ secrets.COOLIFY_DEPLOY_TOKEN }}"
+
+      - name: Deploy almond-test
+        run: |
+          curl --fail --show-error --request POST \
+            "http://${COOLIFY_TAILNET_HOST}:8000/api/v1/deploy?uuid=oehm4ji0lmg2vpq4uo6o8pvg" \
+            --header "Authorization: Bearer ${{ secrets.COOLIFY_DEPLOY_TOKEN }}"
+
+      - name: Deploy almond-fips
+        run: |
+          curl --fail --show-error --request POST \
+            "http://${COOLIFY_TAILNET_HOST}:8000/api/v1/deploy?uuid=y5s3yaiox9usdqlao3pp3mh2" \
+            --header "Authorization: Bearer ${{ secrets.COOLIFY_DEPLOY_TOKEN }}"
