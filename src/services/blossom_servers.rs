@@ -1,9 +1,6 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use nostr_relay_pool::{
-    prelude::*,
-    relay::limits::{RelayEventLimits, RelayMessageLimits},
-};
+use nostr_sdk::prelude::*;
 use tracing::{info, warn};
 
 use crate::models::AppState;
@@ -40,25 +37,29 @@ pub fn parse_pubkey(pubkey_str: &str) -> Result<PublicKey, String> {
 }
 
 /// Create and connect to a relay pool for fetching server lists
-async fn create_pool() -> Result<RelayPool, Box<dyn std::error::Error + Send + Sync>> {
-    let pool = RelayPool::new();
+async fn create_pool() -> Result<Client, Box<dyn std::error::Error + Send + Sync>> {
+    let client = Client::default();
 
-    let relay_options = RelayOptions::default().limits(RelayLimits {
+    let relay_limits = RelayLimits {
         messages: RelayMessageLimits::default(),
         events: RelayEventLimits {
             max_size: Some(500 * 1024), // 500KB event size
             ..Default::default()
         },
-    });
+    };
 
     for seed_relay in SEED_RELAYS.iter().copied() {
-        if let Err(e) = pool.add_relay(seed_relay, relay_options.clone()).await {
+        if let Err(e) = client
+            .add_relay(seed_relay)
+            .limits(relay_limits.clone())
+            .await
+        {
             warn!("Failed to add relay {}: {}", seed_relay, e);
         }
     }
 
-    pool.connect().await;
-    Ok(pool)
+    client.connect().await;
+    Ok(client)
 }
 
 /// Fetch user's blossom server list from Nostr (kind 10063) with caching
@@ -100,7 +101,7 @@ pub async fn fetch_user_server_list(
         pubkey.to_hex()
     );
 
-    let pool = create_pool().await?;
+    let client = create_pool().await?;
 
     // Query for kind 10063 events (User Server List according to BUD-03)
     let filter = Filter::new()
@@ -108,12 +109,12 @@ pub async fn fetch_user_server_list(
         .authors([*pubkey])
         .limit(1); // Only need the most recent event
 
-    let timeout = Duration::from_secs(10);
-    let events = pool
-        .fetch_events(filter, timeout, ReqExitPolicy::default())
+    let events = client
+        .fetch_events(filter)
+        .timeout(Duration::from_secs(10))
         .await?;
 
-    pool.disconnect().await;
+    client.disconnect().await;
 
     // Get the most recent event (should only be one due to limit=1)
     let servers = if let Some(event) = events.iter().next() {
@@ -128,7 +129,7 @@ pub async fn fetch_user_server_list(
         let server_tags: Vec<_> = event
             .tags
             .iter()
-            .filter(|tag| tag.kind() == TagKind::Custom("server".into()))
+            .filter(|tag| tag.kind() == "server")
             .collect();
 
         let mut servers = Vec::new();

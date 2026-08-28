@@ -10,7 +10,6 @@ pub mod file_storage;
 pub mod hls;
 pub mod intake;
 pub mod native_storage;
-pub mod p2p;
 pub mod serve_files;
 pub mod tail;
 pub mod upload;

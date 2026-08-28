@@ -13,7 +13,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'sha256-wi+szti+PG3Jz0ibCOnNnkKw0kHuj9v9gz2OpZ1V42c='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
+      content="default-src 'none'; script-src 'sha256-mEoxKBXi22R4KnUTDZ8YxskPo9IGCVs+W4ElruMTcCw='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
     />
     <style>
       /*
@@ -518,14 +518,6 @@
         { "name": "FEATURE_LIST_ENABLED", "category": "features", "kind": "bool", "default": "true", "empty": "hard_error", "probe": "false", "help": "/list endpoint. Unlike the other FEATURE_* flags this is a plain boolean, not a mode." },
         { "name": "FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED", "category": "features", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "off", "empty": "like_unset", "probe": "wot", "help": "Allows an authorized request to supply a custom upstream origin." },
         { "name": "FEATURE_HOMEPAGE_ENABLED", "category": "features", "kind": "bool", "default": "true", "empty": "hard_error", "probe": "false", "help": "Controls the homepage. This editor is served by Almond on the same flag \u2014 disabling it also disables the /config route on that server." },
-        { "name": "FEATURE_P2P_SERVE_ENABLED", "category": "features", "kind": "bool", "default": "false", "empty": "hard_error", "probe": "true", "help": "Enable Hashtree P2P serving of hashes already local to Almond." },
-
-        { "name": "P2P_NSEC", "category": "p2p", "kind": "secret", "default": null, "empty": "like_unset", "probe": "nsec1exampleexampleexampleexampleexampleexampleexampleexamz3k5", "sensitive": true, "help": "Nostr private key (bech32 nsec) identifying this P2P node. Not generated here \u2014 it needs a real secp256k1 keypair; use a dedicated Nostr key tool." },
-        { "name": "P2P_RELAYS", "category": "p2p", "kind": "list", "default": null, "empty": "like_unset", "probe": "wss://relay.example.com", "help": "Comma-separated relay URLs for P2P peer discovery." },
-        { "name": "P2P_STUN_SERVERS", "category": "p2p", "kind": "list", "default": null, "empty": "like_unset", "probe": "stun:stun.l.google.com:19302", "help": "Comma-separated STUN servers for NAT traversal." },
-        { "name": "P2P_REQUEST_TIMEOUT_MS", "category": "p2p", "kind": "number", "unit": "ms", "default": "10000", "empty": "hard_error", "probe": "5000", "help": "Timeout for a single P2P request." },
-        { "name": "P2P_HELLO_INTERVAL_MS", "category": "p2p", "kind": "number", "unit": "ms", "default": "3000", "empty": "hard_error", "probe": "1000", "help": "Interval between P2P hello/keepalive messages." },
-        { "name": "P2P_DEBUG", "category": "p2p", "kind": "bool", "default": "false", "empty": "hard_error", "probe": "true", "help": "Verbose P2P logging." },
 
         { "name": "FEATURE_REPORT_ENABLED", "category": "reports", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "off", "empty": "like_unset", "probe": "public", "help": "Almond silently falls back to off on an unrecognized value \u2014 this editor rejects it instead." },
         { "name": "REPORT_ACTION", "category": "reports", "kind": "enum", "values": ["quarantine", "delete"], "default": "quarantine", "empty": "like_unset", "probe": "delete", "help": "quarantine moves a reported blob to quarantine/; delete removes it. Almond silently falls back to quarantine on an unrecognized value \u2014 this editor rejects it instead." },
@@ -561,7 +553,6 @@
         { id: "limits", title: "Limits & Retention" },
         { id: "upstream", title: "Upstream & Caching" },
         { id: "features", title: "Feature Flags" },
-        { id: "p2p", title: "Hashtree P2P Serving" },
         { id: "reports", title: "Reports" },
         { id: "paid", title: "Paid Operations (Cashu / BUD-07)" },
         { id: "filters", title: "BUD-11 Filters" },

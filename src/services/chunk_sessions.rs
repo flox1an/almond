@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use nostr_relay_pool::prelude::PublicKey;
+use nostr_sdk::prelude::PublicKey;
 use tokio::sync::RwLock;
 
 use crate::models::{ChunkInfo, ChunkUpload, ChunkUploadKey};

@@ -133,7 +133,7 @@ pub async fn try_upstream_servers(
     method: &Method,
     custom_origin: Option<&str>,
     xs_servers: Option<&[String]>,
-    author_pubkey: Option<&nostr_relay_pool::prelude::PublicKey>,
+    author_pubkey: Option<&nostr_sdk::prelude::PublicKey>,
 ) -> Result<Response, StatusCode> {
     // Forward range requests to upstream servers
     if headers.get(header::RANGE).is_some() {
@@ -262,7 +262,7 @@ pub async fn try_upstream_redirect(
     filename: &str,
     custom_origin: Option<&str>,
     xs_servers: Option<&[String]>,
-    author_pubkey: Option<&nostr_relay_pool::prelude::PublicKey>,
+    author_pubkey: Option<&nostr_sdk::prelude::PublicKey>,
     cache_in_background: bool,
 ) -> Result<Response, StatusCode> {
     // Extract hash from filename for internal tracking
@@ -763,7 +763,7 @@ async fn proxy_request_to_upstream(
     headers: &HeaderMap,
     custom_origin: Option<&str>,
     xs_servers: Option<&[String]>,
-    author_pubkey: Option<&nostr_relay_pool::prelude::PublicKey>,
+    author_pubkey: Option<&nostr_sdk::prelude::PublicKey>,
 ) -> Result<Response<Body>, StatusCode> {
     debug!(
         "Proxying request to upstream for ongoing download: {}",

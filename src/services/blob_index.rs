@@ -193,7 +193,7 @@ impl BlobIndex {
         &self,
         since: u64,
         until: u64,
-        author: Option<&nostr_relay_pool::prelude::PublicKey>,
+        author: Option<&nostr_sdk::prelude::PublicKey>,
         cursor: Option<&str>,
         limit: usize,
     ) -> Vec<(String, Arc<FileMetadata>)> {

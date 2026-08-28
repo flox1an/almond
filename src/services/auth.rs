@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use nostr_relay_pool::prelude::*;
+use nostr_sdk::prelude::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info};
 
@@ -64,7 +64,8 @@ pub fn verify_event(event: &Event) -> AppResult<()> {
     // BUD-11: expiration tag MUST be present and in the future.
     let expiration = event
         .tags
-        .find(TagKind::Expiration)
+        .iter()
+        .find(|t| t.kind() == "expiration")
         .ok_or_else(|| AppError::Unauthorized("Missing required expiration tag".to_string()))?;
 
     let exp_time = expiration
@@ -86,7 +87,8 @@ pub fn verify_event_with_policy(event: &Event, state: &AppState) -> AppResult<u6
     let created_at = event.created_at.as_secs();
     let expiration = event
         .tags
-        .find(TagKind::Expiration)
+        .iter()
+        .find(|t| t.kind() == "expiration")
         .and_then(|tag| tag.content())
         .and_then(|value| value.parse::<u64>().ok())
         .ok_or_else(|| AppError::Unauthorized("Invalid expiration tag value".to_string()))?;
@@ -95,12 +97,7 @@ pub fn verify_event_with_policy(event: &Event, state: &AppState) -> AppResult<u6
             "Authorization event TTL exceeds the server policy".to_string(),
         ));
     }
-    if state.auth_require_server_tag
-        && !event
-            .tags
-            .iter()
-            .any(|tag| tag.kind() == TagKind::Custom("server".into()))
-    {
+    if state.auth_require_server_tag && !event.tags.iter().any(|tag| tag.kind() == "server") {
         return Err(AppError::Unauthorized(
             "Authorization event requires a server tag".to_string(),
         ));
@@ -212,7 +209,7 @@ pub fn validate_event_kind(event: &Event, expected_kind: u16) -> AppResult<()> {
 
 /// Validate the `t` tag matches the expected verb (BUD-11)
 pub fn validate_t_tag(event: &Event, expected_verb: &str) -> AppResult<()> {
-    let t_tag = event.tags.find(TagKind::Custom("t".into()));
+    let t_tag = event.tags.iter().find(|t| t.kind() == "t");
     if t_tag.is_none() || t_tag.unwrap().content() != Some(expected_verb) {
         return Err(AppError::Unauthorized(format!(
             "Missing or invalid 't' tag: expected '{}'",
@@ -230,7 +227,7 @@ pub fn validate_server_tags(event: &Event, public_url: &str) -> AppResult<()> {
     let server_tags: Vec<_> = event
         .tags
         .iter()
-        .filter(|tag| tag.kind() == TagKind::Custom("server".into()))
+        .filter(|tag| tag.kind() == "server")
         .collect();
 
     if server_tags.is_empty() {
@@ -294,11 +291,7 @@ fn extract_domain(url: &str) -> String {
 pub fn validate_upload_auth(event: &Event, expected_sha256: &str) -> AppResult<()> {
     validate_t_tag(event, "upload")?;
 
-    let x_tags: Vec<_> = event
-        .tags
-        .iter()
-        .filter(|tag| tag.kind() == TagKind::Custom("x".into()))
-        .collect();
+    let x_tags: Vec<_> = event.tags.iter().filter(|tag| tag.kind() == "x").collect();
 
     if x_tags.is_empty() {
         error!("No x tag found in event");
@@ -328,11 +321,7 @@ pub fn validate_delete_auth(event: &Event, sha256: &str) -> AppResult<()> {
     validate_t_tag(event, "delete")?;
 
     // Check if the event has an 'x' tag matching the SHA-256 hash
-    let x_tags: Vec<_> = event
-        .tags
-        .iter()
-        .filter(|tag| tag.kind() == TagKind::Custom("x".into()))
-        .collect();
+    let x_tags: Vec<_> = event.tags.iter().filter(|tag| tag.kind() == "x").collect();
 
     if x_tags.is_empty() {
         return Err(AppError::Unauthorized(
@@ -360,11 +349,7 @@ pub fn validate_chunk_upload_auth(event: &Event, sha256: &str) -> AppResult<()> 
     validate_t_tag(event, "upload")?;
 
     // Check if the event has an 'x' tag with the final blob hash
-    let x_tags: Vec<_> = event
-        .tags
-        .iter()
-        .filter(|tag| tag.kind() == TagKind::Custom("x".into()))
-        .collect();
+    let x_tags: Vec<_> = event.tags.iter().filter(|tag| tag.kind() == "x").collect();
 
     if x_tags.is_empty() {
         return Err(AppError::Unauthorized(
@@ -389,11 +374,7 @@ pub fn validate_chunk_upload_auth(event: &Event, sha256: &str) -> AppResult<()> 
 
 /// Extract expected SHA-256 hash from auth event x tags
 pub fn extract_sha256_from_event(event: &Event) -> Option<String> {
-    let x_tags: Vec<_> = event
-        .tags
-        .iter()
-        .filter(|tag| tag.kind() == TagKind::Custom("x".into()))
-        .collect();
+    let x_tags: Vec<_> = event.tags.iter().filter(|tag| tag.kind() == "x").collect();
 
     for x_tag in x_tags {
         if let Some(content) = x_tag.content() {
@@ -438,14 +419,14 @@ mod tests {
     fn build_event(keys: &Keys, tags: Vec<Tag>) -> Event {
         EventBuilder::new(Kind::Custom(24242), "test auth event")
             .tags(tags)
-            .sign_with_keys(keys)
+            .finalize(keys)
             .unwrap()
     }
 
     fn build_event_with_content(keys: &Keys, tags: Vec<Tag>, content: &str) -> Event {
         EventBuilder::new(Kind::Custom(24242), content)
             .tags(tags)
-            .sign_with_keys(keys)
+            .finalize(keys)
             .unwrap()
     }
 
@@ -454,7 +435,7 @@ mod tests {
         EventBuilder::new(Kind::Custom(24242), "test auth event")
             .tags(tags)
             .custom_created_at(Timestamp::from_secs(created_at))
-            .sign_with_keys(keys)
+            .finalize(keys)
             .unwrap()
     }
 
@@ -462,7 +443,7 @@ mod tests {
     fn build_event_with_kind(keys: &Keys, tags: Vec<Tag>, kind: u16) -> Event {
         EventBuilder::new(Kind::Custom(kind), "test auth event")
             .tags(tags)
-            .sign_with_keys(keys)
+            .finalize(keys)
             .unwrap()
     }
 
@@ -475,15 +456,15 @@ mod tests {
     }
 
     fn t_tag(verb: &str) -> Tag {
-        Tag::custom(TagKind::Custom("t".into()), vec![verb])
+        Tag::custom("t", vec![verb])
     }
 
     fn x_tag(hash: &str) -> Tag {
-        Tag::custom(TagKind::Custom("x".into()), vec![hash])
+        Tag::custom("x", vec![hash])
     }
 
     fn server_tag(domain: &str) -> Tag {
-        Tag::custom(TagKind::Custom("server".into()), vec![domain])
+        Tag::custom("server", vec![domain])
     }
 
     // ── verify_event tests ──

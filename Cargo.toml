@@ -1,6 +1,6 @@
 [package]
 name = "almond"
-version = "0.4.7"
+version = "0.4.8"
 edition = "2021"
 rust-version = "1.85"
 
@@ -31,7 +31,6 @@ dotenvy = "0.15.7"
 uuid = { version = "1.25.0", features = ["v4"] }
 base64 = "0.22.1"
 hex = "0.4"
-nostr-relay-pool = "0.44.3"
 chrono = "0.4.45"
 bytes = "1"
 async-stream = "0.3"
@@ -56,11 +55,7 @@ cdk = { version = "0.16", default-features = false, features = ["wallet"] }
 cdk-sqlite = { version = "0.16", features = ["wallet"] }
 cashu = "0.16"
 rand = "0.10"
-
-# Hashtree P2P serving support
-hashtree-core = "0.2.87"
-hashtree-webrtc = "0.2.15"
-nostr-sdk = "0.35"
+nostr-sdk = "0.45"
 
 # HTTPS/TLS support
 axum-server = { version = "0.8", features = ["tls-rustls"] }

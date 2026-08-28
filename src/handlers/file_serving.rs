@@ -48,7 +48,7 @@ enum BlobSource {
 pub struct UpstreamPlan {
     custom_origin: Option<String>,
     xs_servers: Option<Vec<String>>,
-    author_pubkey: Option<nostr_relay_pool::prelude::PublicKey>,
+    author_pubkey: Option<nostr_sdk::prelude::PublicKey>,
 }
 
 impl UpstreamPlan {

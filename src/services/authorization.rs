@@ -11,7 +11,7 @@
 //! validators). This module owns the policy on top of it.
 
 use axum::http::{header, HeaderMap};
-use nostr_relay_pool::prelude::*;
+use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;

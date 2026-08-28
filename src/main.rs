@@ -56,7 +56,6 @@ use crate::utils::{
     migrate_legacy_blobs,
 };
 use axum::Router;
-use nostr_relay_pool::prelude::*;
 use tokio::fs;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -433,22 +432,6 @@ async fn build_app_state(cfg: &config::Config) -> AppState {
         info!("🤖 DVM allowed kinds: {:?}", cfg.dvm_allowed_kinds);
     }
 
-    if cfg.feature_p2p_serve_enabled {
-        info!(
-            "⚙️ Hashtree P2P serving enabled - relays: {}, STUN servers: {}",
-            if cfg.p2p_relays.is_empty() {
-                "default".to_string()
-            } else {
-                format!("{:?}", cfg.p2p_relays)
-            },
-            if cfg.p2p_stun_servers.is_empty() {
-                "default".to_string()
-            } else {
-                format!("{:?}", cfg.p2p_stun_servers)
-            }
-        );
-    }
-
     if !cfg.upstream_servers.is_empty() {
         info!("⚙️ Upstream servers: {:?}", cfg.upstream_servers);
         info!("⚙️ Upstream mode: {}", cfg.upstream_mode.as_str());
@@ -501,13 +484,6 @@ async fn build_app_state(cfg: &config::Config) -> AppState {
         feature_list_enabled: cfg.feature_list_enabled,
         feature_custom_upstream_origin_enabled: cfg.feature_custom_upstream_origin_enabled,
         feature_homepage_enabled: cfg.feature_homepage_enabled,
-        feature_p2p_serve_enabled: cfg.feature_p2p_serve_enabled,
-        p2p_nsec: cfg.p2p_nsec.clone(),
-        p2p_relays: cfg.p2p_relays.clone(),
-        p2p_stun_servers: cfg.p2p_stun_servers.clone(),
-        p2p_request_timeout_ms: cfg.p2p_request_timeout_ms,
-        p2p_hello_interval_ms: cfg.p2p_hello_interval_ms,
-        p2p_debug: cfg.p2p_debug,
         ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
         upstream_negotiations: Arc::new(RwLock::new(HashMap::new())),
         chunk_sessions: Arc::new(services::chunk_sessions::ChunkSessions::new(
@@ -662,10 +638,6 @@ async fn main() {
             state.serve_file_index.clone(),
             cfg.serve_files_manifest_dir.clone(),
         );
-    }
-
-    if cfg.feature_p2p_serve_enabled {
-        services::p2p::start_p2p_serve_job(state.clone());
     }
 
     let app = create_app(state.clone()).await;

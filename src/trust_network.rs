@@ -1,10 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use nostr_relay_pool::{
-    prelude::*,
-    relay::limits::{RelayEventLimits, RelayMessageLimits},
-};
+use nostr_sdk::prelude::*;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -25,35 +22,41 @@ static SEED_RELAYS: &[&str] = &[
 ];
 
 /// Create and connect to a relay pool
-pub async fn create_pool(custom_relays: &[String]) -> Result<RelayPool> {
-    let pool = RelayPool::new();
+pub async fn create_pool(custom_relays: &[String]) -> Result<Client> {
+    let client = Client::default();
 
-    let relay_options = RelayOptions::default().limits(RelayLimits {
+    let relay_limits = RelayLimits {
         messages: RelayMessageLimits::default(),
         events: RelayEventLimits {
             max_size: Some(500 * 1024), // 500KB event size
             ..Default::default()
         },
-    });
+    };
 
     // Use custom relays if provided, otherwise use seed relays
     if custom_relays.is_empty() {
         for seed_relay in SEED_RELAYS.iter().copied() {
-            pool.add_relay(seed_relay, relay_options.clone()).await?;
+            client
+                .add_relay(seed_relay)
+                .limits(relay_limits.clone())
+                .await?;
         }
     } else {
         for relay in custom_relays {
-            pool.add_relay(relay, relay_options.clone()).await?;
+            client
+                .add_relay(relay.as_str())
+                .limits(relay_limits.clone())
+                .await?;
         }
     }
 
-    pool.connect().await;
-    Ok(pool)
+    client.connect().await;
+    Ok(client)
 }
 
 /// Fetch followers for multiple pubkeys and return results grouped by pubkey
 async fn get_followers(
-    pool: &RelayPool,
+    client: &Client,
     pubkeys: &[PublicKey],
 ) -> Result<HashMap<PublicKey, Vec<String>>> {
     let mut followers_by_pubkey: HashMap<PublicKey, Vec<String>> = HashMap::new();
@@ -62,16 +65,16 @@ async fn get_followers(
         .kinds([Kind::ContactList])
         .authors(pubkeys.iter().copied())
         .limit(300);
-    let timeout = Duration::from_secs(10);
-    let events = pool
-        .fetch_events(filter, timeout, ReqExitPolicy::default())
+    let events = client
+        .fetch_events(filter)
+        .timeout(Duration::from_secs(10))
         .await?;
     println!("💻 Received {} contact list events", events.len());
 
     for event in events.iter() {
         let author = event.pubkey;
         let mut followers = Vec::new();
-        let tags = event.tags.filter(TagKind::p());
+        let tags = event.tags.iter().filter(|t| t.kind() == "p");
         for tag in tags {
             if let Some(content) = tag.content() {
                 followers.push(content.to_string());
@@ -100,14 +103,14 @@ pub async fn refresh_trust_network(
     owner_pubkeys: &[PublicKey],
 ) -> Result<HashMap<PublicKey, usize>> {
     // Create and connect to the relay pool
-    let pool = create_pool(&[]).await?;
+    let client = create_pool(&[]).await?;
 
     // Use local mutable state.
     let mut pubkey_follower_count: HashMap<String, usize> = HashMap::new();
 
     // Phase 1: Fetch owner's follows
     println!("🔍 Fetching owner's follows");
-    let one_hop_network = get_followers(&pool, owner_pubkeys).await?;
+    let one_hop_network = get_followers(&client, owner_pubkeys).await?;
     let empty_vec = Vec::new();
     let followers = one_hop_network.get(&owner_pubkeys[0]).unwrap_or(&empty_vec);
     println!("✋ Found {} one-hop connections", followers.len());
@@ -123,7 +126,7 @@ pub async fn refresh_trust_network(
             .filter_map(|pk_str| PublicKey::parse(pk_str).ok())
             .collect();
 
-        if let Ok(followers_by_pubkey) = get_followers(&pool, &pubkeys).await {
+        if let Ok(followers_by_pubkey) = get_followers(&client, &pubkeys).await {
             for (_, followers) in followers_by_pubkey {
                 for follower in followers {
                     *pubkey_follower_count.entry(follower).or_insert(0) += 1;
@@ -149,7 +152,7 @@ pub async fn refresh_trust_network(
         trusted_pubkeys.len()
     );
 
-    pool.disconnect().await;
+    client.disconnect().await;
     Ok(trusted_pubkeys)
 }
 
@@ -159,7 +162,7 @@ pub async fn refresh_dvm_pubkeys(
     allowed_kinds: &[u16],
     custom_relays: &[String],
 ) -> Result<HashSet<PublicKey>> {
-    let pool = create_pool(custom_relays).await?;
+    let client = create_pool(custom_relays).await?;
 
     let k_values: Vec<String> = allowed_kinds.iter().map(ToString::to_string).collect();
 
@@ -170,11 +173,11 @@ pub async fn refresh_dvm_pubkeys(
 
     let filter = Filter::new()
         .kind(Kind::Custom(31990))
-        .custom_tags(SingleLetterTag::lowercase(Alphabet::K), k_values);
+        .custom_tags(SingleLetterTag::LOWERCASE_K, k_values);
 
-    let timeout = Duration::from_secs(15);
-    let events = pool
-        .fetch_events(filter, timeout, ReqExitPolicy::default())
+    let events = client
+        .fetch_events(filter)
+        .timeout(Duration::from_secs(15))
         .await?;
 
     println!("🤖 Received {} DVM announcement events", events.len());
@@ -183,7 +186,7 @@ pub async fn refresh_dvm_pubkeys(
 
     println!("🤖 Found {} unique DVM pubkeys", dvm_pubkeys.len());
 
-    pool.disconnect().await;
+    client.disconnect().await;
     Ok(dvm_pubkeys)
 }
 
@@ -193,21 +196,21 @@ pub async fn check_dvm_announcement(
     allowed_kinds: &[u16],
     custom_relays: &[String],
 ) -> Result<bool> {
-    let pool = create_pool(custom_relays).await?;
+    let client = create_pool(custom_relays).await?;
 
     let k_values: Vec<String> = allowed_kinds.iter().map(ToString::to_string).collect();
 
     let filter = Filter::new()
         .kind(Kind::Custom(31990))
         .author(pubkey)
-        .custom_tags(SingleLetterTag::lowercase(Alphabet::K), k_values)
+        .custom_tags(SingleLetterTag::LOWERCASE_K, k_values)
         .limit(1);
 
-    let timeout = Duration::from_secs(5);
-    let events = pool
-        .fetch_events(filter, timeout, ReqExitPolicy::default())
+    let events = client
+        .fetch_events(filter)
+        .timeout(Duration::from_secs(5))
         .await?;
 
-    pool.disconnect().await;
+    client.disconnect().await;
     Ok(!events.is_empty())
 }

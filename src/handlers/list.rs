@@ -3,7 +3,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use nostr_relay_pool::prelude::*;
+use nostr_sdk::prelude::*;
 use serde_json::Value;
 use tracing::{info, warn};
 

@@ -12,7 +12,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use crate::models::{FeatureMode, ReportAction, UpstreamMode};
-use nostr_relay_pool::prelude::{FromBech32, PublicKey};
+use nostr_sdk::prelude::{FromBech32, PublicKey};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -231,17 +231,8 @@ pub struct Config {
     pub feature_list_enabled: bool,
     pub feature_custom_upstream_origin_enabled: FeatureMode,
     pub feature_homepage_enabled: bool,
-    pub feature_p2p_serve_enabled: bool,
     pub feature_report_enabled: FeatureMode,
     pub report_action: ReportAction,
-
-    // ── P2P ────────────────────────────────────────────────────────────────
-    pub p2p_nsec: Option<String>,
-    pub p2p_relays: Vec<String>,
-    pub p2p_stun_servers: Vec<String>,
-    pub p2p_request_timeout_ms: u64,
-    pub p2p_hello_interval_ms: u64,
-    pub p2p_debug: bool,
 
     // ── Cashu / paid features (BUD-07) ─────────────────────────────────────
     pub feature_paid_upload: bool,
@@ -389,15 +380,6 @@ impl Config {
                 Ok(FeatureMode::from_str_with_default(s, FeatureMode::Off))
             })?;
         let feature_homepage_enabled = parse_bool(map, "FEATURE_HOMEPAGE_ENABLED", "true")?;
-        let feature_p2p_serve_enabled = parse_bool(map, "FEATURE_P2P_SERVE_ENABLED", "false")?;
-
-        let p2p_nsec = parse_opt(map, "P2P_NSEC", |s: &str| Ok(s.trim().to_owned()))?;
-        let p2p_relays: Vec<String> = parse_list(map, "P2P_RELAYS", |s| Ok(s.to_owned()))?;
-        let p2p_stun_servers: Vec<String> =
-            parse_list(map, "P2P_STUN_SERVERS", |s| Ok(s.to_owned()))?;
-        let p2p_request_timeout_ms = parse_u64(map, "P2P_REQUEST_TIMEOUT_MS", "10000")?;
-        let p2p_hello_interval_ms = parse_u64(map, "P2P_HELLO_INTERVAL_MS", "3000")?;
-        let p2p_debug = parse_bool(map, "P2P_DEBUG", "false")?;
 
         let feature_report_enabled = parse_into(map, "FEATURE_REPORT_ENABLED", "off", |s| {
             Ok(FeatureMode::from_str_with_default(s, FeatureMode::Off))
@@ -508,13 +490,6 @@ impl Config {
             feature_list_enabled,
             feature_custom_upstream_origin_enabled,
             feature_homepage_enabled,
-            feature_p2p_serve_enabled,
-            p2p_nsec,
-            p2p_relays,
-            p2p_stun_servers,
-            p2p_request_timeout_ms,
-            p2p_hello_interval_ms,
-            p2p_debug,
             feature_report_enabled,
             report_action,
             feature_paid_upload,
@@ -565,7 +540,7 @@ mod tests {
 
     use super::*;
     use crate::models::{FeatureMode, ReportAction, UpstreamMode};
-    use nostr_relay_pool::prelude::ToBech32;
+    use nostr_sdk::prelude::ToBech32;
 
     #[test]
     fn defaults_when_env_is_empty() {
@@ -598,13 +573,6 @@ mod tests {
         assert!(cfg.feature_list_enabled);
         assert_eq!(cfg.feature_custom_upstream_origin_enabled, FeatureMode::Off);
         assert!(cfg.feature_homepage_enabled);
-        assert!(!cfg.feature_p2p_serve_enabled);
-        assert!(cfg.p2p_nsec.is_none());
-        assert!(cfg.p2p_relays.is_empty());
-        assert!(cfg.p2p_stun_servers.is_empty());
-        assert_eq!(cfg.p2p_request_timeout_ms, 10000);
-        assert_eq!(cfg.p2p_hello_interval_ms, 3000);
-        assert!(!cfg.p2p_debug);
         assert_eq!(cfg.feature_report_enabled, FeatureMode::Off);
         assert_eq!(cfg.report_action, ReportAction::Quarantine);
         assert!(!cfg.feature_paid_upload);

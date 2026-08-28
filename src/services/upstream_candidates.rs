@@ -13,7 +13,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use nostr_relay_pool::prelude::PublicKey;
+use nostr_sdk::prelude::PublicKey;
 use tracing::{debug, warn};
 
 use crate::helpers::server_url_candidates;

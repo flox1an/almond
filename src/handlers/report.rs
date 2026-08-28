@@ -1,6 +1,7 @@
 use axum::{body::Body, extract::State, http::StatusCode, response::Response, Json};
-use nostr_relay_pool::prelude::*;
+use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 
 use crate::models::{AppState, FeatureMode, ReportAction};

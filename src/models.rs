@@ -3,7 +3,7 @@ use crate::helpers::build_public_blob_url;
 use crate::metrics::Metrics;
 use crate::services::blob_index::BlobIndex;
 use cdk::wallet::Wallet as CdkWallet;
-use nostr_relay_pool::prelude::*;
+use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -379,13 +379,6 @@ pub struct AppState {
     pub feature_list_enabled: bool,
     pub feature_custom_upstream_origin_enabled: FeatureMode,
     pub feature_homepage_enabled: bool,
-    pub feature_p2p_serve_enabled: bool,
-    pub p2p_nsec: Option<String>,
-    pub p2p_relays: Vec<String>,
-    pub p2p_stun_servers: Vec<String>,
-    pub p2p_request_timeout_ms: u64,
-    pub p2p_hello_interval_ms: u64,
-    pub p2p_debug: bool,
     pub ongoing_downloads: OngoingDownloadsMap,
     pub upstream_negotiations: UpstreamNegotiationsMap,
     pub chunk_sessions: Arc<crate::services::chunk_sessions::ChunkSessions>,
