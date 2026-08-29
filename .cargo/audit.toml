@@ -2,18 +2,4 @@
 # https://github.com/rustsec/rustsec/blob/main/cargo-audit/audit.toml.example
 
 [advisories]
-ignore = [
-    # Transitive dependencies from hashtree-webrtc 0.2.15 (which pins nostr-sdk 0.35.0)
-    # Almond's direct nostr dependencies are upgraded to nostr-relay-pool 0.44.3 and nostr 0.44.8.
-    "RUSTSEC-2026-0216", # Remote Denial of Service via malformed NIP‑44 v2 payload (nostr 0.35.0)
-    "RUSTSEC-2026-0226", # Wallet event parsers accept unauthenticated events (nostr 0.35.0)
-    "RUSTSEC-2026-0227", # NIP-44 v2 decryption permits resource exhaustion (nostr 0.35.0)
-    "RUSTSEC-2026-0228", # NIP-04 parsing amplifies malformed ciphertext memory use (nostr 0.35.0)
-    "RUSTSEC-2026-0219", # Remote Denial of Service via malformed NIP-04 IV (nostr 0.35.0)
-    "RUSTSEC-2026-0229", # NIP-98 authorization parsing permits resource exhaustion (nostr 0.35.0)
-    "RUSTSEC-2026-0230", # Empty NIP-50 search filters can panic (nostr 0.35.0)
-    "RUSTSEC-2026-0225", # Debug output exposes NIP-46 and NIP-60 credentials (nostr 0.35.0)
-    "RUSTSEC-2026-0232", # Processing of unverified relay events (nostr-relay-pool 0.35.0)
-    "RUSTSEC-2026-0224", # Verification cache poisoning allows forged Nostr events to bypass signature validation (nostr-relay-pool 0.35.0)
-    "RUSTSEC-2026-0231", # Relay authentication challenges can exhaust memory (nostr-relay-pool 0.35.0)
-]
+ignore = []
