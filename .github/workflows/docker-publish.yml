@@ -161,6 +161,13 @@ jobs:
             "http://${COOLIFY_TAILNET_HOST}:8000/api/v1/deploy?uuid=oehm4ji0lmg2vpq4uo6o8pvg" \
             --header "Authorization: Bearer ${{ secrets.COOLIFY_DEPLOY_TOKEN }}"
 
+      - name: Notify Kuma (deploy heartbeat)
+        if: success()
+        run: |
+          curl --fail --show-error --max-time 10 \
+            "http://100.78.72.32:3001/api/push/${{ secrets.KUMA_PUSH_TOKEN }}?status=up&msg=OK" \
+            || echo "::warning::Kuma push failed (ACL oder Kuma nicht erreichbar); Stille-Detektion greift weiter"
+
       - name: Deploy almond-fips
         run: |
           curl --fail --show-error --request POST \
