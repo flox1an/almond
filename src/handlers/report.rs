@@ -59,6 +59,48 @@ fn extract_report_type(tags: &[Vec<String>]) -> Option<String> {
     None
 }
 
+/// Persist an audit record for one report event: `<STORAGE_PATH>/reports/<id>.json`.
+///
+/// Written before the destructive action and rewritten after it, so a record
+/// left at `status: "pending"` marks a report whose processing was interrupted.
+/// The parsed event supplies the filename, so the client cannot steer the path.
+async fn record_report(
+    state: &AppState,
+    event: &Event,
+    status: &str,
+    action: &str,
+    requested: &[String],
+    processed: &[String],
+) -> Result<(), StatusCode> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let record = serde_json::json!({
+        "status": status,
+        "mode": state.feature_report_enabled.as_str(),
+        "action": action,
+        "requested": requested,
+        "processed": processed,
+        "received_at": now,
+        "event": event,
+    });
+    let body = serde_json::to_vec_pretty(&record).map_err(|error| {
+        error!("Failed to serialize report record: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let path = state
+        .storage
+        .reports
+        .join(format!("{}.json", event.id.to_hex()));
+    // ponytail: plain overwrite, no temp+rename. A crash mid-write can truncate
+    // one record; switch to atomic rename if that record has to be evidence.
+    tokio::fs::write(&path, body).await.map_err(|error| {
+        error!("Failed to write report record {}: {error}", path.display());
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
 /// Handle blob report (BUD-09)
 /// PUT /report
 pub async fn report_blob(
@@ -134,7 +176,11 @@ pub async fn report_blob(
     )
     .await
     .map_err(StatusCode::from)?;
+    // Extract blob hashes from x tags
+    let blob_hashes = extract_blob_hashes(&report.tags);
+
     if state.feature_report_enabled == FeatureMode::Public {
+        record_report(&state, &event, "noop", "none", &blob_hashes, &[]).await?;
         let body = serde_json::to_string(&ReportResponse {
             message: "Report accepted for moderation".to_string(),
             processed: Vec::new(),
@@ -153,13 +199,14 @@ pub async fn report_blob(
 
     info!("✅ Report signature verified");
 
-    // Extract blob hashes from x tags
-    let blob_hashes = extract_blob_hashes(&report.tags);
-
     if blob_hashes.is_empty() {
         error!("No valid blob hashes found in report");
         return Err(StatusCode::BAD_REQUEST);
     }
+
+    let action = state.report_action.as_str();
+    // The audit record must exist before anything is removed.
+    record_report(&state, &event, "pending", action, &blob_hashes, &[]).await?;
 
     let report_type = extract_report_type(&report.tags);
     info!(
@@ -196,6 +243,21 @@ pub async fn report_blob(
             Err(error) => error!("Failed to process reported blob {sha256}: {error}"),
         }
     }
+
+    let status = if processed_hashes.is_empty() {
+        "noop"
+    } else {
+        "processed"
+    };
+    record_report(
+        &state,
+        &event,
+        status,
+        action,
+        &blob_hashes,
+        &processed_hashes,
+    )
+    .await?;
 
     if processed_hashes.is_empty() {
         warn!("No blobs were processed from report");

@@ -243,7 +243,8 @@ docker run -p 3000:3000 \
   ```bash
   ./files/uploads/5/3/53860ca3a463ad7170fe1f1e5b08bf4b66422c72b594a329e001a69e07f2e50e.mp4
   ```
-- Startup indexes only completed-blob roots; `temp/` and `quarantine/` are never treated as live blobs. Indexed age is recovered from modification time.
+- Startup indexes only completed-blob roots; `temp/`, `quarantine/`, and `reports/` are never treated as live blobs. Indexed age is recovered from modification time.
+- Every accepted report event is persisted as `STORAGE_PATH/reports/<event-id>.json` (signed event plus `status`, `mode`, `action`, `requested`, `processed`). The record is written before any blob is removed and rewritten afterwards, so a record still showing `"status": "pending"` marks a report whose processing was interrupted.
 - When starting `almond`, completed-blob roots are read into memory; filesystem changes outside Almond are not recognized until restart.
 
 ## Docker

@@ -254,6 +254,8 @@ pub struct StorageLayout {
     pub upstream_cache: PathBuf,
     pub temp: PathBuf,
     pub quarantine: PathBuf,
+    /// BUD-09 report audit records: one JSON per report event, never indexed.
+    pub reports: PathBuf,
 }
 
 impl StorageLayout {
@@ -264,6 +266,7 @@ impl StorageLayout {
             upstream_cache: root.join("upstream-cache"),
             temp: root.join("temp"),
             quarantine: root.join("quarantine"),
+            reports: root.join("reports"),
             root,
         }
     }

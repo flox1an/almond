@@ -21,6 +21,7 @@ pub async fn initialize_storage(layout: &StorageLayout) -> AppResult<()> {
         &layout.upstream_cache,
         &layout.temp,
         &layout.quarantine,
+        &layout.reports,
     ] {
         fs::create_dir_all(directory).await.map_err(|error| {
             AppError::IoError(format!(
