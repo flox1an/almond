@@ -1,5 +1,5 @@
 use futures_util::StreamExt;
-use reqwest::{redirect, Client};
+use reqwest::{header, redirect, Client};
 use sha2::{Digest, Sha256};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -9,9 +9,9 @@ use tokio::net::lookup_host;
 use tracing::{debug, error, info, warn};
 
 use crate::constants::{
-    CHUNK_SIZE, DNS_LOOKUP_TIMEOUT_SECS, HTTP_CONNECT_TIMEOUT_SECS, HTTP_REQUEST_TIMEOUT_SECS,
-    LOG_INTERVAL, UPSTREAM_POOL_IDLE_TIMEOUT_SECS, UPSTREAM_POOL_MAX_IDLE_PER_HOST,
-    UPSTREAM_READ_TIMEOUT_SECS, UPSTREAM_TCP_KEEPALIVE_SECS,
+    CHUNK_SIZE, DNS_LOOKUP_TIMEOUT_SECS, HTTP_CONNECT_TIMEOUT_SECS, HTTP_REQUEST_MAX_REDIRECTS,
+    HTTP_REQUEST_TIMEOUT_SECS, LOG_INTERVAL, UPSTREAM_POOL_IDLE_TIMEOUT_SECS,
+    UPSTREAM_POOL_MAX_IDLE_PER_HOST, UPSTREAM_READ_TIMEOUT_SECS, UPSTREAM_TCP_KEEPALIVE_SECS,
 };
 use crate::error::{AppError, AppResult};
 use crate::models::AppState;
@@ -330,37 +330,64 @@ pub async fn finalize_upload(
     .await
 }
 
-/// Fetch a URL using the exact public address set that passed validation.
+fn resolve_redirect_url(base: &reqwest::Url, location: &str) -> AppResult<String> {
+    base.join(location)
+        .map(|url| url.to_string())
+        .map_err(|_| AppError::BadGateway("Upstream redirect has an invalid Location".to_string()))
+}
+
+/// Fetch a URL using an address-pinned connection. Every redirect is resolved
+/// and validated independently before fetching, so a public origin cannot
+/// redirect a mirror request into a private network.
 pub async fn fetch_from_url(url: &str) -> AppResult<reqwest::Response> {
-    let target = resolve_public_target(url).await?;
-    let mut builder = Client::builder()
-        .redirect(redirect::Policy::none())
-        .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
-        .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS));
-    for address in &target.addresses {
-        builder = builder.resolve(&target.host, *address);
-    }
-    let client = builder.build().map_err(|error| {
-        AppError::InternalError(format!("Failed to build pinned HTTP client: {error}"))
-    })?;
-    let response = client
-        .get(target.url.clone())
-        .send()
-        .await
-        .map_err(|error| {
-            if error.is_timeout() {
-                AppError::BadGateway("Upstream request timed out".to_string())
-            } else {
-                AppError::BadGateway("Failed to fetch upstream URL".to_string())
-            }
+    let mut next_url = url.to_owned();
+    for redirects in 0..=HTTP_REQUEST_MAX_REDIRECTS {
+        let target = resolve_public_target(&next_url).await?;
+        let mut builder = Client::builder()
+            .redirect(redirect::Policy::none())
+            .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
+            .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS));
+        for address in &target.addresses {
+            builder = builder.resolve(&target.host, *address);
+        }
+        let client = builder.build().map_err(|error| {
+            AppError::InternalError(format!("Failed to build pinned HTTP client: {error}"))
         })?;
-    if !response.status().is_success() {
-        return Err(AppError::BadGateway(format!(
-            "Upstream returned status {}",
-            response.status()
-        )));
+        let response = client
+            .get(target.url.clone())
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    AppError::BadGateway("Upstream request timed out".to_string())
+                } else {
+                    AppError::BadGateway("Failed to fetch upstream URL".to_string())
+                }
+            })?;
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        if !response.status().is_redirection() {
+            return Err(AppError::BadGateway(format!(
+                "Upstream returned status {}",
+                response.status()
+            )));
+        }
+        if redirects == HTTP_REQUEST_MAX_REDIRECTS {
+            return Err(AppError::BadGateway(
+                "Upstream exceeded redirect limit".to_string(),
+            ));
+        }
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                AppError::BadGateway("Upstream redirect has no valid Location".to_string())
+            })?;
+        next_url = resolve_redirect_url(&target.url, location)?;
     }
-    Ok(response)
+    unreachable!("redirect limit returns above")
 }
 
 /// Validate an upstream server URL for SSRF protection
@@ -409,6 +436,15 @@ pub fn check_size_limit(content_length: Option<u64>, max_size_bytes: u64) -> App
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn redirect_locations_resolve_against_the_validated_origin() {
+        let origin = reqwest::Url::parse("https://origin.example/path/blob").unwrap();
+        assert_eq!(
+            resolve_redirect_url(&origin, "../stored/blob.jpg").unwrap(),
+            "https://origin.example/stored/blob.jpg"
+        );
+    }
 
     #[test]
     fn fips_hostnames_match_only_on_the_final_label() {
