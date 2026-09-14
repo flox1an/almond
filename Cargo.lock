@@ -62,7 +62,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "almond"
-version = "0.4.18"
+version = "0.4.19"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -412,9 +412,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-s3"
-version = "1.146.0"
+version = "1.146.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37b5ffaae346b9bd486ebdc3eb7053ec8ab8a1ad0f19a332eefeff036ed559e6"
+checksum = "2cd651b4400d4011b8927b83a9552bf90ff11e6e5da0b9f0a7583247aceec971"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -3128,9 +3128,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-sdk"
-version = "0.45.2"
+version = "0.45.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "245f8642b10feecb0a40739a886ca1850e3be4e35dc6592b806ec437403ab9c9"
+checksum = "c53a37469ce2df8fe6471b6a4d1c4da833f86c7ba0138ac95299b6f37f69ec84"
 dependencies = [
  "async-utility",
  "async-wsocket",
