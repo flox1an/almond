@@ -1,8 +1,11 @@
 # Build Almond.
-# debian:bullseye-slim + explicit rustup nightly pin (see Dockerfile for rationale:
+# debian:bookworm-slim + explicit rustup nightly pin (see Dockerfile for rationale:
 # the floating rustlang/rust:nightly-bullseye-slim tag rolled forward to a nightly
 # with rust-lang/rust#159815, an ICE compiling tokio 1.53.x at opt-level=3).
-FROM debian:bullseye-slim AS almond-builder
+# bookworm since 2026-09-22: bullseye-security still advertises packages whose pool
+# files are gone (apt 404 on openssl/ca-certificates/libcurl4), so every build broke.
+# Matches Dockerfile's builder and the OpenSSL 3 runtime of the ubuntu:24.04 stage.
+FROM debian:bookworm-slim AS almond-builder
 
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo
@@ -27,7 +30,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp /usr/src/app/target/release/almond /tmp/almond
 
 # Download upstream FIPS release binaries instead of rebuilding FIPS from source.
-FROM debian:bullseye-slim AS fips-downloader
+FROM debian:bookworm-slim AS fips-downloader
 
 ARG FIPS_VERSION=0.5.1
 ARG TARGETARCH
