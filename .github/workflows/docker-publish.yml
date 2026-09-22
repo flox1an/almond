@@ -168,3 +168,22 @@ jobs:
           curl --fail --show-error --max-time 10 \
             "http://100.78.72.32:3001/api/push/${{ secrets.KUMA_PUSH_TOKEN }}?status=up&msg=OK" \
             || echo "::warning::Kuma push failed (ACL oder Kuma nicht erreichbar); Stille-Detektion greift weiter"
+
+  # Meldet einen kaputten Lauf sofort rot, statt ihn erst durch Stille auffallen zu lassen.
+  # Eigener Job, weil ein Fehler im build-Job den deploy-Job gar nicht erst startet.
+  notify-failure:
+    needs: [build, deploy]
+    if: failure() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Join Tailnet as tag:ci
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+
+      - name: Notify Kuma (deploy failed)
+        run: |
+          curl --fail --show-error --max-time 10 \
+            "http://100.78.72.32:3001/api/push/${{ secrets.KUMA_PUSH_TOKEN }}?status=down&msg=CI%20run%20${{ github.run_id }}%20failed" \
+            || echo "::warning::Kuma push failed; Stille-Detektion greift weiter"
