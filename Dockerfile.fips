@@ -1,7 +1,9 @@
 # Build Almond.
 # debian:bookworm-slim + explicit rustup nightly pin (see Dockerfile for rationale:
 # the floating rustlang/rust:nightly-bullseye-slim tag rolled forward to a nightly
-# with rust-lang/rust#159815, an ICE compiling tokio 1.53.x at opt-level=3).
+# with rust-lang/rust#159815, an ICE compiling tokio 1.53.x at opt-level=3;
+# ICE verified fixed on nightly-2026-09-27 (release build clean), still pinned
+# for reproducible builds.
 # bookworm since 2026-09-22: bullseye-security still advertises packages whose pool
 # files are gone (apt 404 on openssl/ca-certificates/libcurl4), so every build broke.
 # Matches Dockerfile's builder and the OpenSSL 3 runtime of the ubuntu:24.04 stage.
@@ -17,8 +19,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates curl gcc libc6-dev pkg-config libssl-dev && \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-        sh -s -- -y --default-toolchain nightly-2026-07-23 --profile minimal && \
-    rustup default nightly-2026-07-23 && \
+        sh -s -- -y --default-toolchain nightly-2026-09-27 --profile minimal && \
+    rustup default nightly-2026-09-27 && \
     rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./
