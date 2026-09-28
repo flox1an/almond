@@ -104,10 +104,9 @@ pub fn parse(name: &str) -> Option<ParsedName> {
             return None;
         }
         (Some(digits.parse().ok()?), extension)
-    } else if let Some(extension) = rest.strip_prefix('.') {
-        (None, Some(extension))
     } else {
-        return None;
+        let extension = rest.strip_prefix('.')?;
+        (None, Some(extension))
     };
 
     Some(ParsedName {
