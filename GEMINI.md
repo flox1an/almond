@@ -51,6 +51,7 @@ The project uses `dotenvy` for configuration. Key variables include:
   - Private IP blocking for upstream requests.
   - Streaming-first approach to minimize memory footprint.
 - **Naming**: Follows standard Rust conventions (`snake_case` for variables/functions, `PascalCase` for types).
+- **Language**: Commit messages, PR titles, and code comments in English — this is a public repository.
 
 ## Important Files
 - `CONTEXT.md`: Detailed technical overview and API specifications.
