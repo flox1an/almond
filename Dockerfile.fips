@@ -34,7 +34,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Download upstream FIPS release binaries instead of rebuilding FIPS from source.
 FROM debian:bookworm-slim AS fips-downloader
 
-ARG FIPS_VERSION=0.5.1
+ARG FIPS_VERSION=0.5.2
 ARG TARGETARCH
 
 RUN apt-get update && \
