@@ -55,9 +55,21 @@ with aggressive, safe caching:
 - Multi-range requests (`bytes=0-9,20-29`) are answered with the full `200`
   representation; `multipart/byteranges` is not implemented.
 
-When a stored blob has an expiration, `GET` and `HEAD` also return RFC 8594
-`Sunset`. `X-Expiration` can shorten retention; `MAX_FILE_AGE_DAYS` is the
-server-side upper bound. Report-quarantined hashes cannot be re-uploaded.
+When an uploaded blob has a finite retention deadline, `GET` and `HEAD`
+(including extension variants, `206` and `304`) return RFC 8594 / BUD-01
+`Sunset`, exposed to browsers via `Access-Control-Expose-Headers`. The value is
+exactly the deadline the cleanup job uses: the earlier of the persisted
+expiration and `created_at + MAX_FILE_AGE_DAYS` under the current config, so a
+lowered or raised limit shows up immediately (uploads stored before v0.4.24 may
+carry a persisted server deadline that a raised limit does not extend). The Almond-specific request
+header `X-Expiration` (Unix timestamp, not part of any BUD) can only shorten
+retention below `MAX_FILE_AGE_DAYS`; the descriptor `expiration` field carries
+the same deadline as `Sunset`. Upstream-cache copies and
+upstream redirects carry no `Sunset`: the URL keeps resolving via upstream.
+`Sunset` is advisory; an expired blob is served until cleanup removes it.
+Blob responses stay `immutable` for a year, so a CDN in front of Almond may hold
+stale `Sunset` values or deleted blobs until purged. Report-quarantined hashes
+cannot be re-uploaded.
 
 `GET /filter` (BUD-11) is rendered once per index change and served from cache,
 so it also carries an `ETag` and answers `If-None-Match` with `304`. The

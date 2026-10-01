@@ -59,8 +59,15 @@ pub fn get_extension_from_mime(content_type: &str) -> Option<String> {
         "video/mp2t" => return Some("ts".to_string()),
         // DASH manifest
         "application/dash+xml" => return Some("mpd".to_string()),
-        // Generic binary — mime_guess returns None for this, so provide a sensible default
         "image/jpeg" | "image/pjpeg" => return Some("jpg".to_string()),
+        // mime_guess lists extensions alphabetically, so its first one is often
+        // not the canonical one (`text/plain` → `asm`, `audio/mpeg` → `m2a`).
+        "text/plain" => return Some("txt".to_string()),
+        "audio/mpeg" => return Some("mp3".to_string()),
+        "audio/mp4" => return Some("m4a".to_string()),
+        "application/xml" | "text/xml" => return Some("xml".to_string()),
+        "text/javascript" | "application/javascript" => return Some("js".to_string()),
+        // Generic binary — mime_guess returns None for this, so provide a sensible default
         "application/octet-stream" => return Some("bin".to_string()),
         _ => {}
     }
@@ -88,13 +95,12 @@ pub fn extract_content_type_from_response(headers: &HeaderMap) -> String {
         .to_string()
 }
 
-/// Resolve the blob's effective expiration from client and server retention.
+/// Read the client's optional `X-Expiration` (an Almond extension, not a BUD).
 ///
-/// A client-provided `X-Expiration` must name a future Unix timestamp. When
-/// `MAX_FILE_AGE_DAYS` is configured, that deadline is authoritative: client
-/// retention may shorten it but never extend it. With no client header, persist
-/// the server deadline so descriptors and `Sunset` can describe actual policy.
-pub fn extract_expiration(headers: &HeaderMap, max_file_age_days: u64) -> AppResult<Option<u64>> {
+/// It must name a future Unix timestamp and is persisted as given. The server
+/// limit is not baked in: cleanup and `Sunset` apply `MAX_FILE_AGE_DAYS` from the
+/// current config, so a client value can only shorten retention.
+pub fn extract_expiration(headers: &HeaderMap) -> AppResult<Option<u64>> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -112,28 +118,16 @@ pub fn extract_expiration(headers: &HeaderMap, max_file_age_days: u64) -> AppRes
             )
         }
     };
-    resolve_expiration(now, client_expiration, max_file_age_days)
+    resolve_expiration(now, client_expiration)
 }
 
-fn resolve_expiration(
-    now: u64,
-    client_expiration: Option<u64>,
-    max_file_age_days: u64,
-) -> AppResult<Option<u64>> {
+fn resolve_expiration(now: u64, client_expiration: Option<u64>) -> AppResult<Option<u64>> {
     if client_expiration.is_some_and(|expiration| expiration <= now) {
         return Err(AppError::BadRequest(
             "X-Expiration must be a future Unix timestamp".to_owned(),
         ));
     }
-    let server_expiration = (max_file_age_days > 0)
-        .then(|| now.saturating_add(max_file_age_days.saturating_mul(86_400)));
-
-    Ok(match (client_expiration, server_expiration) {
-        (Some(client), Some(server)) => Some(client.min(server)),
-        (Some(client), None) => Some(client),
-        (None, Some(server)) => Some(server),
-        (None, None) => None,
-    })
+    Ok(client_expiration)
 }
 
 /// Render a blob expiration as an RFC 8594 `Sunset` HTTP-date.
@@ -436,13 +430,19 @@ mod tests {
     }
 
     #[test]
-    fn expiration_cap_never_exceeds_server_retention() {
-        assert_eq!(
-            resolve_expiration(100, Some(100_000), 1).unwrap(),
-            Some(86_500)
-        );
-        assert_eq!(resolve_expiration(100, Some(200), 1).unwrap(), Some(200));
-        assert!(resolve_expiration(100, Some(100), 0).is_err());
+    fn expiration_must_lie_in_the_future() {
+        assert_eq!(resolve_expiration(100, Some(101)).unwrap(), Some(101));
+        assert_eq!(resolve_expiration(100, None).unwrap(), None);
+        assert!(resolve_expiration(100, Some(100)).is_err());
+    }
+
+    #[test]
+    fn common_mime_types_get_their_canonical_extension() {
+        use super::get_extension_from_mime as ext;
+        assert_eq!(ext("text/plain; charset=utf-8").as_deref(), Some("txt"));
+        assert_eq!(ext("audio/mpeg").as_deref(), Some("mp3"));
+        assert_eq!(ext("text/xml").as_deref(), Some("xml"));
+        assert_eq!(ext("image/png").as_deref(), Some("png"));
     }
 
     #[test]

@@ -571,7 +571,7 @@ Expected build times:
 ## File Cleanup
 
 ### Automatic Cleanup
-- **Expiration-based**: Files with `X-Expiration` header are deleted when expired
+- **Expiration-based**: Files with an `X-Expiration` header (Almond extension, can only shorten) are deleted when expired
 - **Age-based**: Files older than `MAX_FILE_AGE_DAYS` are deleted
 - **Size-based**: Oldest files deleted when `MAX_TOTAL_SIZE` or `MAX_TOTAL_FILES` exceeded
 - **Empty directories**: Automatically removed after file deletion

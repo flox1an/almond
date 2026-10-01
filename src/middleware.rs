@@ -10,9 +10,10 @@ use crate::models::AppState;
 
 /// Response headers a browser may read back via JavaScript.  `X-Reason` is
 /// added so error diagnostics survive the same-origin policy; the cashu and
-/// price headers are exposed so a payment-preflight client can read them.
+/// price headers are exposed so a payment-preflight client can read them;
+/// `Sunset` carries a blob's announced expiry.
 static CORS_EXPOSE: HeaderValue = HeaderValue::from_static(
-    "Content-Length, Allow, X-Cashu, X-Price-Per-MB, X-Price-Unit, X-Accepted-Mints, X-Expiration, X-Reason",
+    "Content-Length, Allow, X-Cashu, X-Price-Per-MB, X-Price-Unit, X-Accepted-Mints, X-Reason, Sunset",
 );
 
 /// Almond's own administrative surface, held apart from the Blossom endpoints

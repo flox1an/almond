@@ -34,7 +34,7 @@ pub async fn upload_file(
     // Extract content type, extension, and expiration
     let content_type = extract_content_type(&headers);
     let extension = get_extension_from_mime(&content_type);
-    let expiration = extract_expiration(&headers, state.max_file_age_days)?;
+    let expiration = extract_expiration(&headers)?;
     let declared_size = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
@@ -136,7 +136,7 @@ pub async fn mirror_blob(
     let expected_sha256 = auth::extract_sha256_from_event(auth_event).ok_or_else(|| {
         AppError::Unauthorized("No valid SHA-256 hash found in auth event".to_string())
     })?;
-    let expiration = extract_expiration(&headers, state.max_file_age_days)?;
+    let expiration = extract_expiration(&headers)?;
 
     const MAX_MIRROR_JSON_BYTES: usize = 64 * 1024;
     let body_bytes = axum::body::to_bytes(req.into_body(), MAX_MIRROR_JSON_BYTES)
@@ -332,7 +332,7 @@ pub async fn patch_upload(
         owner,
         upload_type: upload_type.clone(),
         upload_length,
-        expiration: extract_expiration(&headers, state.max_file_age_days)?,
+        expiration: extract_expiration(&headers)?,
     };
 
     // Reserve capacity before writing the body. The ticket is released on

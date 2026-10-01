@@ -359,33 +359,52 @@ fn expiration_reason(state: &AppState, metadata: &FileMetadata, now: u64) -> Opt
     )
 }
 
+/// Earliest deadline at which cleanup deletes this blob under the current
+/// policy, with its reason label. Several retention claims (client
+/// `X-Expiration`, `MAX_FILE_AGE_DAYS`) resolve to the earliest one.
+fn cleanup_deadline(
+    metadata: &FileMetadata,
+    max_file_age_days: u64,
+    max_upstream_cache_ttl_days: u64,
+) -> Option<(u64, &'static str)> {
+    let age_deadline = |days: u64| {
+        (days > 0).then(|| {
+            metadata
+                .created_at
+                .saturating_add(days.saturating_mul(86_400))
+        })
+    };
+    match metadata.origin {
+        BlobOrigin::Upload => metadata
+            .expiration
+            .map(|expiration| (expiration, "expiration"))
+            .into_iter()
+            .chain(age_deadline(max_file_age_days).map(|deadline| (deadline, "upload_age")))
+            .min_by_key(|(deadline, _)| *deadline),
+        BlobOrigin::UpstreamCache => age_deadline(max_upstream_cache_ttl_days)
+            .map(|deadline| (deadline, "upstream_cache_ttl")),
+    }
+}
+
 fn expiration_reason_for(
     metadata: &FileMetadata,
     max_file_age_days: u64,
     max_upstream_cache_ttl_days: u64,
     now: u64,
 ) -> Option<&'static str> {
+    cleanup_deadline(metadata, max_file_age_days, max_upstream_cache_ttl_days)
+        .filter(|(deadline, _)| now >= *deadline)
+        .map(|(_, reason)| reason)
+}
+
+/// The deadline announced as `Sunset`: exactly the cleanup deadline of an
+/// upload. Upstream-cache copies announce none, because after eviction the
+/// same URL is transparently refetched from upstream.
+#[must_use]
+pub fn sunset_expiration(metadata: &FileMetadata, max_file_age_days: u64) -> Option<u64> {
     match metadata.origin {
-        BlobOrigin::Upload => {
-            if metadata
-                .expiration
-                .is_some_and(|expiration| now >= expiration)
-            {
-                return Some("expiration");
-            }
-            (max_file_age_days > 0
-                && now
-                    >= metadata
-                        .created_at
-                        .saturating_add(max_file_age_days.saturating_mul(86_400)))
-            .then_some("upload_age")
-        }
-        BlobOrigin::UpstreamCache => (max_upstream_cache_ttl_days > 0
-            && now
-                >= metadata
-                    .created_at
-                    .saturating_add(max_upstream_cache_ttl_days.saturating_mul(86_400)))
-        .then_some("upstream_cache_ttl"),
+        BlobOrigin::Upload => cleanup_deadline(metadata, max_file_age_days, 0).map(|(at, _)| at),
+        BlobOrigin::UpstreamCache => None,
     }
 }
 
@@ -715,7 +734,7 @@ mod blob_filename_tests {
 mod storage_tests {
     use super::{
         build_file_index, capacity_eviction_order, expiration_reason_for, initialize_storage,
-        migrate_legacy_blobs,
+        migrate_legacy_blobs, sunset_expiration,
     };
     use crate::models::{BlobOrigin, FileLocation, FileMetadata, StorageLayout};
     use crate::services::blob_index::BlobIndex;
@@ -766,6 +785,29 @@ mod storage_tests {
             expiration_reason_for(&metadata(BlobOrigin::Upload, now, Some(now)), 1, 1, now,),
             Some("expiration")
         );
+    }
+
+    #[test]
+    fn sunset_is_the_cleanup_deadline_under_current_policy() {
+        let day = 86_400;
+        // Persisted deadline of 10 days, but the operator lowered the age limit.
+        let upload = metadata(BlobOrigin::Upload, 0, Some(10 * day));
+        assert_eq!(sunset_expiration(&upload, 0), Some(10 * day));
+        let sunset = sunset_expiration(&upload, 3).unwrap();
+        assert_eq!(sunset, 3 * day);
+        assert_eq!(expiration_reason_for(&upload, 3, 0, sunset - 1), None);
+        assert_eq!(
+            expiration_reason_for(&upload, 3, 0, sunset),
+            Some("upload_age")
+        );
+
+        assert_eq!(
+            sunset_expiration(&metadata(BlobOrigin::Upload, 0, None), 0),
+            None
+        );
+        // Cache copies are refetched from upstream after eviction.
+        let cache = metadata(BlobOrigin::UpstreamCache, 0, None);
+        assert_eq!(sunset_expiration(&cache, 3), None);
     }
 
     #[test]

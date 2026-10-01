@@ -111,7 +111,7 @@ pub async fn handle_file_request(
                 file_hash,
                 metadata.size,
                 metadata.mime_type.as_deref(),
-                metadata.expiration,
+                crate::utils::sunset_expiration(&metadata, state.max_file_age_days),
                 bytes,
             )
             .await

@@ -439,7 +439,7 @@ impl AppState {
             size: metadata.size,
             r#type: content_type,
             uploaded: metadata.created_at,
-            expiration: metadata.expiration,
+            expiration: crate::utils::sunset_expiration(metadata, self.max_file_age_days),
             nip94,
         }
     }
