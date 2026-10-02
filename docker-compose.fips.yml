@@ -34,13 +34,13 @@ services:
 
       # Almond
       RUST_LOG: info
-      BIND_ADDR: '[::]:80'
-      PUBLIC_URL: https://almond.apps2.slidestr.net
-      ALLOWED_NPUBS: npub1klr0dy2ul2dx9llk58czvpx73rprcmrvd5dc7ck8esg8f8es06qs427gxc,npub106nla9les99krufcx2r2ylzycvqqhpj25mgpv0l9hf8ew99hwlpqlq7ze5
-      FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED: wot
-      MAX_CHUNK_SIZE_MB: 200
-      MAX_TOTAL_FILES: 999999999
-      MAX_TOTAL_SIZE: 150000
-      MAX_UPSTREAM_DOWNLOAD_SIZE_MB: 5000
-      UPSTREAM_MODE: proxy
-      UPSTREAM_SERVERS: https://blossom.primal.net,https://blossom.yakihonne.com/,https://haven.sovereignengineering.io,https://cdn.satellite.earth/,https://24242.io/,https://blossom.band/,https://nostr.download/,http://test-de01.fips:3000
+      ALMOND_BIND_ADDR: '[::]:80'
+      ALMOND_PUBLIC_URL: https://almond.apps2.slidestr.net
+      ALMOND_ALLOWED_NPUBS: npub1klr0dy2ul2dx9llk58czvpx73rprcmrvd5dc7ck8esg8f8es06qs427gxc,npub106nla9les99krufcx2r2ylzycvqqhpj25mgpv0l9hf8ew99hwlpqlq7ze5
+      ALMOND_CUSTOM_ORIGIN_ACCESS: wot
+      ALMOND_CHUNK_MAX_SIZE: 200MiB
+      ALMOND_STORAGE_MAX_FILES: 999999999
+      ALMOND_STORAGE_MAX_SIZE: 150000MiB
+      ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE: 5000MiB
+      ALMOND_UPSTREAM_MODE: proxy
+      ALMOND_UPSTREAM_SERVERS: https://blossom.primal.net,https://blossom.yakihonne.com/,https://haven.sovereignengineering.io,https://cdn.satellite.earth/,https://24242.io/,https://blossom.band/,https://nostr.download/,http://test-de01.fips:3000

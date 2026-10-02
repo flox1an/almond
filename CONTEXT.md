@@ -15,9 +15,9 @@ This document provides a comprehensive overview of the Almond project, compiled 
 - 🌸 Upstream server fallback for caching edge scenarios
 
 ### Use Cases
-1. **Personal server** locked to one or a few users (`ALLOWED_NPUBS`)
-2. **Public upload server** with limited TTL (`MAX_FILE_AGE_DAYS`) or size (`MAX_TOTAL_SIZE`)
-3. **Caching edge server** that serves content from upstream blossom servers (`UPSTREAM_SERVERS`)
+1. **Personal server** locked to one or a few users (`ALMOND_ALLOWED_NPUBS`)
+2. **Public upload server** with limited TTL (`ALMOND_UPLOAD_MAX_AGE`) or size (`ALMOND_STORAGE_MAX_SIZE`)
+3. **Caching edge server** that serves content from upstream blossom servers (`ALMOND_UPSTREAM_SERVERS`)
 
 ## API Endpoints
 
@@ -26,13 +26,13 @@ This document provides a comprehensive overview of the Almond project, compiled 
 #### `PUT /upload`
 - **Purpose**: Upload a file (BUD-1)
 - **Auth**: ✅ Required (Nostr Kind 24242)
-- **Feature Flag**: `FEATURE_UPLOAD_ENABLED` (default: `true`)
-- **Whitelist**: Optional (if `ALLOWED_NPUBS` is set)
+- **Access Mode**: `ALMOND_UPLOAD_ACCESS` (default: `public`)
+- **Whitelist**: Optional (if `ALMOND_ALLOWED_NPUBS` is set)
 
 #### `PATCH /upload`
 - **Purpose**: Chunked upload (BUD-2, BUD-10)
 - **Auth**: ✅ Required (Nostr Kind 24242)
-- **Feature Flag**: `FEATURE_UPLOAD_ENABLED` (default: `true`)
+- **Access Mode**: `ALMOND_UPLOAD_ACCESS` (default: `public`)
 - **Headers Required**:
   - `X-SHA-256`: SHA256 hash of final blob
   - `Upload-Type`: MIME type of final blob
@@ -44,18 +44,18 @@ This document provides a comprehensive overview of the Almond project, compiled 
 #### `PUT /mirror`
 - **Purpose**: Mirror a file from another server (BUD-4)
 - **Auth**: ✅ Required (Nostr Kind 24242)
-- **Feature Flag**: `FEATURE_MIRROR_ENABLED` (default: `true`)
+- **Access Mode**: `ALMOND_MIRROR_ACCESS` (default: `public`)
 - **Body**: JSON with `{"url": "https://..."}`
 - **Security**: SSRF protection (HTTPS only, no private IPs)
 
 #### `DELETE /:filename`
 - **Purpose**: Delete a blob by SHA-256 hash
 - **Auth**: ✅ Required (STRICT MODE - no WOT)
-- **Whitelist**: ✅ **REQUIRED** (`ALLOWED_NPUBS` must be set)
+- **Whitelist**: ✅ **REQUIRED** (`ALMOND_ALLOWED_NPUBS` must be set)
 - **Auth Event Requirements**:
   - `t` tag with value `"delete"`
   - `x` tag matching SHA-256 hash of blob
-  - Pubkey must be in `ALLOWED_NPUBS` (WOT not allowed)
+  - Pubkey must be in `ALMOND_ALLOWED_NPUBS` (WOT not allowed)
 - **Response**: `204 No Content` on success
 
 ### File Operations (Public)
@@ -64,7 +64,7 @@ This document provides a comprehensive overview of the Almond project, compiled 
 - **Purpose**: Download file by SHA256 hash
 - **Auth**: ❌ Not required
 - **Query Parameters**:
-  - `?origin=<server>`: Custom upstream origin (requires `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=true`)
+  - `?origin=<server>`: Custom upstream origin (requires `ALMOND_CUSTOM_ORIGIN_ACCESS` other than `off`)
   - `?xs=<server1>&xs=<server2>`: Multiple upstream servers (BUD-01)
   - `?as=<pubkey>`: Author pubkey for logging
 - **Caching**: `ETag` is the quoted SHA-256; `If-None-Match` (tag lists, `W/` weak
@@ -79,7 +79,7 @@ This document provides a comprehensive overview of the Almond project, compiled 
 #### `GET /list` and `GET /list/:id`
 - **Purpose**: List all stored files
 - **Auth**: ❌ Not required (publicly accessible)
-- **Feature Flag**: `FEATURE_LIST_ENABLED` (default: `true`)
+- **Feature Flag**: `ALMOND_LIST_ENABLED` (default: `true`)
 - **Query Parameters**: `?since=` and `?until=` (unix timestamps for filtering)
 
 ### System Information (Public)
@@ -102,7 +102,7 @@ This document provides a comprehensive overview of the Almond project, compiled 
 #### `GET /` and `GET /index.html`
 - **Purpose**: Homepage/landing page
 - **Auth**: ❌ Not required
-- **Feature Flag**: `FEATURE_HOMEPAGE_ENABLED` (default: `true`)
+- **Feature Flag**: `ALMOND_HOMEPAGE_ENABLED` (default: `true`)
 
 #### `OPTIONS /upload`
 - **Purpose**: CORS preflight request
@@ -125,27 +125,27 @@ Authorization: Nostr <base64-encoded-event>
 2. **Signature**: Must be valid (`event.verify()`)
 3. **Expiration**: Must not be expired (check `expiration` tag)
 4. **Pubkey Authorization**: 
-   - If `ALLOWED_NPUBS` is set: Pubkey must be in whitelist OR in `trusted_pubkeys` (WOT)
-   - If `ALLOWED_NPUBS` is empty: Any authenticated pubkey is accepted
+   - If `ALMOND_ALLOWED_NPUBS` is set: Pubkey must be in whitelist OR in `trusted_pubkeys` (WOT)
+   - If `ALMOND_ALLOWED_NPUBS` is empty: Any authenticated pubkey is accepted
 
 ### Auth Modes
 
 #### Standard Mode (Uploads, Mirror)
 - ✅ Allows Web of Trust (`trusted_pubkeys`)
 - ✅ Falls back to WOT if pubkey not in whitelist
-- ⚠️ Requires `ALLOWED_NPUBS` only if whitelist is desired
+- ⚠️ Requires `ALMOND_ALLOWED_NPUBS` only if whitelist is desired
 
 #### Strict Mode (Delete)
 - ❌ **NO Web of Trust** - WOT is disabled
-- ✅ **REQUIRES** `ALLOWED_NPUBS` to be set
+- ✅ **REQUIRES** `ALMOND_ALLOWED_NPUBS` to be set
 - ✅ Only explicitly whitelisted pubkeys can delete
-- Returns `403 Forbidden` if `ALLOWED_NPUBS` is not configured
+- Returns `403 Forbidden` if `ALMOND_ALLOWED_NPUBS` is not configured
 
 ### Web of Trust (WOT)
 
 - Automatically enabled when any feature is set to `wot` mode
 - Uses Nostr follower graphs to determine trusted pubkeys
-- Built from `ALLOWED_NPUBS` using a 2-hop graph from Nostr relays
+- Built from `ALMOND_ALLOWED_NPUBS` using a 2-hop graph from Nostr relays
 - Only applies to upload/mirror operations (not delete)
 - `trusted_pubkeys` are refreshed every 4 hours via `refresh_trust_network()`
 
@@ -163,7 +163,7 @@ When paid features are enabled, the server implements the BUD-07/NUT-24 payment 
 5. Server verifies token, receives it into wallet, proceeds
 
 **2. Preemptive Flow (single request):**
-1. Client calculates expected price (size_mb * CASHU_PRICE_PER_MB)
+1. Client calculates expected price (size_mb * ALMOND_CASHU_PRICE_PER_MIB)
 2. Client includes `X-Cashu: cashuB...` header with first request
 3. Server validates amount is sufficient for actual size
 4. If sufficient: receives token, proceeds with operation
@@ -196,53 +196,54 @@ Standard Cashu token string starting with `cashuA` or `cashuB`.
 
 ### Environment Variables
 
+Every variable can also be passed as a CLI flag (`ALMOND_UPLOAD_ACCESS` ↔
+`--upload-access`) or loaded from a dotenv file with `--config`; see README.md.
+
 #### Server Configuration
-- `BIND_ADDR`: Address to bind server (default: `"127.0.0.1:3000"`)
-- `PUBLIC_URL`: Public URL for service (default: `"http://127.0.0.1:3000"`)
+- `ALMOND_BIND_ADDR`: Address to bind server (default: `"127.0.0.1:3000"`)
+- `ALMOND_PUBLIC_URL`: Public URL for service (default: `"http://127.0.0.1:3000"`)
 
 #### Storage Configuration
-- `STORAGE_PATH`: Path where files are stored (default: `"./files"`)
-- `MAX_TOTAL_SIZE`: Maximum total storage size in MB (default: `99999`)
-- `MAX_TOTAL_FILES`: Maximum number of files (default: `99999999`)
-- `CLEANUP_INTERVAL_SECS`: Interval for cleanup checks in seconds (default: `30`)
-- `MAX_FILE_AGE_DAYS`: Maximum age of files in days, 0 for no limit (default: `0`)
+- `ALMOND_STORAGE_PATH`: Path where files are stored (default: `"./files"`)
+- `ALMOND_STORAGE_MAX_SIZE`: Maximum total storage size, 0 = unlimited (default: `0`)
+- `ALMOND_STORAGE_MAX_FILES`: Maximum number of files, 0 = unlimited (default: `0`)
+- `ALMOND_CLEANUP_INTERVAL`: Interval for cleanup checks (default: `30s`)
+- `ALMOND_UPLOAD_MAX_AGE`: Maximum age of files, 0 for no limit (default: `0`)
 
 #### Upstream Configuration
-- `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback
-- `UPSTREAM_MODE`: How to handle upstream requests - `proxy`, `redirect`, or `redirect_and_cache` (default: `proxy`)
-  - `proxy`: Stream from upstream while saving locally (current behavior)
+- `ALMOND_UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback
+- `ALMOND_UPSTREAM_MODE`: How to handle upstream requests - `proxy`, `redirect`, or `redirect-and-cache` (default: `proxy`)
+  - `proxy`: Stream from upstream while saving locally
   - `redirect`: Issue 302 redirect to upstream, no local caching
-  - `redirect_and_cache`: Issue 302 redirect to upstream, download in background for future requests
-- `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: `100`).
+  - `redirect-and-cache`: Issue 302 redirect to upstream, download in background for future requests
+- `ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE`: Maximum size for upstream downloads (default: `100MiB`).
   A blob above the limit is proxied to the client without a cache fill, including
   range requests, so the limit never turns a reachable blob into an error.
 
 #### Chunked Upload Configuration
-- `MAX_CHUNK_SIZE_MB`: Maximum size for individual chunks in MB (default: `100`)
-- `CHUNK_CLEANUP_TIMEOUT_MINUTES`: Timeout for cleaning up abandoned chunked uploads (default: `30`)
+- `ALMOND_CHUNK_MAX_SIZE`: Maximum size for individual chunks (default: `100MiB`)
+- `ALMOND_CHUNK_SESSION_TIMEOUT`: Timeout for cleaning up abandoned chunked uploads (default: `30m`)
 
 #### Authorization Configuration
-- `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys
+- `ALMOND_ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys
   - Used as whitelist with WOT as fallback for uploads/mirrors
   - **Required** for delete operations
   - Used as seed for WOT 2-hop graph when WOT mode is enabled
 
 #### Cashu Payment Configuration (BUD-07)
-- `FEATURE_PAID_UPLOAD`: Enable paid uploads - `off` or `on` (default: `off`)
-- `FEATURE_PAID_MIRROR`: Enable paid mirrors - `off` or `on` (default: `off`)
-- `FEATURE_PAID_DOWNLOAD`: Enable paid downloads - `off` or `on` (default: `off`)
-- `CASHU_PRICE_PER_MB`: Price per megabyte in satoshis (default: `1`)
-- `CASHU_ACCEPTED_MINTS`: Comma-separated list of accepted Cashu mint URLs (required if any paid feature enabled)
-- `CASHU_WALLET_PATH`: Path to SQLite wallet database (default: `./cashu_wallet.db`)
+- `ALMOND_CASHU_PAID`: Comma-separated paid operations - `upload`, `mirror`, `download` (default: none)
+- `ALMOND_CASHU_PRICE_PER_MIB`: Price per MiB in satoshis (default: `1`)
+- `ALMOND_CASHU_MINT`: Accepted Cashu mint URL, exactly one (required if `ALMOND_CASHU_PAID` is set)
+- `ALMOND_CASHU_WALLET_PATH`: Path to SQLite wallet database (default: `./cashu_wallet.db`)
 
 #### Feature Flags
-- `FEATURE_UPLOAD_ENABLED`: Upload endpoint mode - `off`, `wot`, or `public` (default: `public`)
-- `FEATURE_MIRROR_ENABLED`: Mirror endpoint mode - `off`, `wot`, or `public` (default: `public`)
-- `FEATURE_LIST_ENABLED`: Enable list endpoint (default: `true`)
-- `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED`: Custom upstream origin mode - `off`, `wot`, or `public` (default: `off`)
+- `ALMOND_UPLOAD_ACCESS`: Upload endpoint mode - `off`, `wot`, `dvm`, or `public` (default: `public`)
+- `ALMOND_MIRROR_ACCESS`: Mirror endpoint mode - `off`, `wot`, `dvm`, or `public` (default: `public`)
+- `ALMOND_LIST_ENABLED`: Enable list endpoint (default: `true`)
+- `ALMOND_CUSTOM_ORIGIN_ACCESS`: Custom upstream origin mode - `off`, `wot`, `dvm`, or `public` (default: `off`)
   - Controls `?origin=`, `?xs=`, and `?as=` URL parameters
   - In `wot` mode, validates `?as=` author pubkey against Web of Trust
-- `FEATURE_HOMEPAGE_ENABLED`: Enable homepage/landing page (default: `true`)
+- `ALMOND_HOMEPAGE_ENABLED`: Enable homepage/landing page (default: `true`)
 
 ## Architecture & Code Structure
 
@@ -342,7 +343,7 @@ being recomputed by scanning:
 
 Values are `Arc<FileMetadata>`, so a lookup on the serve path is a refcount
 bump rather than a clone of a `PathBuf` and two `String`s. The serve-files
-index (`SERVE_FILES_PATH`) is `Arc`-valued for the same reason.
+index (`ALMOND_SERVE_FILES_PATH`) is `Arc`-valued for the same reason.
 
 ### Filter caching
 
@@ -474,14 +475,14 @@ docker build -t almond .
 ```bash
 docker run -p 3000:3000 \
   -v /path/to/files:/app/files \
-  -e STORAGE_PATH=/app/files \
-  -e PUBLIC_URL=https://your-domain.com \
-  -e FEATURE_UPLOAD_ENABLED=wot \
-  -e FEATURE_MIRROR_ENABLED=wot \
-  -e ALLOWED_NPUBS=npub1... \
-  -e MAX_TOTAL_SIZE=1000 \
-  -e MAX_FILE_AGE_DAYS=7 \
-  -e UPSTREAM_SERVERS=https://backup1.com,https://backup2.com \
+  -e ALMOND_STORAGE_PATH=/app/files \
+  -e ALMOND_PUBLIC_URL=https://your-domain.com \
+  -e ALMOND_UPLOAD_ACCESS=wot \
+  -e ALMOND_MIRROR_ACCESS=wot \
+  -e ALMOND_ALLOWED_NPUBS=npub1... \
+  -e ALMOND_STORAGE_MAX_SIZE=1000MiB \
+  -e ALMOND_UPLOAD_MAX_AGE=7d \
+  -e ALMOND_UPSTREAM_SERVERS=https://backup1.com,https://backup2.com \
   ghcr.io/flox1an/almond
 ```
 
@@ -490,7 +491,7 @@ docker run -p 3000:3000 \
 GitHub Actions publishes a second image at `ghcr.io/flox1an/almond-fips`.
 It runs FIPS, dnsmasq, and Almond in one container. Almond can be reachable at
 the same time via normal Docker HTTP publishing (`-p 3000:3000`) and via the
-FIPS mesh (`http://<node-npub>.fips:3000`) when `BIND_ADDR=0.0.0.0:3000`.
+FIPS mesh (`http://<node-npub>.fips:3000`) when `ALMOND_BIND_ADDR=0.0.0.0:3000`.
 
 The container needs `NET_ADMIN`, `/dev/net/tun`, and IPv6 enabled:
 
@@ -504,7 +505,7 @@ docker run \
   -e FIPS_NSEC=nsec1... \
   -e FIPS_PEER_NPUB=npub1... \
   -e FIPS_PEER_ADDR=203.0.113.10:2121 \
-  -e UPSTREAM_SERVERS=https://npub1upstream....fips \
+  -e ALMOND_UPSTREAM_SERVERS=https://npub1upstream....fips \
   ghcr.io/flox1an/almond-fips:main
 ```
 
@@ -560,24 +561,24 @@ Expected build times:
 ### Upstream Modes
 - **proxy** (default): Stream from upstream while saving locally. Client receives data immediately while file is cached.
 - **redirect**: Issue 302 redirect to upstream. No local caching. Reduces bandwidth/CPU on Almond server.
-- **redirect_and_cache**: Issue 302 redirect to upstream, but also download in background for future requests. Best of both worlds - immediate redirect for current request, local serving for future requests.
+- **redirect-and-cache**: Issue 302 redirect to upstream, but also download in background for future requests. Best of both worlds - immediate redirect for current request, local serving for future requests.
 
 ### Configuration
-- `UPSTREAM_SERVERS`: Comma-separated list of upstream servers
-- `UPSTREAM_MODE`: How to handle upstream requests (`proxy`, `redirect`, `redirect_and_cache`)
-- `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads
-- `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED`: Enable custom origin parameter
+- `ALMOND_UPSTREAM_SERVERS`: Comma-separated list of upstream servers
+- `ALMOND_UPSTREAM_MODE`: How to handle upstream requests (`proxy`, `redirect`, `redirect-and-cache`)
+- `ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE`: Maximum size for upstream downloads
+- `ALMOND_CUSTOM_ORIGIN_ACCESS`: Enable custom origin parameter
 
 ## File Cleanup
 
 ### Automatic Cleanup
 - **Expiration-based**: Files with an `X-Expiration` header (Almond extension, can only shorten) are deleted when expired
-- **Age-based**: Files older than `MAX_FILE_AGE_DAYS` are deleted
-- **Size-based**: Oldest files deleted when `MAX_TOTAL_SIZE` or `MAX_TOTAL_FILES` exceeded
+- **Age-based**: Files older than `ALMOND_UPLOAD_MAX_AGE` are deleted
+- **Size-based**: Oldest files deleted when `ALMOND_STORAGE_MAX_SIZE` or `ALMOND_STORAGE_MAX_FILES` exceeded
 - **Empty directories**: Automatically removed after file deletion
 
 ### Cleanup Process
-1. Runs periodically based on `CLEANUP_INTERVAL_SECS`
+1. Runs periodically based on `ALMOND_CLEANUP_INTERVAL`
 2. Sorts files by creation date (oldest first)
 3. Deletes expired/aged files first
 4. Then enforces storage limits

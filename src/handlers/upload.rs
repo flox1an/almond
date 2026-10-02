@@ -297,7 +297,7 @@ pub async fn patch_upload(
             "Upload-Length exceeds the configured blob limit".to_string(),
         ));
     }
-    let max_chunk_size = state.max_chunk_size_mb * 1024 * 1024;
+    let max_chunk_size = state.max_chunk_size_bytes;
     if content_length > max_chunk_size {
         return Err(AppError::PayloadTooLarge(
             "Chunk exceeds the configured chunk limit".to_string(),

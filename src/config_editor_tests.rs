@@ -19,7 +19,6 @@
 use std::collections::{BTreeSet, HashMap};
 
 use base64::Engine as _;
-use regex::Regex;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -155,12 +154,12 @@ fn schema_defaults_match_config_rs() {
 #[test]
 fn public_url_conditional_default_matches_config_rs() {
     let http_default = Config::from_map(&HashMap::new()).unwrap();
-    assert_eq!(http_default.public_url, "http://127.0.0.1:3000");
+    assert_eq!(http_default.public_url(), "http://127.0.0.1:3000");
 
     let mut with_https = HashMap::new();
-    with_https.insert("ENABLE_HTTPS".to_string(), "true".to_string());
+    with_https.insert("ALMOND_TLS_ENABLED".to_string(), "true".to_string());
     let https_default = Config::from_map(&with_https).unwrap();
-    assert_eq!(https_default.public_url, "https://127.0.0.1:3000");
+    assert_eq!(https_default.public_url(), "https://127.0.0.1:3000");
 }
 
 // ---------------------------------------------------------------------------
@@ -236,20 +235,23 @@ fn empty_value_behaviour_matches_schema_claim() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn schema_names_match_config_rs_literals() {
+fn schema_names_match_config_arguments() {
+    use clap::CommandFactory;
+
     let schema = load_schema();
     let schema_names: BTreeSet<String> = schema.iter().map(|f| f.name.clone()).collect();
 
-    let config_src = include_str!("config.rs");
-    let re = Regex::new(r#""([A-Z][A-Z0-9_]*)""#).unwrap();
-    let code_names: BTreeSet<String> = re
-        .captures_iter(config_src)
-        .map(|c| c[1].to_string())
+    // `--config` names the file itself and is not a file setting.
+    let code_names: BTreeSet<String> = Config::command()
+        .get_arguments()
+        .filter_map(clap::Arg::get_long)
+        .filter(|long| *long != "config")
+        .map(crate::config::env_name)
         .collect();
 
     assert_eq!(
         schema_names, code_names,
-        "config-editor.html's ALMOND_SCHEMA and the env-var literals in config.rs have diverged"
+        "config-editor.html's ALMOND_SCHEMA and the arguments in config.rs have diverged"
     );
 }
 

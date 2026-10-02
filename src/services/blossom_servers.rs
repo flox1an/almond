@@ -69,8 +69,7 @@ pub async fn fetch_user_server_list(
     state: &AppState,
     pubkey: &PublicKey,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let cache_ttl_hours = state.blossom_server_list_cache_ttl_hours;
-    let cache_ttl_duration = Duration::from_secs(cache_ttl_hours * 3600);
+    let cache_ttl_duration = state.blossom_server_list_cache_ttl;
 
     // Check cache first
     {
@@ -79,18 +78,18 @@ pub async fn fetch_user_server_list(
             let age = Instant::now().duration_since(*cached_at);
             if age < cache_ttl_duration {
                 info!(
-                    "Using cached server list for pubkey: {} (age: {:?}, TTL: {}h)",
+                    "Using cached server list for pubkey: {} (age: {:?}, TTL: {:?})",
                     pubkey.to_hex(),
                     age,
-                    cache_ttl_hours
+                    cache_ttl_duration
                 );
                 return Ok(servers.clone());
             }
             info!(
-                "Cache expired for pubkey: {} (age: {:?}, TTL: {}h), fetching from Nostr",
+                "Cache expired for pubkey: {} (age: {:?}, TTL: {:?}), fetching from Nostr",
                 pubkey.to_hex(),
                 age,
-                cache_ttl_hours
+                cache_ttl_duration
             );
         }
     }
@@ -167,10 +166,10 @@ pub async fn fetch_user_server_list(
         let mut cache = state.blossom_server_lists.write().await;
         cache.insert(*pubkey, (servers.clone(), Instant::now()));
         info!(
-            "Cached server list for pubkey: {} ({} servers, TTL: {}h)",
+            "Cached server list for pubkey: {} ({} servers, TTL: {:?})",
             pubkey.to_hex(),
             servers.len(),
-            cache_ttl_hours
+            cache_ttl_duration
         );
     }
 

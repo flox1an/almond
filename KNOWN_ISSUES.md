@@ -94,7 +94,7 @@ proves the amount is short.
 more blob-hash `x` tags.
 
 **Current behavior:** `src/handlers/report.rs:report_blob` returns `202 Accepted`
-for `FEATURE_REPORT_ENABLED=public` before it extracts and validates `x` tags.
+for `ALMOND_REPORT_ACCESS=public` before it extracts and validates `x` tags.
 
 **Impact:** A signed kind-1984 event without a target is accepted as a report.
 
@@ -133,7 +133,7 @@ client-side protocol responsibility.
 public key.
 
 **Current behavior:** `FileMetadata.pubkey` is always absent, and
-`src/handlers/list.rs:list_blobs` treats any `ALLOWED_NPUBS` member as the same
+`src/handlers/list.rs:list_blobs` treats any `ALMOND_ALLOWED_NPUBS` member as the same
 operator catalogue; other keys receive an empty list.
 
 **Impact:** Results do not represent uploads by the requested pubkey.

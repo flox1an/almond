@@ -593,9 +593,10 @@ pub async fn ensure_storage_capacity(state: &AppState, bytes: u64) -> AppResult<
     }
 
     let stats = state.file_index.stats().await;
-    if stats.total_bytes.saturating_add(bytes) > state.max_total_size
-        || stats.count >= state.max_total_files
-    {
+    let over_size =
+        state.max_total_size != 0 && stats.total_bytes.saturating_add(bytes) > state.max_total_size;
+    let over_files = state.max_total_files != 0 && stats.count >= state.max_total_files;
+    if over_size || over_files {
         return Err(AppError::InsufficientStorage(
             "Storage quota would be exceeded".to_string(),
         ));

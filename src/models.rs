@@ -14,7 +14,7 @@ use std::{
 use tokio::sync::{watch, Mutex, OwnedMutexGuard, RwLock};
 
 /// Feature mode controlling access to features
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum FeatureMode {
     /// Feature is disabled
     Off,
@@ -27,19 +27,6 @@ pub enum FeatureMode {
 }
 
 impl FeatureMode {
-    /// Parse from string value (off/wot/public, case-insensitive)
-    /// Falls back to a default if the string doesn't match
-    #[must_use]
-    pub fn from_str_with_default(s: &str, default: FeatureMode) -> Self {
-        match s.to_lowercase().as_str() {
-            "off" | "false" => FeatureMode::Off,
-            "wot" => FeatureMode::Wot,
-            "dvm" => FeatureMode::Dvm,
-            "public" | "true" => FeatureMode::Public,
-            _ => default,
-        }
-    }
-
     /// Check if feature is enabled (wot, dvm, or public)
     #[must_use]
     pub fn is_enabled(&self) -> bool {
@@ -73,62 +60,21 @@ impl FeatureMode {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct FeatureConfig {
-    pub upload_enabled: FeatureMode,
-    pub mirror_enabled: FeatureMode,
-    pub list_enabled: bool,
-    pub homepage_enabled: bool,
-    pub paid_upload: bool,
-    pub paid_mirror: bool,
-    pub paid_download: bool,
-}
-
-impl Default for FeatureConfig {
-    fn default() -> Self {
-        Self {
-            upload_enabled: FeatureMode::Public,
-            mirror_enabled: FeatureMode::Public,
-            list_enabled: true,
-            homepage_enabled: true,
-            paid_upload: false,
-            paid_mirror: false,
-            paid_download: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AuthConfig {
-    pub allowed_pubkeys: Vec<PublicKey>,
-    pub dvm_allowed_kinds: Vec<u16>,
-}
-
 /// Upstream mode controlling how files are fetched from upstream servers
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum UpstreamMode {
-    /// Proxy: Stream from upstream while saving locally (current behavior)
+    /// Stream from upstream while saving a local copy
     #[default]
     Proxy,
-    /// Redirect: Issue 302 redirect to upstream, no local caching
+    /// 302 redirect to upstream, no local copy
     Redirect,
-    /// `RedirectAndCache`: Issue 302 redirect to upstream, download in background for future requests
+    /// 302 redirect to upstream, local copy downloaded in the background
+    // `redirect_and_cache`: pre-0.5 spelling, kept for deployed configs.
+    #[value(name = "redirect-and-cache", alias = "redirect_and_cache")]
     RedirectAndCache,
 }
 
 impl UpstreamMode {
-    /// Parse from string value (`proxy/redirect/redirect_and_cache`, case-insensitive)
-    /// Falls back to Proxy if the string doesn't match
-    #[must_use]
-    pub fn from_str_with_default(s: &str) -> Self {
-        match s.to_lowercase().replace('-', "_").as_str() {
-            "proxy" => UpstreamMode::Proxy,
-            "redirect" => UpstreamMode::Redirect,
-            "redirect_and_cache" | "redirectandcache" => UpstreamMode::RedirectAndCache,
-            _ => UpstreamMode::Proxy,
-        }
-    }
-
     /// Check if this mode uses redirect (vs proxy)
     #[must_use]
     pub fn is_redirect(&self) -> bool {
@@ -150,13 +96,13 @@ impl UpstreamMode {
         match self {
             UpstreamMode::Proxy => "proxy",
             UpstreamMode::Redirect => "redirect",
-            UpstreamMode::RedirectAndCache => "redirect_and_cache",
+            UpstreamMode::RedirectAndCache => "redirect-and-cache",
         }
     }
 }
 
 /// Action to take when a blob is reported (BUD-09)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ReportAction {
     /// Quarantine the blob (move to quarantine directory, still accessible to admins)
     Quarantine,
@@ -165,17 +111,6 @@ pub enum ReportAction {
 }
 
 impl ReportAction {
-    /// Parse from string value (quarantine/delete, case-insensitive)
-    /// Falls back to Quarantine if the string doesn't match
-    #[must_use]
-    pub fn from_str_with_default(s: &str) -> Self {
-        if s.eq_ignore_ascii_case("delete") {
-            Self::Delete
-        } else {
-            Self::Quarantine
-        }
-    }
-
     /// Convert to string for logging
     #[must_use]
     pub fn as_str(&self) -> &'static str {
@@ -339,7 +274,9 @@ pub struct AppState {
     pub serve_files_manifest_dir: PathBuf,
     pub serve_files_manifest_name: String,
     pub serve_files_refresh_interval_secs: u64,
+    /// Aggregate size limit; 0 = unlimited.
     pub max_total_size: u64,
+    /// Aggregate completed-blob limit; 0 = unlimited.
     pub max_total_files: usize,
     /// Absolute ceiling for one blob, including streaming and chunked uploads.
     pub max_blob_size_bytes: u64,
@@ -359,20 +296,22 @@ pub struct AppState {
     pub dvm_allowed_kinds: Vec<u16>,
     /// Relays to query for DVM announcements
     pub dvm_relays: Vec<String>,
-    /// How often to refresh DVM pubkeys (in minutes)
-    pub dvm_refresh_interval_mins: u64,
-    pub max_file_age_days: u64,
-    pub max_upstream_cache_ttl_days: u64,
+    /// How often to refresh DVM pubkeys
+    pub dvm_refresh_interval: std::time::Duration,
+    /// Maximum age of uploads in seconds, 0 = no age expiry.
+    pub max_file_age_secs: u64,
+    /// Upstream cache TTL in seconds, 0 = no TTL.
+    pub max_upstream_cache_ttl_secs: u64,
     /// Cached BUD-11 filter, rebuilt only when the index generation moves.
     pub filter_cache: Arc<RwLock<Option<CachedFilter>>>,
     pub upstream_servers: Vec<String>,
     pub upstream_mode: UpstreamMode,
-    pub max_upstream_download_size_mb: u64,
+    pub max_upstream_download_size_bytes: u64,
     /// Shared, connection-pooled client for all upstream blob fetches.
     /// Cloning is cheap; the pool lives for the process lifetime.
     pub upstream_client: reqwest::Client,
-    pub max_chunk_size_mb: u64,
-    pub chunk_cleanup_timeout_minutes: u64,
+    pub max_chunk_size_bytes: u64,
+    pub chunk_cleanup_timeout: std::time::Duration,
     /// Maximum active resumable upload sessions across all identities.
     pub max_chunk_upload_sessions: usize,
     /// Maximum active resumable upload sessions per authenticated pubkey.
@@ -387,7 +326,7 @@ pub struct AppState {
     pub chunk_sessions: Arc<crate::services::chunk_sessions::ChunkSessions>,
     pub failed_upstream_lookups: Arc<RwLock<HashMap<String, Instant>>>,
     pub blossom_server_lists: Arc<RwLock<HashMap<PublicKey, (Vec<String>, Instant)>>>,
-    pub blossom_server_list_cache_ttl_hours: u64,
+    pub blossom_server_list_cache_ttl: std::time::Duration,
     /// Filter algorithm: "bloom", "binary-fuse-8", "binary-fuse-16", or "binary-fuse-32"
     pub filter_algorithm: String,
     // Prometheus metrics
@@ -439,7 +378,7 @@ impl AppState {
             size: metadata.size,
             r#type: content_type,
             uploaded: metadata.created_at,
-            expiration: crate::utils::sunset_expiration(metadata, self.max_file_age_days),
+            expiration: crate::utils::sunset_expiration(metadata, self.max_file_age_secs),
             nip94,
         }
     }
@@ -453,7 +392,7 @@ impl AppState {
             index.count,
             self.max_total_files,
             self.max_total_size,
-            self.max_file_age_days,
+            self.max_file_age_secs / 86_400,
             &self.storage.root,
         );
 
@@ -531,32 +470,6 @@ pub struct ChunkInfo {
 mod tests {
     use super::*;
 
-    // ── Phase 1 RED: config sub-struct tests ─────────────────────────────────
-
-    #[test]
-    fn feature_config_default_enables_uploads_and_mirror_for_everyone() {
-        let cfg = FeatureConfig::default();
-        assert_eq!(cfg.upload_enabled, FeatureMode::Public);
-        assert_eq!(cfg.mirror_enabled, FeatureMode::Public);
-        assert!(cfg.list_enabled);
-        assert!(cfg.homepage_enabled);
-    }
-
-    #[test]
-    fn feature_config_default_disables_paid_features() {
-        let cfg = FeatureConfig::default();
-        assert!(!cfg.paid_upload);
-        assert!(!cfg.paid_mirror);
-        assert!(!cfg.paid_download);
-    }
-
-    #[test]
-    fn auth_config_default_has_no_allowed_pubkeys() {
-        let cfg = AuthConfig::default();
-        assert!(cfg.allowed_pubkeys.is_empty());
-        assert!(cfg.dvm_allowed_kinds.is_empty());
-    }
-
     #[test]
     fn test_file_request_query_single_xs() {
         // Test with serde_html_form which is what axum_extra::Query uses
@@ -619,50 +532,6 @@ mod tests {
     }
 
     #[test]
-    fn test_upstream_mode_parsing() {
-        // Test all valid values
-        assert_eq!(
-            UpstreamMode::from_str_with_default("proxy"),
-            UpstreamMode::Proxy
-        );
-        assert_eq!(
-            UpstreamMode::from_str_with_default("redirect"),
-            UpstreamMode::Redirect
-        );
-        assert_eq!(
-            UpstreamMode::from_str_with_default("redirect_and_cache"),
-            UpstreamMode::RedirectAndCache
-        );
-
-        // Test case insensitivity
-        assert_eq!(
-            UpstreamMode::from_str_with_default("PROXY"),
-            UpstreamMode::Proxy
-        );
-        assert_eq!(
-            UpstreamMode::from_str_with_default("REDIRECT"),
-            UpstreamMode::Redirect
-        );
-        assert_eq!(
-            UpstreamMode::from_str_with_default("REDIRECT_AND_CACHE"),
-            UpstreamMode::RedirectAndCache
-        );
-
-        // Test hyphen variant
-        assert_eq!(
-            UpstreamMode::from_str_with_default("redirect-and-cache"),
-            UpstreamMode::RedirectAndCache
-        );
-
-        // Test default fallback for invalid values
-        assert_eq!(
-            UpstreamMode::from_str_with_default("invalid"),
-            UpstreamMode::Proxy
-        );
-        assert_eq!(UpstreamMode::from_str_with_default(""), UpstreamMode::Proxy);
-    }
-
-    #[test]
     fn test_upstream_mode_methods() {
         // Test is_redirect
         assert!(!UpstreamMode::Proxy.is_redirect());
@@ -679,7 +548,7 @@ mod tests {
         assert_eq!(UpstreamMode::Redirect.as_str(), "redirect");
         assert_eq!(
             UpstreamMode::RedirectAndCache.as_str(),
-            "redirect_and_cache"
+            "redirect-and-cache"
         );
     }
 }

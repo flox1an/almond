@@ -1,6 +1,6 @@
 [package]
 name = "almond"
-version = "0.4.23"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.85"
 
@@ -18,7 +18,7 @@ tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.7.0", features = ["limit", "timeout"] }
 tower = { version = "0.5", features = ["limit", "util"] }
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio-util = { version = "0.7.19", features = ["io", "rt"] }
@@ -61,6 +61,7 @@ nostr-sdk = "0.45"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 rcgen = "0.14"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
+clap = { version = "4.6", features = ["derive", "env", "string"] }
 
 [profile.release]
 # Whole-program inlining across crate boundaries; the hot path spans

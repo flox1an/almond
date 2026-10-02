@@ -21,7 +21,7 @@ use tracing::{error, info, warn};
 /// Naming the operation keeps the feature gate in one place: every caller used
 /// to read its own `feature_paid_*` flag and then re-spell the settlement
 /// sequence, and the spellings drifted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum PaidOperation {
     Upload,
     Mirror,

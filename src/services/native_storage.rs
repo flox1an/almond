@@ -1,5 +1,4 @@
 use std::{
-    env,
     path::Path,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -16,13 +15,6 @@ use crate::{
     services::blob_name,
 };
 
-const REQUIRED_S3_ENV: [&str; 4] = [
-    "ALMOND_S3_ENDPOINT",
-    "ALMOND_S3_BUCKET",
-    "ALMOND_S3_ACCESS_KEY_ID",
-    "ALMOND_S3_SECRET_ACCESS_KEY",
-];
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct S3Settings {
     pub endpoint: String,
@@ -31,37 +23,6 @@ pub struct S3Settings {
     pub secret_access_key: String,
 }
 
-impl S3Settings {
-    pub fn from_env() -> Result<Option<Self>, String> {
-        Self::from_values(
-            REQUIRED_S3_ENV
-                .map(|name| env::var(name).ok().filter(|value| !value.trim().is_empty())),
-        )
-    }
-
-    fn from_values(values: [Option<String>; 4]) -> Result<Option<Self>, String> {
-        if values.iter().all(Option::is_none) {
-            return Ok(None);
-        }
-        let missing: Vec<&str> = REQUIRED_S3_ENV
-            .iter()
-            .zip(&values)
-            .filter_map(|(name, value)| value.is_none().then_some(*name))
-            .collect();
-        if !missing.is_empty() {
-            return Err(format!(
-                "Incomplete S3 configuration; missing: {}",
-                missing.join(", ")
-            ));
-        }
-        Ok(Some(Self {
-            endpoint: values[0].clone().expect("validated"),
-            bucket: values[1].clone().expect("validated"),
-            access_key_id: values[2].clone().expect("validated"),
-            secret_access_key: values[3].clone().expect("validated"),
-        }))
-    }
-}
 pub struct NativeS3Storage {
     client: Client,
     bucket: String,
@@ -319,20 +280,6 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn s3_configuration_requires_all_values() {
-        let error = S3Settings::from_values([
-            Some("endpoint".to_owned()),
-            Some("bucket".to_owned()),
-            None,
-            None,
-        ])
-        .unwrap_err();
-        assert_eq!(
-            error,
-            "Incomplete S3 configuration; missing: ALMOND_S3_ACCESS_KEY_ID, ALMOND_S3_SECRET_ACCESS_KEY"
-        );
-    }
     #[test]
     fn object_keys_follow_native_layout() {
         let hash = "aabb".repeat(16);

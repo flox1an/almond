@@ -194,13 +194,21 @@ if [ "${FIPS_GENERATE_CONFIG:-true}" = "true" ] || [ ! -f "$FIPS_CONFIG_PATH" ];
     generate_fips_config
 fi
 
+# Container defaults. They apply only when the operator set neither the new
+# name nor its deprecated pre-0.5 alias, so `-e BIND_ADDR=...` keeps working.
+# ponytail: fold back into Dockerfile ENV once the aliases are removed.
+[ -n "${ALMOND_BIND_ADDR:-}${BIND_ADDR:-}" ] || export ALMOND_BIND_ADDR='[::]:3000'
+[ -n "${ALMOND_PUBLIC_URL:-}${PUBLIC_URL:-}" ] || export ALMOND_PUBLIC_URL=http://localhost:3000
+[ -n "${ALMOND_STORAGE_MAX_FILES:-}${MAX_TOTAL_FILES:-}" ] || export ALMOND_STORAGE_MAX_FILES=1000000
+[ -n "${ALMOND_CLEANUP_INTERVAL:-}${CLEANUP_INTERVAL_SECS:-}" ] || export ALMOND_CLEANUP_INTERVAL=60s
+
 # Write TLS cert/key from environment variables if provided
 if [ -n "${TLS_CERT:-}" ] && [ -n "${TLS_KEY:-}" ]; then
-    TLS_CERT_PATH="${TLS_CERT_PATH:-/app/cert.pem}"
-    TLS_KEY_PATH="${TLS_KEY_PATH:-/app/key.pem}"
-    printf '%s' "$TLS_CERT" > "$TLS_CERT_PATH"
-    printf '%s' "$TLS_KEY" > "$TLS_KEY_PATH"
-    chmod 600 "$TLS_KEY_PATH"
+    ALMOND_TLS_CERT="${ALMOND_TLS_CERT:-${TLS_CERT_PATH:-/app/cert.pem}}"
+    ALMOND_TLS_KEY="${ALMOND_TLS_KEY:-${TLS_KEY_PATH:-/app/key.pem}}"
+    printf '%s' "$TLS_CERT" > "$ALMOND_TLS_CERT"
+    printf '%s' "$TLS_KEY" > "$ALMOND_TLS_KEY"
+    chmod 600 "$ALMOND_TLS_KEY"
 fi
 
 configure_fips_hosts
@@ -214,10 +222,10 @@ fips --config "$FIPS_CONFIG_PATH" &
 FIPS_PID="$!"
 
 echo "Starting Almond Blossom Server with FIPS support"
-echo "  BIND_ADDR=${BIND_ADDR}"
-echo "  PUBLIC_URL=${PUBLIC_URL}"
-echo "  STORAGE_PATH=${STORAGE_PATH:-./files}"
-echo "  UPSTREAM_SERVERS=${UPSTREAM_SERVERS:-}"
+echo "  ALMOND_BIND_ADDR=${ALMOND_BIND_ADDR}"
+echo "  ALMOND_PUBLIC_URL=${ALMOND_PUBLIC_URL}"
+echo "  ALMOND_STORAGE_PATH=${ALMOND_STORAGE_PATH:-./files}"
+echo "  ALMOND_UPSTREAM_SERVERS=${ALMOND_UPSTREAM_SERVERS:-}"
 echo "  FIPS_CONFIG_PATH=${FIPS_CONFIG_PATH}"
 echo "  FIPS_TUN_NAME=${FIPS_TUN_NAME}"
 

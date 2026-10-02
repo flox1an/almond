@@ -6,10 +6,10 @@ This guide explains how to configure Almond to run with HTTPS/TLS support.
 
 ### Auto-Generated Self-Signed Certificate
 
-The easiest way to enable HTTPS is to let Almond automatically generate a self-signed certificate:
+For development, let Almond generate a self-signed certificate:
 
 ```bash
-ENABLE_HTTPS=true cargo run --bin almond
+ALMOND_TLS_ENABLED=true ALMOND_TLS_SELF_SIGNED=true cargo run --bin almond
 ```
 
 On first run with HTTPS enabled, Almond will:
@@ -29,11 +29,10 @@ The self-signed certificate includes Subject Alternative Names (SANs) for:
 For production use with trusted certificates (e.g., from Let's Encrypt):
 
 ```bash
-ENABLE_HTTPS=true \
-TLS_CERT_PATH=/path/to/fullchain.pem \
-TLS_KEY_PATH=/path/to/privkey.pem \
-TLS_AUTO_GENERATE=false \
-PUBLIC_URL=https://your-domain.com \
+ALMOND_TLS_ENABLED=true \
+ALMOND_TLS_CERT=/path/to/fullchain.pem \
+ALMOND_TLS_KEY=/path/to/privkey.pem \
+ALMOND_PUBLIC_URL=https://your-domain.com \
 cargo run --bin almond
 ```
 
@@ -41,23 +40,23 @@ cargo run --bin almond
 
 ### HTTPS Configuration
 
-- **`ENABLE_HTTPS`** (default: `false`)
+- **`ALMOND_TLS_ENABLED`** (default: `false`)
   - Set to `true` to enable HTTPS/TLS
   - When enabled, server will only accept HTTPS connections
 
-- **`TLS_CERT_PATH`** (default: `./cert.pem`)
+- **`ALMOND_TLS_CERT`** (default: `./cert.pem`)
   - Path to the TLS certificate file (PEM format)
   - Should contain the certificate chain
 
-- **`TLS_KEY_PATH`** (default: `./key.pem`)
+- **`ALMOND_TLS_KEY`** (default: `./key.pem`)
   - Path to the TLS private key file (PEM format)
   - Must be readable only by the server process
 
-- **`TLS_AUTO_GENERATE`** (default: `true`)
+- **`ALMOND_TLS_SELF_SIGNED`** (default: `false`)
   - Automatically generate self-signed certificate if cert/key files not found
-  - Set to `false` to require existing certificates (fail if missing)
+  - Leave `false` in production so missing certificates fail startup
 
-- **`PUBLIC_URL`** (auto-detected)
+- **`ALMOND_PUBLIC_URL`** (auto-detected)
   - Public URL for the service
   - Defaults to `https://127.0.0.1:3000` when HTTPS enabled
   - Defaults to `http://127.0.0.1:3000` when HTTPS disabled
@@ -69,8 +68,9 @@ cargo run --bin almond
 ```bash
 docker run -p 3000:3000 \
   -v /path/to/files:/app/files \
-  -e ENABLE_HTTPS=true \
-  -e PUBLIC_URL=https://your-domain.com \
+  -e ALMOND_TLS_ENABLED=true \
+  -e ALMOND_TLS_SELF_SIGNED=true \
+  -e ALMOND_PUBLIC_URL=https://your-domain.com \
   ghcr.io/flox1an/almond
 ```
 
@@ -80,11 +80,10 @@ docker run -p 3000:3000 \
 docker run -p 3000:3000 \
   -v /path/to/files:/app/files \
   -v /path/to/certs:/app/certs \
-  -e ENABLE_HTTPS=true \
-  -e TLS_CERT_PATH=/app/certs/fullchain.pem \
-  -e TLS_KEY_PATH=/app/certs/privkey.pem \
-  -e TLS_AUTO_GENERATE=false \
-  -e PUBLIC_URL=https://your-domain.com \
+  -e ALMOND_TLS_ENABLED=true \
+  -e ALMOND_TLS_CERT=/app/certs/fullchain.pem \
+  -e ALMOND_TLS_KEY=/app/certs/privkey.pem \
+  -e ALMOND_PUBLIC_URL=https://your-domain.com \
   ghcr.io/flox1an/almond
 ```
 
@@ -118,11 +117,12 @@ openssl s_client -connect localhost:3000 -servername localhost < /dev/null 2>/de
 Run as a caching edge server with HTTPS enabled:
 
 ```bash
-ENABLE_HTTPS=true \
-UPSTREAM_SERVERS=https://cdn.satellite.earth,https://blossom.primal.net \
-MAX_UPSTREAM_DOWNLOAD_SIZE_MB=1000 \
-FEATURE_UPLOAD_ENABLED=off \
-FEATURE_MIRROR_ENABLED=off \
+ALMOND_TLS_ENABLED=true \
+ALMOND_TLS_SELF_SIGNED=true \
+ALMOND_UPSTREAM_SERVERS=https://cdn.satellite.earth,https://blossom.primal.net \
+ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE=1000MiB \
+ALMOND_UPLOAD_ACCESS=off \
+ALMOND_MIRROR_ACCESS=off \
 cargo run --bin almond
 ```
 
@@ -135,10 +135,11 @@ This configuration:
 ### 2. Personal Server with HTTPS
 
 ```bash
-ENABLE_HTTPS=true \
-ALLOWED_NPUBS=npub1... \
-FEATURE_UPLOAD_ENABLED=wot \
-FEATURE_MIRROR_ENABLED=wot \
+ALMOND_TLS_ENABLED=true \
+ALMOND_TLS_SELF_SIGNED=true \
+ALMOND_ALLOWED_NPUBS=npub1... \
+ALMOND_UPLOAD_ACCESS=wot \
+ALMOND_MIRROR_ACCESS=wot \
 cargo run --bin almond
 ```
 
@@ -147,12 +148,11 @@ cargo run --bin almond
 Assuming you have certbot configured:
 
 ```bash
-ENABLE_HTTPS=true \
-TLS_CERT_PATH=/etc/letsencrypt/live/your-domain.com/fullchain.pem \
-TLS_KEY_PATH=/etc/letsencrypt/live/your-domain.com/privkey.pem \
-TLS_AUTO_GENERATE=false \
-PUBLIC_URL=https://your-domain.com \
-BIND_ADDR=0.0.0.0:443 \
+ALMOND_TLS_ENABLED=true \
+ALMOND_TLS_CERT=/etc/letsencrypt/live/your-domain.com/fullchain.pem \
+ALMOND_TLS_KEY=/etc/letsencrypt/live/your-domain.com/privkey.pem \
+ALMOND_PUBLIC_URL=https://your-domain.com \
+ALMOND_BIND_ADDR=0.0.0.0:443 \
 cargo run --bin almond
 ```
 
@@ -193,7 +193,7 @@ If certificate generation fails, check:
 Common issues:
 1. **Port already in use**: Check if another service is using the port
 2. **Permission denied**: Ports < 1024 require root/sudo on Linux
-3. **Certificate files not found**: Check paths in `TLS_CERT_PATH` and `TLS_KEY_PATH`
+3. **Certificate files not found**: Check paths in `ALMOND_TLS_CERT` and `ALMOND_TLS_KEY`
 4. **Invalid certificate format**: Ensure PEM format is used
 
 ### Browser Certificate Errors
@@ -210,7 +210,7 @@ If you're running HTTP and want to switch to HTTPS:
 1. **Backup your data** (files directory)
 2. **Set environment variables** for HTTPS
 3. **Generate or install certificates**
-4. **Update PUBLIC_URL** to use `https://`
+4. **Update ALMOND_PUBLIC_URL** to use `https://`
 5. **Restart the server**
 6. **Update client configurations** to use HTTPS URLs
 7. **Optional**: Set up HTTP → HTTPS redirect via reverse proxy

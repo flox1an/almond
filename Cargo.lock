@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "almond"
-version = "0.4.23"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -73,6 +73,7 @@ dependencies = [
  "cdk",
  "cdk-sqlite",
  "chrono",
+ "clap",
  "dotenvy",
  "fs4",
  "futures-util",

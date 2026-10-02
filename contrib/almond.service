@@ -1,0 +1,25 @@
+# Almond Blossom server.
+# Install: sudo useradd --system --home-dir /var/lib/almond --create-home --shell /usr/sbin/nologin almond
+#          sudo install -m 0755 target/release/almond /usr/local/bin/ && sudo install -D -m 0640 -g almond .env.example /etc/almond/almond.env
+#          sudo cp contrib/almond.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now almond
+
+[Unit]
+Description=Almond Blossom server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=almond
+Group=almond
+WorkingDirectory=/var/lib/almond
+ExecStart=/usr/local/bin/almond --config /etc/almond/almond.env
+Environment=RUST_LOG=info
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/almond
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

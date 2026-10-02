@@ -13,9 +13,9 @@ Any Large Media ON Demand - A temporary BLOSSOM file storage service with Nostr-
 - Anyone can upload by default, can be locked down by specifying allowed NPUBs or additionally with a web of trust for those NPUBs.
 - Deletion requires a signed, single-use BUD-11 authorization bound to the blob hash.
 - The project is best for some specific Blossom usecases:
-  - Personal server locked to one or a few users (`ALLOWED_NPUBS`)
-  - Public upload server with very limited TTL (`MAX_FILE_AGE_DAYS`) or limited size (`MAX_TOTAL_SIZE`).
-  - Caching edge server that serves content from upstream blossom servers (`UPSTREAM_SERVERS`).
+  - Personal server locked to one or a few users (`ALMOND_ALLOWED_NPUBS`)
+  - Public upload server with very limited TTL (`ALMOND_UPLOAD_MAX_AGE`) or limited size (`ALMOND_STORAGE_MAX_SIZE`).
+  - Caching edge server that serves content from upstream blossom servers (`ALMOND_UPSTREAM_SERVERS`).
   - [Local Blossom Cache](#local-blossom-cache) on `127.0.0.1:24242` that proxies and caches blobs from remote servers via `?xs=` and `?as=` hints.
 
 ## Features
@@ -59,11 +59,11 @@ When an uploaded blob has a finite retention deadline, `GET` and `HEAD`
 (including extension variants, `206` and `304`) return RFC 8594 / BUD-01
 `Sunset`, exposed to browsers via `Access-Control-Expose-Headers`. The value is
 exactly the deadline the cleanup job uses: the earlier of the persisted
-expiration and `created_at + MAX_FILE_AGE_DAYS` under the current config, so a
+expiration and `created_at + ALMOND_UPLOAD_MAX_AGE` under the current config, so a
 lowered or raised limit shows up immediately (uploads stored before v0.4.24 may
 carry a persisted server deadline that a raised limit does not extend). The Almond-specific request
 header `X-Expiration` (Unix timestamp, not part of any BUD) can only shorten
-retention below `MAX_FILE_AGE_DAYS`; the descriptor `expiration` field carries
+retention below `ALMOND_UPLOAD_MAX_AGE`; the descriptor `expiration` field carries
 the same deadline as `Sunset`. Upstream-cache copies and
 upstream redirects carry no `Sunset`: the URL keeps resolving via upstream.
 `Sunset` is advisory; an expired blob is served until cleanup removes it.
@@ -112,25 +112,65 @@ makes the body byte-stable and the validator meaningful.
 }
 ```
 
-## Environment Variables
+## Running / command line
+
+The binary is `almond`. Every setting can come from four sources, highest
+precedence first:
+
+1. command-line flag (`--upload-access wot`)
+2. process environment (`ALMOND_UPLOAD_ACCESS=wot`)
+3. config file (dotenv format, same `ALMOND_*` names)
+4. built-in default
+
+```bash
+almond --config /etc/almond/almond.env --bind-addr 0.0.0.0:3000
+```
+
+- **Config file:** `--config <FILE>` (or `ALMOND_CONFIG`) loads a dotenv file;
+  without it, `./.env` is loaded when present. Values in the file never override
+  real environment variables. Copy [`.env.example`](.env.example) as a starting point.
+- **Name mapping:** env name = `ALMOND_` + flag name upper-cased with `-` → `_`
+  (`--chunk-max-sessions-per-pubkey` ↔ `ALMOND_CHUNK_MAX_SESSIONS_PER_PUBKEY`).
+  An empty value (`ALMOND_X=`) behaves exactly like an unset one.
+  Pass secrets (S3 keys, metrics token) via environment or config file:
+  command-line arguments are visible to other users in `ps`.
+- **Value formats:**
+  - durations: `<n><unit>` with unit `s`, `m`, `h`, `d` (`30s`, `5m`, `24h`, `7d`); bare `0` is allowed, any other number needs a unit
+  - sizes: `<n><unit>` with unit `B`, `KiB`, `MiB`, `GiB`, `TiB` (case-insensitive, IEC only; `MB`/`GB` are rejected); bare `0` is allowed
+  - booleans: `true`/`false` (also `yes`/`no`, `on`/`off`, `1`/`0`); on the CLI a bare `--tls-enabled` means true, `--list-enabled=false` disables
+  - lists: comma-separated; on the CLI either comma-separated or the flag repeated
+- **Strict parsing:** unknown enum values, invalid booleans, invalid npubs, and bad
+  durations/sizes stop startup with an error instead of falling back to a default.
+- `almond --help` lists every flag with its env name and default; `almond --version` prints the version.
+- **Process model:** Almond always runs in the foreground (no daemon mode); use a
+  service manager. A minimal systemd unit is in [`contrib/almond.service`](contrib/almond.service).
+- **Logging:** `RUST_LOG` (e.g. `RUST_LOG=warn`, `RUST_LOG=almond=debug`) controls
+  log output (default: `info`); it is also honored when set in the config file.
+
+## Configuration
+
+The full list of settings with comments is in [`.env.example`](.env.example).
 
 ### Server Configuration
-- `BIND_ADDR`: Address to bind the server to (default: "127.0.0.1:3000")
-- `PUBLIC_URL`: Public URL for the service (default: "http://127.0.0.1:3000" or "https://127.0.0.1:3000" if HTTPS enabled)
+- `ALMOND_BIND_ADDR`: Address to bind the server to (default: "127.0.0.1:3000")
+- `ALMOND_PUBLIC_URL`: Public URL for the service (default: "http://127.0.0.1:3000" or "https://127.0.0.1:3000" if HTTPS enabled)
+- `ALMOND_CORS_ORIGINS`: Comma-separated browser origins allowed to read API responses (optional)
 
 ### HTTPS/TLS Configuration
-- `ENABLE_HTTPS`: Enable HTTPS with TLS (default: false)
-- `TLS_CERT_PATH`: Path to TLS certificate file (default: "./cert.pem")
-- `TLS_KEY_PATH`: Path to TLS private key file (default: "./key.pem")
-- `TLS_AUTO_GENERATE`: Auto-generate self-signed certificate if not found (default: true)
+- `ALMOND_TLS_ENABLED`: Enable HTTPS with TLS (default: false)
+- `ALMOND_TLS_CERT`: Path to TLS certificate file (default: "./cert.pem")
+- `ALMOND_TLS_KEY`: Path to TLS private key file (default: "./key.pem")
+- `ALMOND_TLS_SELF_SIGNED`: Auto-generate a self-signed certificate if cert/key are missing; development only (default: false)
 
 ### Storage Configuration
-- `STORAGE_PATH`: Storage root. Completed uploads live under `uploads/`, transparent upstream fills under `upstream-cache/`, and incomplete data under `temp/`.
-- `MAX_TOTAL_SIZE`: Maximum aggregate storage size in MB across both completed-blob origins (default: 99999).
-- `MAX_TOTAL_FILES`: Maximum aggregate completed-blob count across both origins (default: 99999999).
-- `CLEANUP_INTERVAL_SECS`: Expiry and capacity cleanup interval in seconds (default: 30).
-- `MAX_FILE_AGE_DAYS`: Maximum age of uploaded, explicitly mirrored, and HLS-mirrored blobs in days; `0` disables this policy (default: 0).
-- `MAX_UPSTREAM_CACHE_TTL_DAYS`: Maximum age of transparently fetched upstream cache entries in days; `0` disables this policy (default: 1). Serving a cached blob does not refresh this TTL.
+- `ALMOND_STORAGE_PATH`: Storage root. Completed uploads live under `uploads/`, transparent upstream fills under `upstream-cache/`, and incomplete data under `temp/`.
+- `ALMOND_STORAGE_MAX_SIZE`: Maximum aggregate storage size across both completed-blob origins; `0` = unlimited (default: `0`).
+- `ALMOND_STORAGE_MAX_FILES`: Maximum aggregate completed-blob count across both origins; `0` = unlimited (default: `0`).
+- `ALMOND_STORAGE_MIN_FREE`: Minimum free disk space; uploads get HTTP 507 below it (default: `256MiB`).
+- `ALMOND_BLOB_MAX_SIZE`: Absolute per-blob size limit (default: `500MiB`).
+- `ALMOND_CLEANUP_INTERVAL`: Expiry and capacity cleanup interval; must be greater than zero (default: `30s`).
+- `ALMOND_UPLOAD_MAX_AGE`: Maximum age of uploaded, explicitly mirrored, and HLS-mirrored blobs; `0` disables this policy (default: 0).
+- `ALMOND_UPSTREAM_CACHE_TTL`: Maximum age of transparently fetched upstream cache entries; `0` disables this policy (default: `1d`). Serving a cached blob does not refresh this TTL.
 
 Capacity eviction removes the oldest upstream-cache entries before uploaded content. Existing legacy hash trees are migrated into `uploads/` at startup, preserving files by rename.
 
@@ -171,40 +211,111 @@ ALMOND_S3_SECRET_ACCESS_KEY=<b2-application-key>
 ```
 
 ### Upstream Configuration
-- `UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback (optional)
-- `UPSTREAM_MODE`: How to handle upstream requests (default: `proxy`)
+- `ALMOND_UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback (optional)
+- `ALMOND_UPSTREAM_MODE`: How to handle upstream requests (default: `proxy`)
   - `proxy`: Stream from upstream while saving locally. Client receives data immediately while the file is cached.
   - `redirect`: Issue 302 redirect to upstream. No local caching. Reduces bandwidth/CPU on the Almond server.
-  - `redirect_and_cache`: Issue 302 redirect to upstream, but also download in the background for future requests.
-- `MAX_UPSTREAM_DOWNLOAD_SIZE_MB`: Maximum size for upstream downloads in MB (default: 100).
+  - `redirect-and-cache`: Issue 302 redirect to upstream, but also download in the background for future requests.
+- `ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE`: Maximum size for upstream downloads (default: `100MiB`).
   Larger blobs are still served, but proxied through without being cached.
 
 ### Upload Configuration
-- `MAX_CHUNK_SIZE_MB`: Maximum size for individual chunks in chunked uploads in MB (default: 100)
-- `CHUNK_CLEANUP_TIMEOUT_MINUTES`: Timeout for cleaning up abandoned chunked uploads in minutes (default: 30)
+- `ALMOND_CHUNK_MAX_SIZE`: Maximum size for individual chunks in chunked uploads; must not exceed `ALMOND_BLOB_MAX_SIZE` (default: `100MiB`)
+- `ALMOND_CHUNK_SESSION_TIMEOUT`: Timeout for cleaning up abandoned chunked uploads (default: `30m`)
 
 ### Authorization Configuration
-- `ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys (optional, used as whitelist with WOT as fallback)
+- `ALMOND_ALLOWED_NPUBS`: Comma-separated list of allowed Nostr pubkeys (optional, used as whitelist with WOT as fallback); an invalid npub stops startup
+- `ALMOND_AUTH_MAX_TTL`: Upper bound on authorization token lifetime; must be greater than zero (default: `24h`)
+- `ALMOND_AUTH_CLOCK_SKEW`: Tolerated client clock skew (default: `30s`)
 
-### Feature Flags
-- `FEATURE_UPLOAD_ENABLED`: Upload endpoint mode - `off`, `wot`, or `public` (default: `public`)
-- `FEATURE_MIRROR_ENABLED`: Mirror endpoint mode - `off`, `wot`, or `public` (default: `public`)
-- `FEATURE_LIST_ENABLED`: Enable list endpoint (default: true)
-- `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED`: Custom upstream origin mode - `off`, `wot`, or `public` (default: `off`)
+### Access Modes and Feature Switches
+- `ALMOND_UPLOAD_ACCESS`: Upload endpoint mode - `off`, `wot`, `dvm`, or `public` (default: `public`)
+- `ALMOND_MIRROR_ACCESS`: Mirror endpoint mode - `off`, `wot`, `dvm`, or `public` (default: `public`)
+- `ALMOND_REPORT_ACCESS`: BUD-09 report endpoint mode - `off`, `wot`, `dvm`, or `public` (default: `off`)
+- `ALMOND_LIST_ENABLED`: Enable list endpoint (default: true)
+- `ALMOND_CUSTOM_ORIGIN_ACCESS`: Custom upstream origin mode - `off`, `wot`, `dvm`, or `public` (default: `off`)
   - Controls `?origin=`, `?xs=`, and `?as=` URL parameters for upstream lookups
   - In `wot` mode, validates `?as=` author pubkey against Web of Trust
-- `FEATURE_HOMEPAGE_ENABLED`: Enable homepage/landing page (default: true)
+- `ALMOND_HOMEPAGE_ENABLED`: Enable homepage/landing page (default: true)
+- `ALMOND_CASHU_PAID`: Comma-separated paid operations - `upload`, `mirror`, `download` (default: none); requires `ALMOND_CASHU_MINT`
 
-**Note:** Web of Trust (WOT) is automatically enabled when any feature is set to `wot` mode. WOT is built from your follows (specified in `ALLOWED_NPUBS`) using a 2-hop graph from Nostr relays.
+**Note:** Web of Trust (WOT) is automatically enabled when any access mode is set to `wot`. WOT is built from your follows (specified in `ALMOND_ALLOWED_NPUBS`) using a 2-hop graph from Nostr relays.
+
+### Migrating from pre-0.5 names
+
+Almond 0.5 renamed every setting to the `ALMOND_*` scheme. The old names below
+still work as deprecated aliases: their values are translated (units appended)
+and a deprecation warning is logged at startup. If both the old and the new name
+are set, the new one wins and a warning names the ignored old one. The old names
+will be removed in a later release.
+
+Docker images apply their container defaults (bind address, public URL,
+storage path, TLS and wallet paths, ...) only when neither the new nor the old
+name is set, so old names passed with `-e` keep working there too.
+
+| Old name | New name | Value conversion |
+|---|---|---|
+| `BIND_ADDR` | `ALMOND_BIND_ADDR` | – |
+| `PUBLIC_URL` | `ALMOND_PUBLIC_URL` | – |
+| `CORS_ALLOWED_ORIGINS` | `ALMOND_CORS_ORIGINS` | – |
+| `ENABLE_HTTPS` | `ALMOND_TLS_ENABLED` | – |
+| `TLS_CERT_PATH` | `ALMOND_TLS_CERT` | – |
+| `TLS_KEY_PATH` | `ALMOND_TLS_KEY` | – |
+| `TLS_AUTO_GENERATE` | `ALMOND_TLS_SELF_SIGNED` | – ; the default is now `false`, set `true` to keep auto-generation |
+| `STORAGE_PATH` | `ALMOND_STORAGE_PATH` | – |
+| `MAX_TOTAL_SIZE` | `ALMOND_STORAGE_MAX_SIZE` | MiB: `99999` → `99999MiB` |
+| `MAX_TOTAL_FILES` | `ALMOND_STORAGE_MAX_FILES` | – ; `0` now means unlimited |
+| `MIN_FREE_DISK_MB` | `ALMOND_STORAGE_MIN_FREE` | `256` → `256MiB` |
+| `MAX_BLOB_SIZE_MB` | `ALMOND_BLOB_MAX_SIZE` | `100` → `100MiB` |
+| `CLEANUP_INTERVAL_SECS` | `ALMOND_CLEANUP_INTERVAL` | `30` → `30s` |
+| `MAX_FILE_AGE_DAYS` | `ALMOND_UPLOAD_MAX_AGE` | `7` → `7d` |
+| `MAX_UPSTREAM_CACHE_TTL_DAYS` | `ALMOND_UPSTREAM_CACHE_TTL` | `1` → `1d` |
+| `FEATURE_UPLOAD_ENABLED` | `ALMOND_UPLOAD_ACCESS` | – |
+| `FEATURE_MIRROR_ENABLED` | `ALMOND_MIRROR_ACCESS` | – |
+| `FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED` | `ALMOND_CUSTOM_ORIGIN_ACCESS` | – |
+| `FEATURE_REPORT_ENABLED` | `ALMOND_REPORT_ACCESS` | – |
+| `REPORT_ACTION` | `ALMOND_REPORT_ACTION` | – |
+| `FEATURE_LIST_ENABLED` | `ALMOND_LIST_ENABLED` | – |
+| `FEATURE_HOMEPAGE_ENABLED` | `ALMOND_HOMEPAGE_ENABLED` | – |
+| `ALLOWED_NPUBS` | `ALMOND_ALLOWED_NPUBS` | – |
+| `AUTH_MAX_TTL_SECS` | `ALMOND_AUTH_MAX_TTL` | `86400` → `24h`; `0` is now rejected |
+| `AUTH_CLOCK_SKEW_SECS` | `ALMOND_AUTH_CLOCK_SKEW` | `30` → `30s` |
+| `AUTH_REQUIRE_SERVER_TAG` | `ALMOND_AUTH_REQUIRE_SERVER_TAG` | – |
+| `MAX_CHUNK_SIZE_MB` | `ALMOND_CHUNK_MAX_SIZE` | `100` → `100MiB` |
+| `CHUNK_CLEANUP_TIMEOUT_MINUTES` | `ALMOND_CHUNK_SESSION_TIMEOUT` | `30` → `30m` |
+| `MAX_CHUNK_UPLOAD_SESSIONS` | `ALMOND_CHUNK_MAX_SESSIONS` | – |
+| `MAX_CHUNK_UPLOAD_SESSIONS_PER_PUBKEY` | `ALMOND_CHUNK_MAX_SESSIONS_PER_PUBKEY` | – |
+| `HLS_MIRROR_CONCURRENCY` | `ALMOND_HLS_MIRROR_CONCURRENCY` | – |
+| `UPSTREAM_SERVERS` | `ALMOND_UPSTREAM_SERVERS` | – |
+| `UPSTREAM_MODE` | `ALMOND_UPSTREAM_MODE` | `redirect_and_cache` is now spelled `redirect-and-cache` (old spelling still accepted) |
+| `MAX_UPSTREAM_DOWNLOAD_SIZE_MB` | `ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE` | `100` → `100MiB` |
+| `METRICS_BEARER_TOKEN` | `ALMOND_METRICS_TOKEN` | – |
+| `SERVE_FILES_PATH` | `ALMOND_SERVE_FILES_PATH` | – |
+| `SERVE_FILES_MANIFEST_DIR` | `ALMOND_SERVE_FILES_MANIFEST_DIR` | – |
+| `SERVE_FILES_MANIFEST_NAME` | `ALMOND_SERVE_FILES_MANIFEST_NAME` | – |
+| `SERVE_FILES_REFRESH_INTERVAL_SECS` | `ALMOND_SERVE_FILES_REFRESH_INTERVAL` | `3600` → `3600s` |
+| `FEATURE_PAID_UPLOAD`, `FEATURE_PAID_MIRROR`, `FEATURE_PAID_DOWNLOAD` | `ALMOND_CASHU_PAID` | merged into one list: `FEATURE_PAID_UPLOAD=on` + `FEATURE_PAID_MIRROR=on` → `upload,mirror` |
+| `CASHU_PRICE_PER_MB` | `ALMOND_CASHU_PRICE_PER_MIB` | – |
+| `CASHU_ACCEPTED_MINTS` | `ALMOND_CASHU_MINT` | – (one mint URL) |
+| `CASHU_WALLET_PATH` | `ALMOND_CASHU_WALLET_PATH` | – |
+| `BLOSSOM_SERVER_LIST_CACHE_TTL_HOURS` | `ALMOND_SERVER_LIST_CACHE_TTL` | `24` → `24h` |
+| `FILTER_ALGORITHM` | `ALMOND_FILTER_ALGORITHM` | – |
+| `DVM_ALLOWED_KINDS` | `ALMOND_DVM_KINDS` | – |
+| `DVM_RELAYS` | `ALMOND_DVM_RELAYS` | – |
+| `DVM_REFRESH_INTERVAL_MINS` | `ALMOND_DVM_REFRESH_INTERVAL` | `5` → `5m` |
+
+`ALMOND_S3_*` names are unchanged. Values that were previously accepted
+leniently (unknown enum values, invalid npubs, `AUTH_MAX_TTL_SECS=0`) now stop
+startup with an error.
 
 ## HTTPS Configuration
 
 ### Automatic Self-Signed Certificates
 
-By default, if you enable HTTPS and no certificates are found, Almond will automatically generate self-signed certificates:
+With `ALMOND_TLS_SELF_SIGNED=true`, Almond generates a self-signed certificate when HTTPS is enabled and no certificate files are found:
 
 ```bash
-ENABLE_HTTPS=true cargo run
+ALMOND_TLS_ENABLED=true ALMOND_TLS_SELF_SIGNED=true cargo run
 ```
 
 This will:
@@ -219,10 +330,9 @@ This will:
 To use your own certificates (e.g., from Let's Encrypt):
 
 ```bash
-ENABLE_HTTPS=true \
-TLS_CERT_PATH=/path/to/cert.pem \
-TLS_KEY_PATH=/path/to/key.pem \
-TLS_AUTO_GENERATE=false \
+ALMOND_TLS_ENABLED=true \
+ALMOND_TLS_CERT=/path/to/cert.pem \
+ALMOND_TLS_KEY=/path/to/key.pem \
 cargo run
 ```
 
@@ -232,8 +342,9 @@ Self-signed (auto-generated):
 ```bash
 docker run -p 3000:3000 \
   -v /path/to/files:/app/files \
-  -e ENABLE_HTTPS=true \
-  -e PUBLIC_URL=https://your-domain.com \
+  -e ALMOND_TLS_ENABLED=true \
+  -e ALMOND_TLS_SELF_SIGNED=true \
+  -e ALMOND_PUBLIC_URL=https://your-domain.com \
   ghcr.io/flox1an/almond
 ```
 
@@ -242,21 +353,20 @@ With custom certificates:
 docker run -p 3000:3000 \
   -v /path/to/files:/app/files \
   -v /path/to/certs:/app/certs \
-  -e ENABLE_HTTPS=true \
-  -e TLS_CERT_PATH=/app/certs/cert.pem \
-  -e TLS_KEY_PATH=/app/certs/key.pem \
-  -e TLS_AUTO_GENERATE=false \
-  -e PUBLIC_URL=https://your-domain.com \
+  -e ALMOND_TLS_ENABLED=true \
+  -e ALMOND_TLS_CERT=/app/certs/cert.pem \
+  -e ALMOND_TLS_KEY=/app/certs/key.pem \
+  -e ALMOND_PUBLIC_URL=https://your-domain.com \
   ghcr.io/flox1an/almond
 ```
 
 ## Internals
-- Completed filesystem blobs are stored below `STORAGE_PATH/uploads/` or `STORAGE_PATH/upstream-cache/` with the existing two-level SHA-256 hierarchy, e.g.
+- Completed filesystem blobs are stored below `ALMOND_STORAGE_PATH/uploads/` or `ALMOND_STORAGE_PATH/upstream-cache/` with the existing two-level SHA-256 hierarchy, e.g.
   ```bash
   ./files/uploads/5/3/53860ca3a463ad7170fe1f1e5b08bf4b66422c72b594a329e001a69e07f2e50e.mp4
   ```
 - Startup indexes only completed-blob roots; `temp/`, `quarantine/`, and `reports/` are never treated as live blobs. Indexed age is recovered from modification time.
-- Every accepted report event is persisted as `STORAGE_PATH/reports/<event-id>.json` (signed event plus `status`, `mode`, `action`, `requested`, `processed`). The record is written before any blob is removed and rewritten afterwards, so a record still showing `"status": "pending"` marks a report whose processing was interrupted.
+- Every accepted report event is persisted as `ALMOND_STORAGE_PATH/reports/<event-id>.json` (signed event plus `status`, `mode`, `action`, `requested`, `processed`). The record is written before any blob is removed and rewritten afterwards, so a record still showing `"status": "pending"` marks a report whose processing was interrupted.
 - When starting `almond`, completed-blob roots are read into memory; filesystem changes outside Almond are not recognized until restart.
 
 ## Docker
@@ -279,7 +389,7 @@ For a Docker-managed named volume, no host-side ownership setup is needed:
 docker volume create almond-files
 docker run --rm -p 3000:3000 \
   -v almond-files:/app/files \
-  ghcr.io/flox1an/almond:v0.4.2
+  ghcr.io/flox1an/almond:v0.5.0
 ```
 
 For a host bind mount, prepare the directory with the image's numeric identity:
@@ -288,7 +398,7 @@ For a host bind mount, prepare the directory with the image's numeric identity:
 sudo install -d -o 10001 -g 10001 -m 0750 /data/almond
 docker run --rm -p 3000:3000 \
   -v /data/almond:/app/files \
-  ghcr.io/flox1an/almond:v0.4.2
+  ghcr.io/flox1an/almond:v0.5.0
 ```
 
 Migrate an existing bind mount once before upgrading to an image using this
@@ -308,14 +418,14 @@ the fixed-image default.
 ```yaml
 services:
   almond:
-    image: ghcr.io/flox1an/almond:v0.4.2
+    image: ghcr.io/flox1an/almond:v0.5.0
     user: "${PUID:-10001}:${PGID:-10001}"
     ports:
       - "3000:3000"
     volumes:
       - /data/almond:/app/files
     environment:
-      STORAGE_PATH: /app/files
+      ALMOND_STORAGE_PATH: /app/files
 ```
 
 ```bash
@@ -331,8 +441,8 @@ sudo install -d -o 10001 -g 10001 -m 0750 /data/almond-state
 docker run --rm -p 3000:3000 \
   -v /data/almond:/app/files \
   -v /data/almond-state:/app/state \
-  -e ENABLE_HTTPS=true \
-  ghcr.io/flox1an/almond:v0.4.2
+  -e ALMOND_TLS_ENABLED=true \
+  ghcr.io/flox1an/almond:v0.5.0
 ```
 
 ### FIPS-enabled Docker Image
@@ -356,13 +466,13 @@ docker run \
   -p 3000:3000 \
   -p 2121:2121/udp \
   -v /path/to/files:/app/files \
-  -e STORAGE_PATH=/app/files \
-  -e BIND_ADDR=0.0.0.0:3000 \
-  -e PUBLIC_URL=https://your-domain.com \
+  -e ALMOND_STORAGE_PATH=/app/files \
+  -e ALMOND_BIND_ADDR=0.0.0.0:3000 \
+  -e ALMOND_PUBLIC_URL=https://your-domain.com \
   -e FIPS_NSEC=nsec1... \
   -e FIPS_PEER_NPUB=npub1... \
   -e FIPS_PEER_ADDR=203.0.113.10:2121 \
-  -e UPSTREAM_SERVERS=https://npub1upstream....fips \
+  -e ALMOND_UPSTREAM_SERVERS=https://npub1upstream....fips \
   ghcr.io/flox1an/almond-fips:main
 ```
 
@@ -374,7 +484,7 @@ small DNS/iptables rules used by the FIPS entrypoint. If `/dev/net/tun` does not
 exist on the host, enable the kernel TUN module first, for example with
 `sudo modprobe tun` on Linux hosts.
 
-With `BIND_ADDR=0.0.0.0:3000`, Almond is reachable both through Docker's
+With `ALMOND_BIND_ADDR=0.0.0.0:3000`, Almond is reachable both through Docker's
 published HTTP port and through FIPS on `http://<this-node-npub>.fips:3000`
 from peered FIPS nodes. For HTTPS over FIPS, enable Almond's normal TLS settings
 and use `https://<this-node-npub>.fips:3000`.
@@ -423,9 +533,9 @@ docker run \
   -p 3000:3000 \
   -p 2121:2121/udp \
   -v /path/to/files:/app/files \
-  -e STORAGE_PATH=/app/files \
-  -e BIND_ADDR=0.0.0.0:3000 \
-  -e PUBLIC_URL=https://public.example.com \
+  -e ALMOND_STORAGE_PATH=/app/files \
+  -e ALMOND_BIND_ADDR=0.0.0.0:3000 \
+  -e ALMOND_PUBLIC_URL=https://public.example.com \
   -e FIPS_NSEC=nsec1... \
   -e FIPS_PEER_NPUB=npub1gateway... \
   -e FIPS_PEER_ADDR=203.0.113.10:2121 \
@@ -442,10 +552,9 @@ http://<this-node-npub>.fips:3000
 For TLS inside FIPS, use Almond's normal HTTPS settings:
 
 ```bash
--e ENABLE_HTTPS=true \
--e TLS_CERT_PATH=/app/certs/cert.pem \
--e TLS_KEY_PATH=/app/certs/key.pem \
--e TLS_AUTO_GENERATE=false \
+-e ALMOND_TLS_ENABLED=true \
+-e ALMOND_TLS_CERT=/app/certs/cert.pem \
+-e ALMOND_TLS_KEY=/app/certs/key.pem \
 -v /path/to/certs:/app/certs
 ```
 
@@ -473,9 +582,9 @@ Create `.env.fips` from `.env.fips.example` and fill in only your node-specific
 values:
 
 ```env
-PUBLIC_URL=http://<this-node-npub>.fips:3000
-UPSTREAM_MODE=proxy
-UPSTREAM_SERVERS=
+ALMOND_PUBLIC_URL=http://<this-node-npub>.fips:3000
+ALMOND_UPSTREAM_MODE=proxy
+ALMOND_UPSTREAM_SERVERS=
 
 FIPS_NSEC=nsec1...
 FIPS_PEER_NPUB=
@@ -516,13 +625,13 @@ services:
       - "3000:3000"
       - "2121:2121/udp"
     environment:
-      BIND_ADDR: 0.0.0.0:3000
-      PUBLIC_URL: http://<this-node-npub>.fips:3000
-      STORAGE_PATH: /app/files
-      FEATURE_UPLOAD_ENABLED: public
-      FEATURE_MIRROR_ENABLED: public
-      FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED: public
-      UPSTREAM_MODE: proxy
+      ALMOND_BIND_ADDR: 0.0.0.0:3000
+      ALMOND_PUBLIC_URL: http://<this-node-npub>.fips:3000
+      ALMOND_STORAGE_PATH: /app/files
+      ALMOND_UPLOAD_ACCESS: public
+      ALMOND_MIRROR_ACCESS: public
+      ALMOND_CUSTOM_ORIGIN_ACCESS: public
+      ALMOND_UPSTREAM_MODE: proxy
       FIPS_NSEC: nsec1...
       FIPS_PEER_NPUB: npub1gateway...
       FIPS_PEER_ADDR: 203.0.113.10:2121
@@ -538,10 +647,10 @@ volumes:
   almond-files:
 ```
 
-Add FIPS upstreams by setting `UPSTREAM_SERVERS`:
+Add FIPS upstreams by setting `ALMOND_UPSTREAM_SERVERS`:
 
 ```yaml
-      UPSTREAM_SERVERS: https://npub1upstream....fips,https://media-cache.fips
+      ALMOND_UPSTREAM_SERVERS: https://npub1upstream....fips,https://media-cache.fips
       FIPS_HOSTS: |
         media-cache npub1upstream...
 ```
@@ -551,7 +660,7 @@ gateway is temporarily unavailable, which is especially useful for larger binary
 transfers.
 
 If the service should be public HTTP and FIPS at the same time, keep
-`BIND_ADDR=0.0.0.0:3000` and publish `3000:3000`. If it should only be useful
+`ALMOND_BIND_ADDR=0.0.0.0:3000` and publish `3000:3000`. If it should only be useful
 inside the mesh, remove the `3000:3000` port mapping and keep the FIPS transport
 port `2121/udp`.
 
@@ -577,9 +686,9 @@ Create a new Coolify resource with Docker Compose, paste the
 `docker-compose.fips.yml` service, and set these variables in Coolify:
 
 ```env
-PUBLIC_URL=https://your-public-domain.example
-UPSTREAM_MODE=proxy
-UPSTREAM_SERVERS=
+ALMOND_PUBLIC_URL=https://your-public-domain.example
+ALMOND_UPSTREAM_MODE=proxy
+ALMOND_UPSTREAM_SERVERS=
 FIPS_NSEC=nsec1...
 FIPS_PEER_NPUB=npub1gateway...
 FIPS_PEER_ADDR=203.0.113.10:2121
@@ -626,14 +735,14 @@ docker run \
   -p 3000:3000 \
   -p 2121:2121/udp \
   -v /path/to/files:/app/files \
-  -e STORAGE_PATH=/app/files \
-  -e BIND_ADDR=0.0.0.0:3000 \
+  -e ALMOND_STORAGE_PATH=/app/files \
+  -e ALMOND_BIND_ADDR=0.0.0.0:3000 \
   -e FIPS_NSEC=nsec1... \
   -e FIPS_PEER_NPUB=npub1gateway... \
   -e FIPS_PEER_ADDR=203.0.113.10:2121 \
   -e FIPS_REWRITE_DNS=true \
-  -e UPSTREAM_MODE=proxy \
-  -e UPSTREAM_SERVERS=https://npub1upstream....fips \
+  -e ALMOND_UPSTREAM_MODE=proxy \
+  -e ALMOND_UPSTREAM_SERVERS=https://npub1upstream....fips \
   ghcr.io/flox1an/almond-fips:main
 ```
 
@@ -645,13 +754,13 @@ For friendlier upstream names, provide aliases:
 
 ```bash
 -e FIPS_HOSTS='media-cache npub1upstream...'
--e UPSTREAM_SERVERS=https://media-cache.fips
+-e ALMOND_UPSTREAM_SERVERS=https://media-cache.fips
 ```
 
 Custom upstream hints work the same way when enabled:
 
 ```bash
--e FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=public
+-e ALMOND_CUSTOM_ORIGIN_ACCESS=public
 ```
 
 Then requests may pass `?xs=https://media-cache.fips` or
@@ -675,30 +784,32 @@ Clients request blobs via `GET /<sha256>` with `?xs=` (server hints) and `?as=` 
 
 ### Configuration
 
-BIND_ADDR=127.0.0.1:24242
-PUBLIC_URL=http://127.0.0.1:24242
-FEATURE_UPLOAD_ENABLED=off
-FEATURE_MIRROR_ENABLED=off
-FEATURE_LIST_ENABLED=true
-FEATURE_HOMEPAGE_ENABLED=true
-FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=public
-UPSTREAM_MODE=proxy
-MAX_TOTAL_SIZE=5000
-MAX_UPSTREAM_CACHE_TTL_DAYS=30
+```dotenv
+ALMOND_BIND_ADDR=127.0.0.1:24242
+ALMOND_PUBLIC_URL=http://127.0.0.1:24242
+ALMOND_UPLOAD_ACCESS=off
+ALMOND_MIRROR_ACCESS=off
+ALMOND_LIST_ENABLED=true
+ALMOND_HOMEPAGE_ENABLED=true
+ALMOND_CUSTOM_ORIGIN_ACCESS=public
+ALMOND_UPSTREAM_MODE=proxy
+ALMOND_STORAGE_MAX_SIZE=5000MiB
+ALMOND_UPSTREAM_CACHE_TTL=30d
+```
 
 ### Docker
 
 ```bash
 docker run -p 24242:24242 \
   -v /path/to/cache:/app/files \
-  -e BIND_ADDR=0.0.0.0:24242 \
-  -e PUBLIC_URL=http://127.0.0.1:24242 \
-  -e FEATURE_UPLOAD_ENABLED=off \
-  -e FEATURE_MIRROR_ENABLED=off \
-  -e FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED=public \
-  -e UPSTREAM_MODE=proxy \
-  -e MAX_TOTAL_SIZE=5000 \
-  -e MAX_UPSTREAM_CACHE_TTL_DAYS=30 \
+  -e ALMOND_BIND_ADDR=0.0.0.0:24242 \
+  -e ALMOND_PUBLIC_URL=http://127.0.0.1:24242 \
+  -e ALMOND_UPLOAD_ACCESS=off \
+  -e ALMOND_MIRROR_ACCESS=off \
+  -e ALMOND_CUSTOM_ORIGIN_ACCESS=public \
+  -e ALMOND_UPSTREAM_MODE=proxy \
+  -e ALMOND_STORAGE_MAX_SIZE=5000MiB \
+  -e ALMOND_UPSTREAM_CACHE_TTL=30d \
   ghcr.io/flox1an/almond
 ```
 
@@ -711,7 +822,7 @@ docker run -p 24242:24242 \
 5. Caches the blob locally and returns it to the client
 6. Returns `404` if the blob can't be found on any hinted server
 
-Cache eviction is automatic — expired entries are removed by `MAX_UPSTREAM_CACHE_TTL_DAYS`, and capacity pressure evicts the oldest cache entries first.
+Cache eviction is automatic — expired entries are removed by `ALMOND_UPSTREAM_CACHE_TTL`, and capacity pressure evicts the oldest cache entries first.
 
 ## Development
 

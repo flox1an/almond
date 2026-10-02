@@ -110,7 +110,7 @@ impl Metrics {
 
         let max_total_files = IntGauge::with_opts(Opts::new(
             "almond_max_total_files",
-            "Maximum total number of files allowed",
+            "Maximum total number of files allowed (0 = unlimited)",
         ))
         .expect("Failed to create metrics_max_total_files gauge");
         registry
@@ -119,7 +119,7 @@ impl Metrics {
 
         let max_storage_bytes = IntGauge::with_opts(Opts::new(
             "almond_max_storage_bytes",
-            "Maximum total storage in bytes allowed",
+            "Maximum total storage in bytes allowed (0 = unlimited)",
         ))
         .expect("Failed to create metrics_max_storage_bytes gauge");
         registry

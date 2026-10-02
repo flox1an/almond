@@ -118,7 +118,7 @@ pub async fn get_upstream(
     let response = json!({
         "upstream_servers": upstream_servers,
         "count": upstream_servers.len(),
-        "max_download_size_mb": state.max_upstream_download_size_mb
+        "max_download_size_mb": state.max_upstream_download_size_bytes / (1024 * 1024)
     });
 
     Json(response)
@@ -331,8 +331,8 @@ async fn try_head_and_redirect(
                     let should_cache = match content_length {
                         Some(len) if len > max_size_bytes => {
                             debug!(
-                                "File {} too large for background cache: {} bytes (max: {} MB)",
-                                file_hash, len, state.max_upstream_download_size_mb
+                                "File {} too large for background cache: {} bytes (max: {} bytes)",
+                                file_hash, len, state.max_upstream_download_size_bytes
                             );
                             false
                         }

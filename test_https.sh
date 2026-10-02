@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Start the server in the background
-ENABLE_HTTPS=true cargo run &
+ALMOND_TLS_ENABLED=true ALMOND_TLS_SELF_SIGNED=true cargo run &
 SERVER_PID=$!
 
 # Wait for server to start

@@ -60,15 +60,8 @@ COPY --chown=10001:10001 docker-entrypoint.sh /app/docker-entrypoint.sh
 
 RUN chmod 0555 /app/almond /app/docker-entrypoint.sh
 
-# Set environment variables
+# Set environment variables (Almond defaults live in docker-entrypoint.sh)
 ENV RUST_LOG=info
-ENV BIND_ADDR=0.0.0.0:3000
-ENV PUBLIC_URL=http://localhost:3000
-ENV STORAGE_PATH=/app/files
-ENV MAX_TOTAL_SIZE=99999
-ENV MAX_TOTAL_FILES=1000000
-ENV CLEANUP_INTERVAL_SECS=60
-ENV MAX_FILE_AGE_DAYS=0
 # Expose the port
 EXPOSE 3000
 USER 10001:10001

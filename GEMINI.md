@@ -30,12 +30,12 @@ Almond (Any Large Media ON Demand) is a high-performance, temporary Blossom file
 - **Docker Run**: `docker run -p 3000:3000 -v $(pwd)/files:/app/files almond`
 
 ### Environment Configuration
-The project uses `dotenvy` for configuration. Key variables include:
-- `STORAGE_PATH`: Directory for file storage (default: `./files`).
-- `FEATURE_UPLOAD_ENABLED`: `public`, `wot`, `dvm`, or `off`.
-- `ALLOWED_NPUBS`: Whitelist of Nostr public keys.
-- `UPSTREAM_SERVERS`: Comma-separated list of Blossom servers for fallback.
-- `ENABLE_HTTPS`: Set to `true` for automatic self-signed or custom TLS.
+Configuration comes from CLI flags, environment variables, or a dotenv file (`--config`, else `./.env`); see `almond --help`. Key variables include:
+- `ALMOND_STORAGE_PATH`: Directory for file storage (default: `./files`).
+- `ALMOND_UPLOAD_ACCESS`: `public`, `wot`, `dvm`, or `off`.
+- `ALMOND_ALLOWED_NPUBS`: Whitelist of Nostr public keys.
+- `ALMOND_UPSTREAM_SERVERS`: Comma-separated list of Blossom servers for fallback.
+- `ALMOND_TLS_ENABLED`: Set to `true` for automatic self-signed or custom TLS.
 
 ## Development Conventions
 

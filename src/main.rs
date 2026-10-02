@@ -43,7 +43,7 @@ pub mod tls;
 pub mod trust_network;
 pub mod utils;
 
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::signal;
 
 use crate::error::AppError;
@@ -282,7 +282,7 @@ async fn clear_temp_directory(temp_dir: &PathBuf) -> Result<(), std::io::Error> 
 }
 
 async fn build_app_state(cfg: &config::Config) -> AppState {
-    let storage = models::StorageLayout::new(PathBuf::from(&cfg.storage_path));
+    let storage = models::StorageLayout::new(cfg.storage_path.clone());
     initialize_storage(&storage)
         .await
         .unwrap_or_else(|error| panic!("Failed to initialize storage layout: {error}"));
@@ -345,7 +345,7 @@ async fn build_app_state(cfg: &config::Config) -> AppState {
             "📁 Serve files enabled: {} (manifest: {}, refresh: {}s)",
             path.display(),
             cfg.serve_files_manifest_name,
-            cfg.serve_files_refresh_interval_secs
+            cfg.serve_files_refresh_interval.as_secs()
         );
 
         if let Err(e) = services::serve_files::refresh_serve_file_index(
@@ -369,13 +369,11 @@ async fn build_app_state(cfg: &config::Config) -> AppState {
     info!("✅ Prometheus metrics initialized");
 
     // Handle HTTPS/TLS setup if enabled
-    if cfg.enable_https {
+    if cfg.tls_enabled {
         info!("🔐 HTTPS enabled");
-        if let Err(e) = tls::ensure_tls_certificates(
-            &cfg.tls_cert_path,
-            &cfg.tls_key_path,
-            cfg.tls_auto_generate,
-        ) {
+        if let Err(e) =
+            tls::ensure_tls_certificates(&cfg.tls_cert, &cfg.tls_key, cfg.tls_self_signed)
+        {
             error!("❌ Failed to setup TLS certificates: {}", e);
             std::process::exit(1);
         }
@@ -383,20 +381,20 @@ async fn build_app_state(cfg: &config::Config) -> AppState {
         info!("⚠️  HTTPS disabled - running in HTTP mode");
     }
 
-    let any_paid_feature =
-        cfg.feature_paid_upload || cfg.feature_paid_mirror || cfg.feature_paid_download;
+    let any_paid_feature = !cfg.cashu_paid.is_empty();
+    let cashu_accepted_mints: Vec<String> = cfg.cashu_mint.iter().cloned().collect();
 
     if any_paid_feature {
         info!(
-            "💰 Cashu payments enabled - Price: {} sats/MB, Mints: {:?}",
-            cfg.cashu_price_per_mb, cfg.cashu_accepted_mints
+            "💰 Cashu payments enabled for {:?} - Price: {} sats/MiB, Mint: {:?}",
+            cfg.cashu_paid, cfg.cashu_price_per_mib, cfg.cashu_mint
         );
     }
 
     info!("HLS mirror concurrency: {}", cfg.hls_mirror_concurrency);
 
     let cashu_wallet = if any_paid_feature {
-        match cashu::init_wallet(&cfg.cashu_wallet_path, &cfg.cashu_accepted_mints).await {
+        match cashu::init_wallet(&cfg.cashu_wallet_path, &cashu_accepted_mints).await {
             Ok(wallet) => {
                 info!("💰 Cashu wallet ready for payments");
                 Some(wallet)
@@ -414,30 +412,36 @@ async fn build_app_state(cfg: &config::Config) -> AppState {
     };
 
     info!(
-        "⚙️ Blossom server list cache TTL: {} hours",
-        cfg.blossom_server_list_cache_ttl_hours
+        "⚙️ Blossom server list cache TTL: {}s",
+        cfg.server_list_cache_ttl.as_secs()
     );
 
     info!("⚙️ Filter algorithm: {}", cfg.filter_algorithm);
 
-    info!("⚙️ Feature flags - Upload: {}, Mirror: {}, List: {}, CustomUpstreamOrigin: {}, Homepage: {}, Report: {}",
-          cfg.feature_upload_enabled.as_str(), cfg.feature_mirror_enabled.as_str(), cfg.feature_list_enabled,
-          cfg.feature_custom_upstream_origin_enabled.as_str(), cfg.feature_homepage_enabled, cfg.feature_report_enabled.as_str());
+    info!(
+        "⚙️ Access - Upload: {}, Mirror: {}, List: {}, CustomOrigin: {}, Homepage: {}, Report: {}",
+        cfg.upload_access.as_str(),
+        cfg.mirror_access.as_str(),
+        cfg.list_enabled,
+        cfg.custom_origin_access.as_str(),
+        cfg.homepage_enabled,
+        cfg.report_access.as_str()
+    );
 
-    if cfg.feature_report_enabled.is_enabled() {
+    if cfg.report_access.is_enabled() {
         info!("⚙️ Report action: {}", cfg.report_action.as_str());
     }
 
-    if !cfg.dvm_allowed_kinds.is_empty() {
-        info!("🤖 DVM allowed kinds: {:?}", cfg.dvm_allowed_kinds);
+    if !cfg.dvm_kinds.is_empty() {
+        info!("🤖 DVM allowed kinds: {:?}", cfg.dvm_kinds);
     }
 
     if !cfg.upstream_servers.is_empty() {
         info!("⚙️ Upstream servers: {:?}", cfg.upstream_servers);
         info!("⚙️ Upstream mode: {}", cfg.upstream_mode.as_str());
         info!(
-            "⚙️ Upstream download size limit: {} MB",
-            cfg.max_upstream_download_size_mb
+            "⚙️ Upstream download size limit: {} bytes",
+            cfg.upstream_max_download_size
         );
     }
 
@@ -451,64 +455,64 @@ async fn build_app_state(cfg: &config::Config) -> AppState {
         serve_files_path: cfg.serve_files_path.clone(),
         serve_files_manifest_dir: cfg.serve_files_manifest_dir.clone(),
         serve_files_manifest_name: cfg.serve_files_manifest_name.clone(),
-        serve_files_refresh_interval_secs: cfg.serve_files_refresh_interval_secs,
-        cors_allowed_origins: cfg.cors_allowed_origins.clone(),
-        max_total_size: cfg.max_total_size,
-        max_total_files: cfg.max_total_files,
-        max_blob_size_bytes: cfg.max_blob_size_bytes,
-        min_free_disk_bytes: cfg.min_free_disk_bytes,
-        bind_addr: cfg.bind_addr.clone(),
-        public_url: cfg.public_url.clone(),
-        cleanup_interval_secs: cfg.cleanup_interval_secs,
+        serve_files_refresh_interval_secs: cfg.serve_files_refresh_interval.as_secs(),
+        cors_allowed_origins: cfg.cors_origins.clone(),
+        max_total_size: cfg.storage_max_size,
+        max_total_files: cfg.storage_max_files,
+        max_blob_size_bytes: cfg.blob_max_size,
+        min_free_disk_bytes: cfg.storage_min_free,
+        bind_addr: cfg.bind_addr.to_string(),
+        public_url: cfg.public_url(),
+        cleanup_interval_secs: cfg.cleanup_interval.as_secs(),
         changes_pending: Arc::new(RwLock::new(true)),
-        allowed_pubkeys: cfg.allowed_pubkeys.clone(),
+        allowed_pubkeys: cfg.allowed_npubs.clone(),
         trusted_pubkeys: Arc::new(RwLock::new(HashMap::new())),
         dvm_pubkeys: Arc::new(RwLock::new(std::collections::HashSet::new())),
-        dvm_allowed_kinds: cfg.dvm_allowed_kinds.clone(),
+        dvm_allowed_kinds: cfg.dvm_kinds.clone(),
         dvm_relays: cfg.dvm_relays.clone(),
-        dvm_refresh_interval_mins: cfg.dvm_refresh_interval_mins,
-        max_file_age_days: cfg.max_file_age_days,
-        max_upstream_cache_ttl_days: cfg.max_upstream_cache_ttl_days,
+        dvm_refresh_interval: cfg.dvm_refresh_interval,
+        max_file_age_secs: cfg.upload_max_age.as_secs(),
+        max_upstream_cache_ttl_secs: cfg.upstream_cache_ttl.as_secs(),
         filter_cache: Arc::new(RwLock::new(None)),
         upstream_servers: cfg.upstream_servers.clone(),
         upstream_mode: cfg.upstream_mode,
-        max_upstream_download_size_mb: cfg.max_upstream_download_size_mb,
+        max_upstream_download_size_bytes: cfg.upstream_max_download_size,
         upstream_client: services::upload::create_upstream_client()
             .expect("Failed to build upstream HTTP client"),
-        max_chunk_size_mb: cfg.max_chunk_size_mb,
-        chunk_cleanup_timeout_minutes: cfg.chunk_cleanup_timeout_minutes,
-        max_chunk_upload_sessions: cfg.max_chunk_upload_sessions,
-        max_chunk_upload_sessions_per_pubkey: cfg.max_chunk_upload_sessions_per_pubkey,
-        feature_upload_enabled: cfg.feature_upload_enabled,
-        feature_mirror_enabled: cfg.feature_mirror_enabled,
-        feature_list_enabled: cfg.feature_list_enabled,
-        feature_custom_upstream_origin_enabled: cfg.feature_custom_upstream_origin_enabled,
-        feature_homepage_enabled: cfg.feature_homepage_enabled,
+        max_chunk_size_bytes: cfg.chunk_max_size,
+        chunk_cleanup_timeout: cfg.chunk_session_timeout,
+        max_chunk_upload_sessions: cfg.chunk_max_sessions,
+        max_chunk_upload_sessions_per_pubkey: cfg.chunk_max_sessions_per_pubkey,
+        feature_upload_enabled: cfg.upload_access,
+        feature_mirror_enabled: cfg.mirror_access,
+        feature_list_enabled: cfg.list_enabled,
+        feature_custom_upstream_origin_enabled: cfg.custom_origin_access,
+        feature_homepage_enabled: cfg.homepage_enabled,
         ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
         upstream_negotiations: Arc::new(RwLock::new(HashMap::new())),
         chunk_sessions: Arc::new(services::chunk_sessions::ChunkSessions::new(
             services::chunk_sessions::SessionLimits {
-                max_sessions: cfg.max_chunk_upload_sessions,
-                max_sessions_per_pubkey: cfg.max_chunk_upload_sessions_per_pubkey,
+                max_sessions: cfg.chunk_max_sessions,
+                max_sessions_per_pubkey: cfg.chunk_max_sessions_per_pubkey,
             },
         )),
         failed_upstream_lookups: Arc::new(RwLock::new(HashMap::new())),
         blossom_server_lists: Arc::new(RwLock::new(HashMap::new())),
-        blossom_server_list_cache_ttl_hours: cfg.blossom_server_list_cache_ttl_hours,
+        blossom_server_list_cache_ttl: cfg.server_list_cache_ttl,
         filter_algorithm: cfg.filter_algorithm.clone(),
         metrics,
         report_action: cfg.report_action,
-        feature_report_enabled: cfg.feature_report_enabled,
-        auth_max_ttl_secs: cfg.auth_max_ttl_secs,
-        auth_clock_skew_secs: cfg.auth_clock_skew_secs,
+        feature_report_enabled: cfg.report_access,
+        auth_max_ttl_secs: cfg.auth_max_ttl.as_secs(),
+        auth_clock_skew_secs: cfg.auth_clock_skew.as_secs(),
         auth_require_server_tag: cfg.auth_require_server_tag,
-        metrics_bearer_token: cfg.metrics_bearer_token.clone(),
+        metrics_bearer_token: cfg.metrics_token.clone(),
         destructive_event_replays: Arc::new(RwLock::new(HashMap::new())),
-        feature_paid_upload: cfg.feature_paid_upload,
-        feature_paid_mirror: cfg.feature_paid_mirror,
-        feature_paid_download: cfg.feature_paid_download,
-        cashu_price_per_mb: cfg.cashu_price_per_mb,
-        cashu_accepted_mints: cfg.cashu_accepted_mints.clone(),
+        feature_paid_upload: cfg.cashu_paid.contains(&cashu::PaidOperation::Upload),
+        feature_paid_mirror: cfg.cashu_paid.contains(&cashu::PaidOperation::Mirror),
+        feature_paid_download: cfg.cashu_paid.contains(&cashu::PaidOperation::Download),
+        cashu_price_per_mb: cfg.cashu_price_per_mib,
+        cashu_accepted_mints,
         cashu_wallet_path: cfg.cashu_wallet_path.clone(),
         cashu_wallet,
         hls_mirror_concurrency: cfg.hls_mirror_concurrency,
@@ -567,13 +571,13 @@ fn start_trust_network_refresh_job(state: AppState) {
 fn start_dvm_refresh_job(state: AppState) {
     tokio::spawn(async move {
         info!(
-            "✅ DVM refresh enabled - allowed kinds: {:?}, interval: {}m",
-            state.dvm_allowed_kinds, state.dvm_refresh_interval_mins
+            "✅ DVM refresh enabled - allowed kinds: {:?}, interval: {}s",
+            state.dvm_allowed_kinds,
+            state.dvm_refresh_interval.as_secs()
         );
 
         // Refresh periodically
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(state.dvm_refresh_interval_mins * 60));
+        let mut interval = tokio::time::interval(state.dvm_refresh_interval);
         loop {
             interval.tick().await;
             match refresh_dvm_pubkeys(&state.dvm_allowed_kinds, &state.dvm_relays).await {
@@ -590,15 +594,28 @@ fn start_dvm_refresh_job(state: AppState) {
     });
 }
 
-#[tokio::main]
-async fn main() {
-    tracing_subscriber::fmt::init();
-
-    // Install default crypto provider for rustls (required for HTTPS)
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+fn main() {
+    // Config file and deprecated names go into the process environment, so
+    // this must happen before the tokio runtime starts any thread.
+    let legacy_warnings = match config::load_env_file() {
+        Ok(warnings) => warnings,
+        Err(error) => {
+            eprintln!("❌ Configuration error: {error}");
+            std::process::exit(1);
+        }
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+    for warning in legacy_warnings {
+        warn!("⚠️ {warning}");
+    }
 
     // Parse and validate configuration — boot errors exit here.
-    let cfg = match config::Config::from_env() {
+    let cfg = match config::Config::load() {
         Ok(cfg) => cfg,
         Err(error) => {
             error!("❌ Configuration error: {error}");
@@ -606,10 +623,18 @@ async fn main() {
         }
     };
 
-    let addr = cfg
-        .bind_addr
-        .parse::<SocketAddr>()
-        .expect("Invalid address format");
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to build tokio runtime")
+        .block_on(run(cfg));
+}
+
+async fn run(cfg: config::Config) {
+    // Install default crypto provider for rustls (required for HTTPS)
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let addr = cfg.bind_addr;
 
     let state = build_app_state(&cfg).await;
 
@@ -617,15 +642,15 @@ async fn main() {
     start_chunk_cleanup_job(state.clone());
 
     // Only spawn jobs whose features are enabled.
-    if cfg.feature_upload_enabled.requires_wot()
-        || cfg.feature_mirror_enabled.requires_wot()
-        || cfg.feature_custom_upstream_origin_enabled.requires_wot()
+    if cfg.upload_access.requires_wot()
+        || cfg.mirror_access.requires_wot()
+        || cfg.custom_origin_access.requires_wot()
     {
         start_trust_network_refresh_job(state.clone());
     }
 
-    if (cfg.feature_upload_enabled.requires_dvm() || cfg.feature_mirror_enabled.requires_dvm())
-        && !cfg.dvm_allowed_kinds.is_empty()
+    if (cfg.upload_access.requires_dvm() || cfg.mirror_access.requires_dvm())
+        && !cfg.dvm_kinds.is_empty()
     {
         start_dvm_refresh_job(state.clone());
     }
@@ -634,7 +659,7 @@ async fn main() {
         services::serve_files::start_refresh_job(
             path.clone(),
             cfg.serve_files_manifest_name.clone(),
-            cfg.serve_files_refresh_interval_secs,
+            cfg.serve_files_refresh_interval.as_secs(),
             state.serve_file_index.clone(),
             cfg.serve_files_manifest_dir.clone(),
         );
@@ -674,10 +699,10 @@ async fn main() {
     });
 
     // Start server with HTTPS or HTTP
-    if cfg.enable_https {
+    if cfg.tls_enabled {
         info!("🎧 blossom server listening on https://{}", addr);
 
-        match tls::load_tls_config(&cfg.tls_cert_path, &cfg.tls_key_path).await {
+        match tls::load_tls_config(&cfg.tls_cert, &cfg.tls_key).await {
             Ok(config) => {
                 if let Err(e) = axum_server::bind_rustls(addr, config)
                     .serve(app.into_make_service())

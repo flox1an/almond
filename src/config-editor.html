@@ -13,7 +13,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'sha256-mEoxKBXi22R4KnUTDZ8YxskPo9IGCVs+W4ElruMTcCw='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
+      content="default-src 'none'; script-src 'sha256-e2rRBW9HKqvrgnGAxYDIdGs2WZs+7BkZPj70EaYqPqA='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
     />
     <style>
       /*
@@ -448,99 +448,96 @@
        * Config::from_map with each field's `default` and `probe` value.
        *
        * Field meaning:
-       *   kind      "bool" | "number" | "string" | "path" | "socketaddr" |
-       *             "url" | "list" | "list_u16" | "list_npub" | "enum" | "secret"
+       *   kind      "bool" | "number" | "duration" | "size" | "string" |
+       *             "path" | "socketaddr" | "url" | "list" | "list_u16" |
+       *             "list_npub" | "enum" | "secret"
        *   default   literal default as config.rs would apply it, or null if
        *             there is no literal default (unset-by-default fields, or
-       *             PUBLIC_URL whose default depends on ENABLE_HTTPS)
+       *             ALMOND_PUBLIC_URL whose default depends on
+       *             ALMOND_TLS_ENABLED)
        *   empty     behaviour of Config::from_map when the var is present but
-       *             empty ("KEY="):
-       *               like_unset   -> same as not being set at all
-       *               empty_value  -> a literal empty value, not the default
-       *               hard_error   -> Almond refuses to start
+       *             empty ("KEY="). Always "like_unset": an empty value is
+       *             the same as not setting the variable at all.
        *   probe     a value that differs from the default/absence, used only
        *             to prove the field is actually wired up
-       *   unit      display-only unit suffix, or null
+       *   unit      display-only unit suffix for kind "number", or null
+       *   nonZero   true if a duration of 0 is rejected
        *   sensitive true if the value is a secret and should be masked
        *   generatable true if a "Generate" button (crypto.getRandomValues)
        *             applies to this field
-       *   conditionalDefault true only for PUBLIC_URL, whose default flips
-       *             with ENABLE_HTTPS (handled as a special case, not via
-       *             `default`)
-       *   values    allowed values for kind "enum"
-       *   boolWords ["on","off"] override for the paid-feature fields, which
-       *             follow .env.example's idiom even though parse_bool
-       *             accepts the same true/false/1/0/on/off set everywhere
+       *   conditionalDefault true only for ALMOND_PUBLIC_URL, whose default
+       *             flips with ALMOND_TLS_ENABLED (handled as a special
+       *             case, not via `default`)
+       *   values    allowed values for kind "enum", or allowed entries for
+       *             kind "list"
        * ==================================================================== */
 
       /* ALMOND_SCHEMA_JSON_START */
       const ALMOND_SCHEMA = [
-        { "name": "BIND_ADDR", "category": "network", "kind": "socketaddr", "default": "127.0.0.1:3000", "empty": "hard_error", "probe": "0.0.0.0:8080", "help": "Address Almond listens on. Must be a literal IP:port \u2014 Rust's socket-address parser does not accept hostnames." },
-        { "name": "PUBLIC_URL", "category": "network", "kind": "url", "default": null, "conditionalDefault": true, "empty": "empty_value", "probe": "https://blossom.example.com", "help": "Public origin used in blob descriptors. No trailing slash. Defaults to http://127.0.0.1:3000, or https://127.0.0.1:3000 when ENABLE_HTTPS is true." },
-        { "name": "CORS_ALLOWED_ORIGINS", "category": "network", "kind": "list", "default": null, "empty": "like_unset", "probe": "https://app.example.com", "help": "Comma-separated exact origins allowed to read discovery and metrics responses cross-origin. Blob GET/HEAD is always public regardless of this setting." },
+        { "name": "ALMOND_BIND_ADDR", "category": "network", "kind": "socketaddr", "default": "127.0.0.1:3000", "empty": "like_unset", "probe": "0.0.0.0:8080", "help": "Address Almond listens on. Must be a literal IP:port \u2014 Rust's socket-address parser does not accept hostnames." },
+        { "name": "ALMOND_PUBLIC_URL", "category": "network", "kind": "url", "default": null, "conditionalDefault": true, "empty": "like_unset", "probe": "https://blossom.example.com", "help": "Public origin used in blob descriptors. No trailing slash. Defaults to http://127.0.0.1:3000, or https://127.0.0.1:3000 when ALMOND_TLS_ENABLED is true." },
+        { "name": "ALMOND_CORS_ORIGINS", "category": "network", "kind": "list", "default": null, "empty": "like_unset", "probe": "https://app.example.com", "help": "Comma-separated exact origins allowed to read discovery and metrics responses cross-origin. Blob GET/HEAD is always public regardless of this setting." },
 
-        { "name": "ENABLE_HTTPS", "category": "tls", "kind": "bool", "default": "false", "empty": "hard_error", "probe": "true", "help": "Set true only when Almond terminates TLS itself. Leave false behind a reverse proxy." },
-        { "name": "TLS_CERT_PATH", "category": "tls", "kind": "path", "default": "./cert.pem", "empty": "empty_value", "probe": "/etc/almond/cert.pem", "help": "Certificate path, used only when ENABLE_HTTPS is true." },
-        { "name": "TLS_KEY_PATH", "category": "tls", "kind": "path", "default": "./key.pem", "empty": "empty_value", "probe": "/etc/almond/key.pem", "help": "Private key path, used only when ENABLE_HTTPS is true." },
-        { "name": "TLS_AUTO_GENERATE", "category": "tls", "kind": "bool", "default": "true", "empty": "hard_error", "probe": "false", "help": "Replace a missing cert/key pair with a self-signed one. Development only." },
+        { "name": "ALMOND_TLS_ENABLED", "category": "tls", "kind": "bool", "default": "false", "empty": "like_unset", "probe": "true", "help": "Set true only when Almond terminates TLS itself. Leave false behind a reverse proxy." },
+        { "name": "ALMOND_TLS_CERT", "category": "tls", "kind": "path", "default": "./cert.pem", "empty": "like_unset", "probe": "/etc/almond/cert.pem", "help": "Certificate path, used only when ALMOND_TLS_ENABLED is true." },
+        { "name": "ALMOND_TLS_KEY", "category": "tls", "kind": "path", "default": "./key.pem", "empty": "like_unset", "probe": "/etc/almond/key.pem", "help": "Private key path, used only when ALMOND_TLS_ENABLED is true." },
+        { "name": "ALMOND_TLS_SELF_SIGNED", "category": "tls", "kind": "bool", "default": "false", "empty": "like_unset", "probe": "true", "help": "Generate a self-signed cert/key pair when the files are missing. Development only." },
 
-        { "name": "STORAGE_PATH", "category": "storage", "kind": "path", "default": "./files", "empty": "empty_value", "probe": "/data/almond", "help": "Storage root. Almond creates uploads/, upstream-cache/, temp/ and quarantine/ underneath it." },
+        { "name": "ALMOND_STORAGE_PATH", "category": "storage", "kind": "path", "default": "./files", "empty": "like_unset", "probe": "/data/almond", "help": "Storage root. Almond creates uploads/, upstream-cache/, temp/ and quarantine/ underneath it." },
 
         { "name": "ALMOND_S3_ENDPOINT", "category": "s3", "kind": "url", "default": null, "empty": "like_unset", "probe": "https://s3.example.com", "help": "S3-compatible endpoint. All four ALMOND_S3_* variables must be set together, or none at all." },
         { "name": "ALMOND_S3_BUCKET", "category": "s3", "kind": "string", "default": null, "empty": "like_unset", "probe": "almond-blobs", "help": "Bucket name for native S3 storage." },
         { "name": "ALMOND_S3_ACCESS_KEY_ID", "category": "s3", "kind": "secret", "default": null, "empty": "like_unset", "probe": "AKIAEXAMPLE1234", "sensitive": true, "help": "S3 access key id." },
         { "name": "ALMOND_S3_SECRET_ACCESS_KEY", "category": "s3", "kind": "secret", "default": null, "empty": "like_unset", "probe": "exampleSecretAccessKey", "sensitive": true, "help": "S3 secret access key." },
 
-        { "name": "SERVE_FILES_PATH", "category": "serve_files", "kind": "path", "default": null, "empty": "like_unset", "probe": "./public", "help": "Optional directory of static files served alongside blobs." },
-        { "name": "SERVE_FILES_MANIFEST_DIR", "category": "serve_files", "kind": "path", "default": "/tmp", "empty": "empty_value", "probe": "/var/lib/almond", "help": "Fallback directory for the generated SHA-256 manifest when SERVE_FILES_PATH is read-only." },
-        { "name": "SERVE_FILES_MANIFEST_NAME", "category": "serve_files", "kind": "string", "default": "manifest-sha256.txt", "empty": "empty_value", "probe": "checksums.txt", "help": "Filename of the generated SHA-256 manifest." },
-        { "name": "SERVE_FILES_REFRESH_INTERVAL_SECS", "category": "serve_files", "kind": "number", "unit": "seconds", "default": "3600", "empty": "hard_error", "probe": "60", "help": "How often the static-file manifest is rebuilt." },
+        { "name": "ALMOND_SERVE_FILES_PATH", "category": "serve_files", "kind": "path", "default": null, "empty": "like_unset", "probe": "./public", "help": "Optional directory of static files served alongside blobs." },
+        { "name": "ALMOND_SERVE_FILES_MANIFEST_DIR", "category": "serve_files", "kind": "path", "default": "/tmp", "empty": "like_unset", "probe": "/var/lib/almond", "help": "Fallback directory for the generated SHA-256 manifest when ALMOND_SERVE_FILES_PATH is read-only." },
+        { "name": "ALMOND_SERVE_FILES_MANIFEST_NAME", "category": "serve_files", "kind": "string", "default": "manifest-sha256.txt", "empty": "like_unset", "probe": "checksums.txt", "help": "File name of the generated SHA-256 manifest." },
+        { "name": "ALMOND_SERVE_FILES_REFRESH_INTERVAL", "category": "serve_files", "kind": "duration", "default": "1h", "empty": "like_unset", "probe": "1m", "help": "How often the static-file manifest is rebuilt, e.g. 30s, 5m, 1h." },
 
-        { "name": "MAX_TOTAL_SIZE", "category": "limits", "kind": "number", "unit": "MiB", "default": "99999", "empty": "hard_error", "probe": "1024", "help": "Aggregate size limit across uploads and upstream-cache. The default is practically unbounded." },
-        { "name": "MAX_TOTAL_FILES", "category": "limits", "kind": "number", "unit": "files", "default": "99999999", "empty": "hard_error", "probe": "10000", "help": "Aggregate completed-blob count limit. The default is practically unbounded." },
-        { "name": "MAX_BLOB_SIZE_MB", "category": "limits", "kind": "number", "unit": "MiB", "default": "100", "empty": "hard_error", "probe": "50", "help": "Absolute per-blob size ceiling. MAX_CHUNK_SIZE_MB must not exceed this." },
-        { "name": "MIN_FREE_DISK_MB", "category": "limits", "kind": "number", "unit": "MiB", "default": "256", "empty": "hard_error", "probe": "512", "help": "Minimum free disk space; breaching it returns HTTP 507." },
-        { "name": "CLEANUP_INTERVAL_SECS", "category": "limits", "kind": "number", "unit": "seconds", "default": "30", "empty": "hard_error", "probe": "60", "min": 1, "help": "Expiry and capacity cleanup cadence. Must be greater than zero." },
-        { "name": "MAX_FILE_AGE_DAYS", "category": "limits", "kind": "number", "unit": "days", "default": "0", "empty": "hard_error", "probe": "30", "help": "Age expiry for uploaded content. 0 disables age expiry entirely." },
-        { "name": "MAX_UPSTREAM_CACHE_TTL_DAYS", "category": "limits", "kind": "number", "unit": "days", "default": "1", "empty": "hard_error", "probe": "7", "help": "TTL for the transparent upstream cache. 0 disables it." },
-        { "name": "MAX_UPSTREAM_DOWNLOAD_SIZE_MB", "category": "limits", "kind": "number", "unit": "MiB", "default": "100", "empty": "hard_error", "probe": "500", "help": "Maximum body accepted from one transparent upstream fetch." },
-        { "name": "MAX_CHUNK_SIZE_MB", "category": "limits", "kind": "number", "unit": "MiB", "default": "100", "empty": "hard_error", "probe": "50", "help": "Resumable-upload chunk ceiling. Must not exceed MAX_BLOB_SIZE_MB." },
-        { "name": "CHUNK_CLEANUP_TIMEOUT_MINUTES", "category": "limits", "kind": "number", "unit": "minutes", "default": "30", "empty": "hard_error", "probe": "15", "help": "Abandoned chunked-upload sessions are cleaned up after this long." },
-        { "name": "MAX_CHUNK_UPLOAD_SESSIONS", "category": "limits", "kind": "number", "unit": "sessions", "default": "128", "empty": "hard_error", "probe": "64", "help": "Global cap on concurrent chunked-upload sessions." },
-        { "name": "MAX_CHUNK_UPLOAD_SESSIONS_PER_PUBKEY", "category": "limits", "kind": "number", "unit": "sessions/pubkey", "default": "8", "empty": "hard_error", "probe": "4", "help": "Per-pubkey cap on concurrent chunked-upload sessions." },
-        { "name": "HLS_MIRROR_CONCURRENCY", "category": "limits", "kind": "number", "unit": "parallel fetches", "default": "4", "empty": "hard_error", "probe": "2", "help": "Parallel segment fetches for an explicit HLS mirror." },
+        { "name": "ALMOND_STORAGE_MAX_SIZE", "category": "limits", "kind": "size", "default": "0", "empty": "like_unset", "probe": "1024MiB", "help": "Aggregate size limit across uploads and upstream-cache, e.g. 500GiB. 0 (default) = unlimited." },
+        { "name": "ALMOND_STORAGE_MAX_FILES", "category": "limits", "kind": "number", "unit": "files", "default": "0", "empty": "like_unset", "probe": "10000", "help": "Aggregate completed-blob count limit. 0 (default) = unlimited." },
+        { "name": "ALMOND_STORAGE_MIN_FREE", "category": "limits", "kind": "size", "default": "256MiB", "empty": "like_unset", "probe": "512MiB", "help": "Minimum free disk space; breaching it returns HTTP 507." },
+        { "name": "ALMOND_BLOB_MAX_SIZE", "category": "limits", "kind": "size", "default": "500MiB", "empty": "like_unset", "probe": "200MiB", "help": "Absolute per-blob size ceiling. ALMOND_CHUNK_MAX_SIZE must not exceed this." },
+        { "name": "ALMOND_CLEANUP_INTERVAL", "category": "limits", "kind": "duration", "nonZero": true, "default": "30s", "empty": "like_unset", "probe": "1m", "help": "Expiry and capacity cleanup cadence. Must be greater than zero." },
+        { "name": "ALMOND_UPLOAD_MAX_AGE", "category": "limits", "kind": "duration", "default": "0", "empty": "like_unset", "probe": "30d", "help": "Age expiry for uploaded content, e.g. 30d. 0 disables age expiry entirely." },
+        { "name": "ALMOND_UPSTREAM_CACHE_TTL", "category": "limits", "kind": "duration", "default": "1d", "empty": "like_unset", "probe": "7d", "help": "TTL for the transparent upstream cache. 0 disables it." },
+        { "name": "ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE", "category": "limits", "kind": "size", "default": "100MiB", "empty": "like_unset", "probe": "500MiB", "help": "Maximum body accepted from one transparent upstream fetch." },
+        { "name": "ALMOND_CHUNK_MAX_SIZE", "category": "limits", "kind": "size", "default": "100MiB", "empty": "like_unset", "probe": "50MiB", "help": "Resumable-upload chunk ceiling. Must not exceed ALMOND_BLOB_MAX_SIZE." },
+        { "name": "ALMOND_CHUNK_SESSION_TIMEOUT", "category": "limits", "kind": "duration", "default": "30m", "empty": "like_unset", "probe": "15m", "help": "Abandoned chunked-upload sessions are cleaned up after this long." },
+        { "name": "ALMOND_CHUNK_MAX_SESSIONS", "category": "limits", "kind": "number", "unit": "sessions", "default": "128", "empty": "like_unset", "probe": "64", "help": "Global cap on concurrent chunked-upload sessions." },
+        { "name": "ALMOND_CHUNK_MAX_SESSIONS_PER_PUBKEY", "category": "limits", "kind": "number", "unit": "sessions/pubkey", "default": "8", "empty": "like_unset", "probe": "4", "help": "Per-pubkey cap on concurrent chunked-upload sessions." },
+        { "name": "ALMOND_HLS_MIRROR_CONCURRENCY", "category": "limits", "kind": "number", "unit": "parallel fetches", "default": "4", "empty": "like_unset", "probe": "2", "help": "Parallel segment fetches for an explicit HLS mirror." },
 
-        { "name": "UPSTREAM_SERVERS", "category": "upstream", "kind": "list", "default": null, "empty": "like_unset", "probe": "https://cdn.satellite.earth", "help": "Comma-separated trusted upstream Blossom origins. Leave unset to disable this source." },
-        { "name": "UPSTREAM_MODE", "category": "upstream", "kind": "enum", "values": ["proxy", "redirect", "redirect_and_cache"], "default": "proxy", "empty": "like_unset", "probe": "redirect", "help": "proxy streams while caching; redirect returns 302; redirect_and_cache returns 302 and fills the cache in the background. Almond silently falls back to proxy on an unrecognized value \u2014 this editor rejects it instead." },
+        { "name": "ALMOND_UPSTREAM_SERVERS", "category": "upstream", "kind": "list", "default": null, "empty": "like_unset", "probe": "https://cdn.satellite.earth", "help": "Comma-separated trusted upstream Blossom origins. Leave unset to disable this source." },
+        { "name": "ALMOND_UPSTREAM_MODE", "category": "upstream", "kind": "enum", "values": ["proxy", "redirect", "redirect-and-cache"], "default": "proxy", "empty": "like_unset", "probe": "redirect", "help": "proxy streams while caching; redirect returns 302; redirect-and-cache returns 302 and fills the cache in the background." },
 
-        { "name": "FEATURE_UPLOAD_ENABLED", "category": "features", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "public", "empty": "like_unset", "probe": "wot", "help": "Almond silently falls back to public on an unrecognized value \u2014 this editor rejects it instead." },
-        { "name": "FEATURE_MIRROR_ENABLED", "category": "features", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "public", "empty": "like_unset", "probe": "wot", "help": "Almond silently falls back to public on an unrecognized value \u2014 this editor rejects it instead." },
-        { "name": "FEATURE_LIST_ENABLED", "category": "features", "kind": "bool", "default": "true", "empty": "hard_error", "probe": "false", "help": "/list endpoint. Unlike the other FEATURE_* flags this is a plain boolean, not a mode." },
-        { "name": "FEATURE_CUSTOM_UPSTREAM_ORIGIN_ENABLED", "category": "features", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "off", "empty": "like_unset", "probe": "wot", "help": "Allows an authorized request to supply a custom upstream origin." },
-        { "name": "FEATURE_HOMEPAGE_ENABLED", "category": "features", "kind": "bool", "default": "true", "empty": "hard_error", "probe": "false", "help": "Controls the homepage. This editor is served by Almond on the same flag \u2014 disabling it also disables the /config route on that server." },
+        { "name": "ALMOND_UPLOAD_ACCESS", "category": "features", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "public", "empty": "like_unset", "probe": "wot", "help": "Who may upload. dvm requires ALMOND_DVM_KINDS." },
+        { "name": "ALMOND_MIRROR_ACCESS", "category": "features", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "public", "empty": "like_unset", "probe": "wot", "help": "Who may mirror. dvm requires ALMOND_DVM_KINDS." },
+        { "name": "ALMOND_CUSTOM_ORIGIN_ACCESS", "category": "features", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "off", "empty": "like_unset", "probe": "wot", "help": "Who may supply a custom upstream origin with an authorized request." },
+        { "name": "ALMOND_LIST_ENABLED", "category": "features", "kind": "bool", "default": "true", "empty": "like_unset", "probe": "false", "help": "/list endpoint." },
+        { "name": "ALMOND_HOMEPAGE_ENABLED", "category": "features", "kind": "bool", "default": "true", "empty": "like_unset", "probe": "false", "help": "Controls the homepage. This editor is served by Almond on the same flag \u2014 disabling it also disables the /config route on that server." },
 
-        { "name": "FEATURE_REPORT_ENABLED", "category": "reports", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "off", "empty": "like_unset", "probe": "public", "help": "Almond silently falls back to off on an unrecognized value \u2014 this editor rejects it instead." },
-        { "name": "REPORT_ACTION", "category": "reports", "kind": "enum", "values": ["quarantine", "delete"], "default": "quarantine", "empty": "like_unset", "probe": "delete", "help": "quarantine moves a reported blob to quarantine/; delete removes it. Almond silently falls back to quarantine on an unrecognized value \u2014 this editor rejects it instead." },
+        { "name": "ALMOND_REPORT_ACCESS", "category": "reports", "kind": "enum", "values": ["off", "wot", "dvm", "public"], "default": "off", "empty": "like_unset", "probe": "public", "help": "Who may submit reports." },
+        { "name": "ALMOND_REPORT_ACTION", "category": "reports", "kind": "enum", "values": ["quarantine", "delete"], "default": "quarantine", "empty": "like_unset", "probe": "delete", "help": "quarantine moves a reported blob to quarantine/; delete removes it." },
 
-        { "name": "FEATURE_PAID_UPLOAD", "category": "paid", "kind": "bool", "boolWords": ["on", "off"], "default": "off", "empty": "hard_error", "probe": "on", "help": "Requires payment for uploads (BUD-07). Requires exactly one CASHU_ACCEPTED_MINTS entry." },
-        { "name": "FEATURE_PAID_MIRROR", "category": "paid", "kind": "bool", "boolWords": ["on", "off"], "default": "off", "empty": "hard_error", "probe": "on", "help": "Requires payment for mirror requests (BUD-07). Requires exactly one CASHU_ACCEPTED_MINTS entry." },
-        { "name": "FEATURE_PAID_DOWNLOAD", "category": "paid", "kind": "bool", "boolWords": ["on", "off"], "default": "off", "empty": "hard_error", "probe": "on", "help": "Requires payment for downloads (BUD-07). Requires exactly one CASHU_ACCEPTED_MINTS entry." },
-        { "name": "CASHU_PRICE_PER_MB", "category": "paid", "kind": "number", "unit": "sats/MiB", "default": "1", "empty": "hard_error", "probe": "5", "help": "Price used for all enabled paid operations." },
-        { "name": "CASHU_ACCEPTED_MINTS", "category": "paid", "kind": "list", "default": null, "empty": "like_unset", "probe": "https://mint.example.com", "help": "Exactly one mint is required when any paid feature is on." },
-        { "name": "CASHU_WALLET_PATH", "category": "paid", "kind": "path", "default": "./cashu_wallet.db", "empty": "empty_value", "probe": "./data/cashu_wallet.db", "help": "Local Cashu wallet database path." },
+        { "name": "ALMOND_CASHU_PAID", "category": "paid", "kind": "list", "values": ["upload", "mirror", "download"], "default": null, "empty": "like_unset", "probe": "upload", "help": "Comma-separated operations that require payment (BUD-07): upload, mirror, download. Requires ALMOND_CASHU_MINT." },
+        { "name": "ALMOND_CASHU_PRICE_PER_MIB", "category": "paid", "kind": "number", "unit": "sats/MiB", "default": "1", "empty": "like_unset", "probe": "5", "help": "Price used for all paid operations." },
+        { "name": "ALMOND_CASHU_MINT", "category": "paid", "kind": "url", "default": null, "empty": "like_unset", "probe": "https://mint.example.com", "help": "The one accepted mint URL. Required when ALMOND_CASHU_PAID is set." },
+        { "name": "ALMOND_CASHU_WALLET_PATH", "category": "paid", "kind": "path", "default": "./cashu_wallet.db", "empty": "like_unset", "probe": "./data/cashu_wallet.db", "help": "Local Cashu wallet database path." },
 
-        { "name": "BLOSSOM_SERVER_LIST_CACHE_TTL_HOURS", "category": "filters", "kind": "number", "unit": "hours", "default": "24", "empty": "hard_error", "probe": "12", "help": "How long an author's Blossom server list is cached locally." },
-        { "name": "FILTER_ALGORITHM", "category": "filters", "kind": "enum", "values": ["bloom", "binary-fuse-8", "binary-fuse-16", "binary-fuse-32"], "default": "binary-fuse-16", "empty": "like_unset", "probe": "binary-fuse-8", "help": "BUD-11 filter algorithm. Almond silently falls back to binary-fuse-16 on an unrecognized value \u2014 this editor rejects it instead." },
+        { "name": "ALMOND_SERVER_LIST_CACHE_TTL", "category": "filters", "kind": "duration", "default": "24h", "empty": "like_unset", "probe": "12h", "help": "How long an author's Blossom server list is cached locally." },
+        { "name": "ALMOND_FILTER_ALGORITHM", "category": "filters", "kind": "enum", "values": ["bloom", "binary-fuse-8", "binary-fuse-16", "binary-fuse-32"], "default": "binary-fuse-16", "empty": "like_unset", "probe": "binary-fuse-8", "help": "BUD-11 filter algorithm." },
 
-        { "name": "DVM_ALLOWED_KINDS", "category": "dvm", "kind": "list_u16", "default": null, "empty": "like_unset", "probe": "5207", "help": "Comma-separated Nostr event kinds. Required when any FEATURE_*_ENABLED uses dvm mode." },
-        { "name": "DVM_RELAYS", "category": "dvm", "kind": "list", "default": null, "empty": "like_unset", "probe": "wss://nos.lol", "help": "Comma-separated relays polled for DVM job requests." },
-        { "name": "DVM_REFRESH_INTERVAL_MINS", "category": "dvm", "kind": "number", "unit": "minutes", "default": "5", "empty": "hard_error", "probe": "10", "help": "How often the DVM-authorized pubkey set is refreshed." },
+        { "name": "ALMOND_DVM_KINDS", "category": "dvm", "kind": "list_u16", "default": null, "empty": "like_unset", "probe": "5207", "help": "Comma-separated Nostr event kinds. Required when ALMOND_UPLOAD_ACCESS or ALMOND_MIRROR_ACCESS is dvm." },
+        { "name": "ALMOND_DVM_RELAYS", "category": "dvm", "kind": "list", "default": null, "empty": "like_unset", "probe": "wss://nos.lol", "help": "Comma-separated relays polled for DVM job requests." },
+        { "name": "ALMOND_DVM_REFRESH_INTERVAL", "category": "dvm", "kind": "duration", "default": "5m", "empty": "like_unset", "probe": "10m", "help": "How often the DVM-authorized pubkey set is refreshed." },
 
-        { "name": "ALLOWED_NPUBS", "category": "auth", "kind": "list_npub", "default": null, "empty": "like_unset", "probe": "npub14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w4scf6zts", "help": "Comma-separated allowed npubs. When non-empty, restricts public upload/mirror access to this list. Almond silently drops any entry that fails to parse \u2014 this editor checks the bech32 checksum, but (unlike Almond) does not verify the decoded bytes are a valid secp256k1 point." },
-        { "name": "AUTH_MAX_TTL_SECS", "category": "auth", "kind": "number", "unit": "seconds", "default": "86400", "empty": "hard_error", "probe": "3600", "help": "Maximum validity window of an authorization event. Set 0 to honor the token's own expiration." },
-        { "name": "AUTH_CLOCK_SKEW_SECS", "category": "auth", "kind": "number", "unit": "seconds", "default": "30", "empty": "hard_error", "probe": "60", "help": "Tolerated clock skew when validating authorization timestamps." },
-        { "name": "AUTH_REQUIRE_SERVER_TAG", "category": "auth", "kind": "bool", "default": "false", "empty": "hard_error", "probe": "true", "help": "Require authorization events to contain a matching server tag." },
-        { "name": "METRICS_BEARER_TOKEN", "category": "auth", "kind": "secret", "default": null, "empty": "like_unset", "probe": "replace-with-a-long-random-secret", "sensitive": true, "generatable": true, "help": "/metrics is disabled until this is set. Keep it off public networks even when set." }
+        { "name": "ALMOND_ALLOWED_NPUBS", "category": "auth", "kind": "list_npub", "default": null, "empty": "like_unset", "probe": "npub1klr0dy2ul2dx9llk58czvpx73rprcmrvd5dc7ck8esg8f8es06qs427gxc", "help": "Comma-separated allowed npubs. When non-empty, restricts public upload/mirror access to this list. An invalid npub stops Almond at startup \u2014 this editor checks the bech32 checksum, but (unlike Almond) does not verify the decoded bytes are a valid secp256k1 point." },
+        { "name": "ALMOND_AUTH_MAX_TTL", "category": "auth", "kind": "duration", "nonZero": true, "default": "24h", "empty": "like_unset", "probe": "1h", "help": "Maximum validity window of an authorization event. Must be greater than zero." },
+        { "name": "ALMOND_AUTH_CLOCK_SKEW", "category": "auth", "kind": "duration", "default": "30s", "empty": "like_unset", "probe": "1m", "help": "Tolerated clock skew when validating authorization timestamps." },
+        { "name": "ALMOND_AUTH_REQUIRE_SERVER_TAG", "category": "auth", "kind": "bool", "default": "false", "empty": "like_unset", "probe": "true", "help": "Require authorization events to contain a matching server tag." },
+        { "name": "ALMOND_METRICS_TOKEN", "category": "auth", "kind": "secret", "default": null, "empty": "like_unset", "probe": "replace-with-a-long-random-secret", "sensitive": true, "generatable": true, "help": "/metrics is disabled until this is set. Keep it off public networks even when set." }
       ];
       /* ALMOND_SCHEMA_JSON_END */
 
@@ -996,21 +993,46 @@
         importDiagnostics = { duplicates: diagDuplicates, unknown: diagUnknown, unsupported: diagUnsupported };
       }
 
+      function isTrueWord(value) {
+        return /^(true|yes|on|1)$/i.test(String(value).trim());
+      }
+
+      // Contract grammar: bare `0`, or digits followed by s|m|h|d. Returns
+      // seconds as a BigInt, or null if the text does not match.
+      const DURATION_SECONDS = { s: 1n, m: 60n, h: 3600n, d: 86400n };
+      function parseDuration(raw) {
+        const m = raw.trim().match(/^(?:0|(\d+)([smhd]))$/);
+        if (!m) return null;
+        return m[1] === undefined ? 0n : BigInt(m[1]) * DURATION_SECONDS[m[2]];
+      }
+
+      // Contract grammar: bare `0`, or digits followed by an IEC unit
+      // (case-insensitive; decimal MB/GB are rejected). Returns bytes as a
+      // BigInt, or null if the text does not match.
+      const SIZE_SHIFT = { b: 0n, kib: 10n, mib: 20n, gib: 30n, tib: 40n };
+      function parseSize(raw) {
+        const m = raw.trim().match(/^(?:0|(\d+)(b|kib|mib|gib|tib))$/i);
+        if (!m) return null;
+        return m[1] === undefined ? 0n : BigInt(m[1]) << SIZE_SHIFT[m[2].toLowerCase()];
+      }
+
+      const U64_MAX = 18446744073709551615n;
+
       function effectiveDefault(name) {
         const f = SCHEMA_BY_NAME[name];
         if (f.conditionalDefault) {
-          const httpsState = fieldStates.ENABLE_HTTPS;
-          const httpsOn = httpsState.enabled && /^(true|1|on)$/i.test(httpsState.value.trim());
-          return httpsOn ? "https://127.0.0.1:3000" : "http://127.0.0.1:3000";
+          const tls = fieldStates.ALMOND_TLS_ENABLED;
+          const tlsOn = tls.enabled && isTrueWord(tls.value);
+          return tlsOn ? "https://127.0.0.1:3000" : "http://127.0.0.1:3000";
         }
         return f.default;
       }
 
       // Resolves what Config::from_map would compute for this field, as a
       // string, or null when the field is not written and has no default,
-      // or {error} if the field's own state is invalid (an empty value on a
-      // hard_error field, or a value that fails validation). Does not
-      // attempt cross-field invariants.
+      // or {error} if the field's value fails validation. An empty value
+      // behaves exactly like leaving the variable out. Does not attempt
+      // cross-field invariants.
       function resolveEffective(name) {
         const f = SCHEMA_BY_NAME[name];
         const st = fieldStates[name];
@@ -1018,11 +1040,7 @@
         // A reference is resolved from the target machine's environment at
         // startup, so there is nothing to compute here.
         if (st.hasReference) return { value: null, opaque: true };
-        if (st.value === "") {
-          if (f.empty === "hard_error") return { error: f.name + " must not be empty" };
-          if (f.empty === "like_unset") return { value: effectiveDefault(name) };
-          return { value: "" };
-        }
+        if (st.value === "") return { value: effectiveDefault(name) };
         const err = validateFieldValue(f, st.value);
         if (err) return { error: err };
         return { value: st.value };
@@ -1032,16 +1050,27 @@
         const value = raw;
         switch (f.kind) {
           case "bool": {
-            if (!/^(true|false|1|0|on|off)$/i.test(value.trim())) {
-              return "must be one of true/false/1/0/on/off";
+            if (!/^(true|false|yes|no|on|off|1|0)$/i.test(value.trim())) {
+              return "must be one of true/false/yes/no/on/off/1/0";
             }
             return null;
           }
           case "number": {
             if (!/^\d+$/.test(value.trim())) return "must be a non-negative integer";
-            const n = Number(value.trim());
-            if (f.min !== undefined && n < f.min) return "must be at least " + f.min;
-            if (!Number.isSafeInteger(n)) return "value is too large";
+            if (!Number.isSafeInteger(Number(value.trim()))) return "value is too large";
+            return null;
+          }
+          case "duration": {
+            const secs = parseDuration(value);
+            if (secs === null) return "must be 0 or a number with unit s, m, h or d, e.g. 30s, 5m, 24h, 7d";
+            if (secs > U64_MAX) return "value is too large";
+            if (f.nonZero && secs === 0n) return "must be greater than zero";
+            return null;
+          }
+          case "size": {
+            const bytes = parseSize(value);
+            if (bytes === null) return "must be 0 or a number with unit B, KiB, MiB, GiB or TiB, e.g. 100MiB (MB/GB are not accepted)";
+            if (bytes > U64_MAX) return "value is too large";
             return null;
           }
           case "socketaddr": {
@@ -1085,6 +1114,8 @@
           case "list": {
             const items = splitList(value);
             if (items.length === 0) return "must contain at least one entry, or be left unset";
+            const bad = f.values && items.find((item) => !f.values.includes(item));
+            if (bad) return "'" + bad + "' is not one of: " + f.values.join(", ");
             return null;
           }
           case "list_u16": {
@@ -1121,10 +1152,10 @@
        * PER-FIELD VALIDATION ERRORS, aggregated
        *
        * resolveEffective() already computes a per-field error (bad type,
-       * empty on a hard_error field, invalid enum choice, ...) for the
+       * invalid enum choice, zero where zero is rejected, ...) for the
        * inline message under each field. This collects the same errors so
        * the spec's "export is blocked while any known field is invalid"
-       * rule actually holds — crossFieldErrors() alone only covers the four
+       * rule actually holds — crossFieldErrors() alone only covers the
        * multi-field invariants, not a single field being wrong on its own.
        * ==================================================================== */
 
@@ -1158,43 +1189,43 @@
           "ALMOND_S3_ACCESS_KEY_ID",
           "ALMOND_S3_SECRET_ACCESS_KEY",
         ];
-        const s3Set = s3Fields.filter((n) => fieldStates[n].enabled).length;
+        // An empty value is the same as unset, so `KEY=` does not count.
+        const isSet = (n) => fieldStates[n].enabled && (fieldStates[n].hasReference || fieldStates[n].value !== "");
+        const s3Set = s3Fields.filter(isSet).length;
         if (s3Set !== 0 && s3Set !== 4) {
           errors.push(
             "Incomplete S3 configuration: all of " + s3Fields.join(", ") + " must be set together, or none."
           );
         }
 
-        // MAX_CHUNK_SIZE_MB <= MAX_BLOB_SIZE_MB
-        if (!eff.MAX_CHUNK_SIZE_MB.error && !eff.MAX_BLOB_SIZE_MB.error) {
-          if (Number(eff.MAX_CHUNK_SIZE_MB.value) > Number(eff.MAX_BLOB_SIZE_MB.value)) {
-            errors.push("MAX_CHUNK_SIZE_MB cannot exceed MAX_BLOB_SIZE_MB.");
+        // ALMOND_CHUNK_MAX_SIZE <= ALMOND_BLOB_MAX_SIZE, compared in bytes.
+        const chunk = eff.ALMOND_CHUNK_MAX_SIZE;
+        const blob = eff.ALMOND_BLOB_MAX_SIZE;
+        if (!chunk.error && !blob.error && chunk.value !== null && blob.value !== null) {
+          if (parseSize(chunk.value) > parseSize(blob.value)) {
+            errors.push("ALMOND_CHUNK_MAX_SIZE cannot exceed ALMOND_BLOB_MAX_SIZE.");
           }
         }
 
-        // Paid features require exactly one mint.
-        const paidOn = ["FEATURE_PAID_UPLOAD", "FEATURE_PAID_MIRROR", "FEATURE_PAID_DOWNLOAD"].some(
-          (n) => !eff[n].error && /^(true|1|on)$/i.test(String(eff[n].value).trim())
-        );
-        if (paidOn) {
-          const mints = eff.CASHU_ACCEPTED_MINTS.error || eff.CASHU_ACCEPTED_MINTS.value === null
-            ? []
-            : splitList(eff.CASHU_ACCEPTED_MINTS.value);
-          if (mints.length !== 1) {
-            errors.push("Exactly one CASHU_ACCEPTED_MINTS value is required when a paid feature is on.");
+        // Paid operations require exactly one mint.
+        const paid = eff.ALMOND_CASHU_PAID;
+        const mint = eff.ALMOND_CASHU_MINT;
+        if (!paid.error && paid.value !== null && !mint.error && !mint.opaque) {
+          if (mint.value === null || mint.value.includes(",")) {
+            errors.push("Exactly one ALMOND_CASHU_MINT URL is required when ALMOND_CASHU_PAID is set.");
           }
         }
 
-        // DVM mode requires DVM_ALLOWED_KINDS.
-        const needsDvm = ["FEATURE_UPLOAD_ENABLED", "FEATURE_MIRROR_ENABLED"].some(
+        // DVM access requires ALMOND_DVM_KINDS.
+        const needsDvm = ["ALMOND_UPLOAD_ACCESS", "ALMOND_MIRROR_ACCESS"].some(
           (n) => !eff[n].error && eff[n].value === "dvm"
         );
-        if (needsDvm) {
-          const kinds = eff.DVM_ALLOWED_KINDS.error || eff.DVM_ALLOWED_KINDS.value === null
+        if (needsDvm && !eff.ALMOND_DVM_KINDS.opaque) {
+          const kinds = eff.ALMOND_DVM_KINDS.error || eff.ALMOND_DVM_KINDS.value === null
             ? []
-            : splitList(eff.DVM_ALLOWED_KINDS.value);
+            : splitList(eff.ALMOND_DVM_KINDS.value);
           if (kinds.length === 0) {
-            errors.push("DVM_ALLOWED_KINDS must be set when any feature uses 'dvm' mode.");
+            errors.push("ALMOND_DVM_KINDS must be set when ALMOND_UPLOAD_ACCESS or ALMOND_MIRROR_ACCESS is dvm.");
           }
         }
 
@@ -1212,76 +1243,81 @@
         const val = (n) => (eff[n] && !eff[n].error ? eff[n].value : null);
         const isTrue = (n) => {
           const v = val(n);
-          return v !== null && /^(true|1|on)$/i.test(String(v));
+          return v !== null && isTrueWord(v);
         };
         const listLen = (n) => {
           const v = val(n);
           return v ? splitList(v).length : 0;
         };
 
-        const bindAddr = val("BIND_ADDR") || "";
+        const bindAddr = val("ALMOND_BIND_ADDR") || "";
         const bindIsLocal = /^(127\.0\.0\.1|\[::1\]|localhost)/i.test(bindAddr);
         if (!bindIsLocal) {
           findings.push({
             severity: "warn",
-            text: "BIND_ADDR (" + bindAddr + ") is not localhost \u2014 Almond will be reachable from outside this machine.",
+            text: "ALMOND_BIND_ADDR (" + bindAddr + ") is not localhost \u2014 Almond will be reachable from outside this machine.",
           });
         }
 
-        const publicUrl = val("PUBLIC_URL") || "";
+        const publicUrl = val("ALMOND_PUBLIC_URL") || "";
         if (!bindIsLocal && /127\.0\.0\.1/.test(publicUrl)) {
           findings.push({
             severity: "warn",
-            text: "PUBLIC_URL still points at 127.0.0.1 while BIND_ADDR is not localhost \u2014 generated blob descriptors will point nowhere reachable.",
+            text: "ALMOND_PUBLIC_URL still points at 127.0.0.1 while ALMOND_BIND_ADDR is not localhost \u2014 generated blob descriptors will point nowhere reachable.",
           });
         }
 
         if (
-          (val("FEATURE_UPLOAD_ENABLED") === "public" || val("FEATURE_MIRROR_ENABLED") === "public") &&
-          listLen("ALLOWED_NPUBS") === 0
+          (val("ALMOND_UPLOAD_ACCESS") === "public" || val("ALMOND_MIRROR_ACCESS") === "public") &&
+          listLen("ALMOND_ALLOWED_NPUBS") === 0
         ) {
           findings.push({
             severity: "warn",
-            text: "Upload or mirror is public with no ALLOWED_NPUBS \u2014 write access relies on signature verification alone, open to anyone.",
+            text: "Upload or mirror is public with no ALMOND_ALLOWED_NPUBS \u2014 write access relies on signature verification alone, open to anyone.",
           });
         }
 
-        if (listLen("CORS_ALLOWED_ORIGINS") > 0) {
+        if (listLen("ALMOND_CORS_ORIGINS") > 0) {
           findings.push({
             severity: "info",
-            text: "CORS_ALLOWED_ORIGINS is set \u2014 those origins can read discovery and metrics responses cross-origin.",
+            text: "ALMOND_CORS_ORIGINS is set \u2014 those origins can read discovery and metrics responses cross-origin.",
           });
         }
 
-        if (val("METRICS_BEARER_TOKEN") && !bindIsLocal) {
+        if (val("ALMOND_METRICS_TOKEN") && !bindIsLocal) {
           findings.push({
             severity: "info",
-            text: "METRICS_BEARER_TOKEN is set and BIND_ADDR is not localhost \u2014 /metrics is reachable externally; keep the token secret.",
+            text: "ALMOND_METRICS_TOKEN is set and ALMOND_BIND_ADDR is not localhost \u2014 /metrics is reachable externally; keep the token secret.",
           });
         }
 
-        if (String(val("MAX_TOTAL_SIZE")) === "99999" || String(val("MAX_TOTAL_FILES")) === "99999999") {
+        const maxSize = val("ALMOND_STORAGE_MAX_SIZE");
+        if (
+          (maxSize !== null && parseSize(maxSize) === 0n) ||
+          String(val("ALMOND_STORAGE_MAX_FILES")) === "0"
+        ) {
           findings.push({
             severity: "info",
-            text: "MAX_TOTAL_SIZE / MAX_TOTAL_FILES are at their default \u2014 storage is practically unbounded.",
+            text: "ALMOND_STORAGE_MAX_SIZE / ALMOND_STORAGE_MAX_FILES is 0 \u2014 storage is bounded only by ALMOND_STORAGE_MIN_FREE.",
           });
         }
 
-        if (String(val("MAX_FILE_AGE_DAYS")) === "0") {
-          findings.push({ severity: "info", text: "MAX_FILE_AGE_DAYS is 0 \u2014 uploads never expire by age." });
+        const maxAge = val("ALMOND_UPLOAD_MAX_AGE");
+        if (maxAge !== null && parseDuration(maxAge) === 0n) {
+          findings.push({ severity: "info", text: "ALMOND_UPLOAD_MAX_AGE is 0 \u2014 uploads never expire by age." });
         }
 
-        if (isTrue("ENABLE_HTTPS") && isTrue("TLS_AUTO_GENERATE")) {
+        if (isTrue("ALMOND_TLS_ENABLED") && isTrue("ALMOND_TLS_SELF_SIGNED")) {
           findings.push({
             severity: "warn",
-            text: "ENABLE_HTTPS with TLS_AUTO_GENERATE uses a self-signed certificate \u2014 development only.",
+            text: "ALMOND_TLS_ENABLED with ALMOND_TLS_SELF_SIGNED uses a self-signed certificate when no cert/key files exist \u2014 development only.",
           });
         }
 
-        if (val("FEATURE_HOMEPAGE_ENABLED") !== null && !isTrue("FEATURE_HOMEPAGE_ENABLED")) {
+        if (val("ALMOND_HOMEPAGE_ENABLED") !== null && !isTrue("ALMOND_HOMEPAGE_ENABLED")) {
           findings.push({
             severity: "info",
-            text: "FEATURE_HOMEPAGE_ENABLED is off \u2014 on the server that serves it, this also disables the /config editor route.",
+            text: "ALMOND_HOMEPAGE_ENABLED is off \u2014 on the server that serves it, this also disables the /config editor route.",
           });
         }
 
@@ -1553,6 +1589,9 @@
           wrap.appendChild(
             el("p", { text: "Variables not part of Almond's core schema (preserved unchanged on export, e.g. FIPS_* or RUST_LOG):" })
           );
+          wrap.appendChild(
+            el("p", { text: "Pre-rename variable names are still read as deprecated aliases (Almond logs a warning), but this editor does not migrate them \u2014 rename them using the migration table in the README." })
+          );
           const ul = el("ul", { class: "panel-list" });
           unknown.forEach((k) => ul.appendChild(el("li", { text: k })));
           wrap.appendChild(ul);
@@ -1702,15 +1741,12 @@
             row.appendChild(el("div", { class: "field-error", text: "\u2717 " + eff.error }));
           } else if (st.value === "") {
             // Checked with nothing typed is the `KEY=` line — the one case
-            // where a blank-looking field is not "untouched", and Almond
-            // reads it differently per field, so it gets spelled out.
+            // where a blank-looking field is not "untouched", so it gets
+            // spelled out.
             row.appendChild(
               el("div", {
                 class: "field-hint",
-                text:
-                  f.empty === "like_unset"
-                    ? "Writes " + f.name + "= \u2014 Almond treats that exactly like leaving it out."
-                    : "Writes " + f.name + "= \u2014 a literal empty value here, not the default (" + (f.default ?? "unset") + ").",
+                text: "Writes " + f.name + "= \u2014 Almond treats that exactly like leaving it out.",
               })
             );
           }
@@ -1757,13 +1793,15 @@
         const placeholder = st.enabled ? undefined : fallback === null ? "(not set)" : fallback;
 
         if (f.kind === "bool" || f.kind === "enum") {
-          const options = f.kind === "bool" ? f.boolWords || ["true", "false"] : f.values;
+          const options = f.kind === "bool" ? ["true", "false"] : f.values;
           const select = el("select", { "data-field": f.name, class: inactive });
           options.forEach((v) => select.appendChild(el("option", { value: v, text: v })));
-          // A <select> has no placeholder, so an unset one simply displays
-          // the default it stands in for.
-          const shown = String((st.enabled ? st.value : fallback) ?? "");
-          const match = options.find((v) => v.toLowerCase() === shown.toLowerCase());
+          // A <select> has no placeholder, so an unset (or empty) one simply
+          // displays the default it stands in for.
+          const shown = String((st.enabled && st.value !== "" ? st.value : fallback) ?? "");
+          const match = f.kind === "bool"
+            ? (isTrueWord(shown) ? "true" : "false")
+            : options.find((v) => v.toLowerCase() === shown.toLowerCase());
           select.value = match === undefined ? options[0] : match;
           select.addEventListener("focus", onPointerFocus);
           select.addEventListener("change", () => onChange(select.value));
@@ -1996,7 +2034,7 @@
         });
 
         add("round trip: unedited import re-exports byte-identical", () => {
-          const src = "# header\nBIND_ADDR=127.0.0.1:4000\nUNKNOWN_VAR=kept\n";
+          const src = "# header\nALMOND_BIND_ADDR=127.0.0.1:4000\nUNKNOWN_VAR=kept\n";
           doc = buildDocument(src);
           loadFromDocument();
           const out = buildExport();
@@ -2004,20 +2042,20 @@
         });
 
         add("round trip: editing one field only rewrites that line", () => {
-          const src = "# header\nBIND_ADDR=127.0.0.1:4000\nSTORAGE_PATH=./files\n";
+          const src = "# header\nALMOND_BIND_ADDR=127.0.0.1:4000\nALMOND_STORAGE_PATH=./files\n";
           doc = buildDocument(src);
           loadFromDocument();
-          fieldStates.BIND_ADDR.value = "0.0.0.0:9000";
+          fieldStates.ALMOND_BIND_ADDR.value = "0.0.0.0:9000";
           const out = buildExport();
-          assertEq(out, "# header\nBIND_ADDR=0.0.0.0:9000\nSTORAGE_PATH=./files\n");
+          assertEq(out, "# header\nALMOND_BIND_ADDR=0.0.0.0:9000\nALMOND_STORAGE_PATH=./files\n");
         });
 
         add("reference field round-trips verbatim when untouched", () => {
-          const src = 'PUBLIC_URL="https://${HOST}"\n';
+          const src = 'ALMOND_PUBLIC_URL="https://${HOST}"\n';
           doc = buildDocument(src);
           loadFromDocument();
-          assertEq(fieldStates.PUBLIC_URL.hasReference, true);
-          assertEq(fieldStates.PUBLIC_URL.value, '"https://${HOST}"');
+          assertEq(fieldStates.ALMOND_PUBLIC_URL.hasReference, true);
+          assertEq(fieldStates.ALMOND_PUBLIC_URL.value, '"https://${HOST}"');
           const out = buildExport();
           assertEq(out, src);
         });
@@ -2056,41 +2094,66 @@
           assertEq(crossFieldErrors().length > 0, true);
         });
 
+        add("duration and size grammar", () => {
+          assertEq(String(parseDuration("0")), "0");
+          assertEq(String(parseDuration("5m")), "300");
+          assertEq(String(parseDuration("7d")), "604800");
+          assertEq(parseDuration("30"), null);
+          assertEq(parseDuration("1.5h"), null);
+          assertEq(parseDuration("1w"), null);
+          assertEq(String(parseSize("0")), "0");
+          assertEq(String(parseSize("100MiB")), String(100 * 1024 * 1024));
+          assertEq(String(parseSize("2gib")), String(2 * 1024 * 1024 * 1024));
+          assertEq(parseSize("100MB"), null);
+          assertEq(parseSize("100"), null);
+          assertEq(validateFieldValue(SCHEMA_BY_NAME.ALMOND_AUTH_MAX_TTL, "0"), "must be greater than zero");
+          assertEq(validateFieldValue(SCHEMA_BY_NAME.ALMOND_UPLOAD_MAX_AGE, "0"), null);
+        });
+
+        add("chunk size may not exceed blob size, compared in bytes", () => {
+          doc = buildDocument(null);
+          resetFieldStates();
+          fieldStates.ALMOND_CHUNK_MAX_SIZE.enabled = true;
+          fieldStates.ALMOND_CHUNK_MAX_SIZE.value = "1GiB";
+          assertEq(crossFieldErrors().length > 0, true);
+          fieldStates.ALMOND_BLOB_MAX_SIZE.enabled = true;
+          fieldStates.ALMOND_BLOB_MAX_SIZE.value = "1024MiB";
+          assertEq(crossFieldErrors().length, 0);
+        });
+
         add("a single invalid field blocks export on its own, not just cross-field invariants", () => {
-          // crossFieldErrors() only knows about the four multi-field
-          // invariants (S3, chunk<=blob, paid mints, dvm kinds); a lone
-          // field like AUTH_MAX_TTL_SECS switched on with an empty value
-          // (hard_error) has to show up through perFieldErrors() instead,
-          // or export would wrongly stay enabled.
+          // crossFieldErrors() only knows about the multi-field invariants
+          // (S3, chunk<=blob, paid mint, dvm kinds); a lone field like
+          // ALMOND_AUTH_MAX_TTL set to 0 has to show up through
+          // perFieldErrors() instead, or export would wrongly stay enabled.
           doc = buildDocument(null);
           resetFieldStates();
           assertEq(crossFieldErrors().length, 0);
           assertEq(perFieldErrors().length, 0);
-          fieldStates.AUTH_MAX_TTL_SECS.enabled = true;
+          fieldStates.ALMOND_AUTH_MAX_TTL.enabled = true;
+          fieldStates.ALMOND_AUTH_MAX_TTL.value = "0";
           assertEq(crossFieldErrors().length, 0);
           assertEq(perFieldErrors().length > 0, true);
         });
 
-        add("switched on with an empty box means an explicit KEY= line", () => {
+        add("switched on with an empty box writes KEY= and behaves like unset", () => {
           doc = buildDocument(null);
           resetFieldStates();
-          fieldStates.STORAGE_PATH.enabled = true;
-          assertEq(resolveEffective("STORAGE_PATH").value, "");
+          fieldStates.ALMOND_STORAGE_PATH.enabled = true;
+          assertEq(resolveEffective("ALMOND_STORAGE_PATH").value, "./files");
           assertEq(perFieldErrors().length, 0);
-          assertEq(buildExport().includes("STORAGE_PATH=\n"), true);
-          // ...except for the like_unset family, where Almond reads `KEY=`
-          // as the variable not being there at all.
-          fieldStates.UPSTREAM_SERVERS.enabled = true;
-          assertEq(resolveEffective("UPSTREAM_SERVERS").value, null);
+          assertEq(buildExport().includes("ALMOND_STORAGE_PATH=\n"), true);
+          fieldStates.ALMOND_UPSTREAM_SERVERS.enabled = true;
+          assertEq(resolveEffective("ALMOND_UPSTREAM_SERVERS").value, null);
         });
 
         add("switching a variable off drops its imported line", () => {
-          doc = buildDocument("BIND_ADDR=0.0.0.0:80\nSTORAGE_PATH=./files\n");
+          doc = buildDocument("ALMOND_BIND_ADDR=0.0.0.0:80\nALMOND_STORAGE_PATH=./files\n");
           loadFromDocument();
-          assertEq(fieldStates.BIND_ADDR.enabled, true);
-          fieldStates.BIND_ADDR.enabled = false;
-          assertEq(buildExport(), "STORAGE_PATH=./files\n");
-          assertEq(resolveEffective("BIND_ADDR").value, "127.0.0.1:3000");
+          assertEq(fieldStates.ALMOND_BIND_ADDR.enabled, true);
+          fieldStates.ALMOND_BIND_ADDR.enabled = false;
+          assertEq(buildExport(), "ALMOND_STORAGE_PATH=./files\n");
+          assertEq(resolveEffective("ALMOND_BIND_ADDR").value, "127.0.0.1:3000");
         });
 
         return cases;

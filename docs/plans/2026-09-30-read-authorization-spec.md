@@ -20,10 +20,10 @@ contract. No code has been changed yet.
   authorization, whatever the source: upload, explicit mirror, native S3,
   serve-files, upstream-cache hit, in-flight download, new upstream fetch, or
   known upstream miss. One gate runs before `resolve_blob`.
-- **Configuration (D2):** One new switch, `READ_ACCESS=public|whitelist|wot|dvm`.
-  The default `public` keeps today's anonymous behavior.
-- **Access groups (D3):** anonymous, `ALLOWED_NPUBS`, web of trust, announced
-  DVMs. The intended deployment is `READ_ACCESS=whitelist`.
+- **Configuration (D2):** One new switch, `ALMOND_READ_ACCESS=public|whitelist|wot|dvm`
+  (CLI `--read-access`). The default `public` keeps today's anonymous behavior.
+- **Access groups (D3):** anonymous, `ALMOND_ALLOWED_NPUBS`, web of trust, announced
+  DVMs. The intended deployment is `ALMOND_READ_ACCESS=whitelist`.
 - **Errors (D4):** 401 with `WWW-Authenticate: Nostr` when the credential is
   missing or invalid; 403 when the credential is valid but the signer is not
   permitted. This applies to the read path only.
@@ -56,14 +56,14 @@ contract. No code has been changed yet.
   `Authorized` already carries the token's expiration.
   [`src/services/auth.rs`](../../src/services/auth.rs) parses and verifies events
   and applies the pubkey, TTL, and server-binding checks.
-- Web-of-trust membership is built from `ALLOWED_NPUBS` as roots
+- Web-of-trust membership is built from `ALMOND_ALLOWED_NPUBS` as roots
   (`refresh_trust_network`). DVM membership is cached only for positive results.
   An unknown key triggers a live relay lookup (`check_dvm_announcement`) each
   time it is checked.
 - The WoT refresh job ([`src/main.rs`](../../src/main.rs)), the DVM refresh job,
-  and the `DVM_ALLOWED_KINDS` validation ([`src/config.rs`](../../src/config.rs))
+  and the `ALMOND_DVM_KINDS` validation ([`src/config.rs`](../../src/config.rs))
   currently look only at upload, mirror, and custom-origin settings.
-- `UPSTREAM_MODE` accepts `proxy`, `redirect`, and `redirect_and_cache`.
+- `ALMOND_UPSTREAM_MODE` accepts `proxy`, `redirect`, and `redirect_and_cache`.
   Unknown values fall back to `proxy`.
 - The outbound header allowlists in [`src/helpers.rs`](../../src/helpers.rs)
   do not forward the incoming `Authorization` header.
@@ -88,7 +88,7 @@ Primary sources:
 5. GET/HEAD `x` tags are optional. If present, the requested hash must be among
    them.
 6. `server` tags are optional. If present, at least one must match Almond's
-   domain. `AUTH_REQUIRE_SERVER_TAG=true` additionally makes them mandatory.
+   domain. `ALMOND_AUTH_REQUIRE_SERVER_TAG=true` additionally makes them mandatory.
 7. Read tokens are reusable until they expire. Repeated HEAD, conditional, and
    range requests may present the same token.
 8. BUD-01 lists 401 for missing or invalid auth and 403 for policy denial.
@@ -97,7 +97,7 @@ Primary sources:
    `Access-Control-Allow-Origin: *`. An OPTIONS preflight allows `Authorization`
    and does not itself require a token.
 
-A deployment with `READ_ACCESS` other than `public` is not a transparent
+A deployment with `ALMOND_READ_ACCESS` other than `public` is not a transparent
 Local Blossom Cache. That profile requires reads without an Authorization
 header.
 
@@ -107,25 +107,25 @@ header.
 
 One new switch, parsed strictly:
 
-| `READ_ACCESS` | Admits | Auth mode reused |
+| `ALMOND_READ_ACCESS` | Admits | Auth mode reused |
 | --- | --- | --- |
 | `public` (default) | Anyone, no token required; today's behavior | none (gate inactive) |
-| `whitelist` | Valid `t=get` token whose signer is in `ALLOWED_NPUBS` | `AuthMode::Strict` |
-| `wot` | Valid token; signer is in `ALLOWED_NPUBS` or in the web of trust | `AuthMode::WotOnly` |
-| `dvm` | Valid token; signer is in `ALLOWED_NPUBS` or is an announced DVM | `AuthMode::DvmOnly` |
+| `whitelist` | Valid `t=get` token whose signer is in `ALMOND_ALLOWED_NPUBS` | `AuthMode::Strict` |
+| `wot` | Valid token; signer is in `ALMOND_ALLOWED_NPUBS` or in the web of trust | `AuthMode::WotOnly` |
+| `dvm` | Valid token; signer is in `ALMOND_ALLOWED_NPUBS` or is an announced DVM | `AuthMode::DvmOnly` |
 
 Startup rules:
 
-- An unknown `READ_ACCESS` value is a startup error. It must never fall back
-  silently, so `FeatureMode::from_str_with_default` must not be used for it.
-- `READ_ACCESS=whitelist` with an empty or entirely unparseable
-  `ALLOWED_NPUBS` is a startup error.
-- `READ_ACCESS=dvm` requires `DVM_ALLOWED_KINDS`, like the existing DVM feature
+- An unknown `ALMOND_READ_ACCESS` value is a startup error, like every other
+  enum setting. It must never fall back silently.
+- `ALMOND_READ_ACCESS=whitelist` with an empty `ALMOND_ALLOWED_NPUBS` is a
+  startup error (an invalid npub is already a startup error).
+- `ALMOND_READ_ACCESS=dvm` requires `ALMOND_DVM_KINDS`, like the existing DVM feature
   modes. Extend that validation and the DVM refresh-job condition.
-- `READ_ACCESS=wot` must start the WoT refresh job. With an empty
-  `ALLOWED_NPUBS` the web of trust has no roots and admits nobody. This fails
+- `ALMOND_READ_ACCESS=wot` must start the WoT refresh job. With an empty
+  `ALMOND_ALLOWED_NPUBS` the web of trust has no roots and admits nobody. This fails
   closed; per D2 it is not a startup error, and it must be documented.
-- `READ_ACCESS` other than `public` together with `UPSTREAM_MODE=redirect` or
+- `ALMOND_READ_ACCESS` other than `public` together with `ALMOND_UPSTREAM_MODE=redirect` or
   `redirect_and_cache` is a startup error (D5).
 - Existing upload, mirror, custom-origin, and delete configuration and their
   semantics are unchanged.
@@ -135,27 +135,27 @@ Proposed `.env.example` block (in the authorization section):
 ```dotenv
 # Blob GET/HEAD access, including cache hits and upstream fetches.
 # public:    anonymous access (default, current behavior)
-# whitelist: signed t=get event; signer must be in ALLOWED_NPUBS
-# wot:       signed t=get event; signer in ALLOWED_NPUBS or its web of trust
-# dvm:       signed t=get event; signer in ALLOWED_NPUBS or an announced DVM
-#            (requires DVM_ALLOWED_KINDS; unknown keys may cause one relay
+# whitelist: signed t=get event; signer must be in ALMOND_ALLOWED_NPUBS
+# wot:       signed t=get event; signer in ALMOND_ALLOWED_NPUBS or its web of trust
+# dvm:       signed t=get event; signer in ALMOND_ALLOWED_NPUBS or an announced DVM
+#            (requires ALMOND_DVM_KINDS; unknown keys may cause one relay
 #            lookup per request)
-# Any value other than public requires UPSTREAM_MODE=proxy.
-READ_ACCESS=public
+# Any value other than public requires ALMOND_UPSTREAM_MODE=proxy.
+ALMOND_READ_ACCESS=public
 ```
 
 Intended deployment:
 
 ```dotenv
-READ_ACCESS=whitelist
-ALLOWED_NPUBS=npub1...
-UPSTREAM_MODE=proxy
+ALMOND_READ_ACCESS=whitelist
+ALMOND_ALLOWED_NPUBS=npub1...
+ALMOND_UPSTREAM_MODE=proxy
 ```
 
 ### Gate placement (D1)
 
 - One authorization call in `handle_file_request`, after hash parsing and before
-  `resolve_blob`. When `READ_ACCESS=public` it returns immediately and changes
+  `resolve_blob`. When `ALMOND_READ_ACCESS=public` it returns immediately and changes
   nothing.
 - A rejected request performs no index lookup that could publish metadata and
   no native S3 lookup or publication. It does not read or mutate the upstream
@@ -172,7 +172,7 @@ UPSTREAM_MODE=proxy
 
 - Add a non-destructive `Operation::Read` to
   [`src/services/authorization.rs`](../../src/services/authorization.rs). It maps
-  the `READ_ACCESS` value to the auth modes in the configuration table.
+  the `ALMOND_READ_ACCESS` value to the auth modes in the configuration table.
 - `bind` for reads validates `t=get` and optional `x` scoping against the
   requested hash (new `validate_get_auth` in
   [`src/services/auth.rs`](../../src/services/auth.rs)). It consumes no
@@ -195,7 +195,7 @@ UPSTREAM_MODE=proxy
 
 ### Delivery (D5)
 
-While `READ_ACCESS` is not `public`, upstream content is delivered only through
+While `ALMOND_READ_ACCESS` is not `public`, upstream content is delivered only through
 Almond's proxy path. Redirect modes are rejected at startup, so no protected
 request can return an upstream URL. Proxying does not make a blob that is
 already public upstream private; it keeps delivery through Almond under the gate.
@@ -224,7 +224,7 @@ already public upstream private; it keeps delivery through Almond under the gate
 
 ### HTTP caching (D7)
 
-- When `READ_ACCESS` is not `public`, every blob GET/HEAD response is protected.
+- When `ALMOND_READ_ACCESS` is not `public`, every blob GET/HEAD response is protected.
   This includes HEAD, 200, 206, 304, 416, 401, 403, 404, and other errors. Each
   is sent with `Cache-Control: private, no-store` and without `Expires`.
   Incompatible cache headers from upstream proxy responses are replaced.
@@ -232,7 +232,7 @@ already public upstream private; it keeps delivery through Almond under the gate
   responses. Do not change each builder separately.
 - ETag, `Accept-Ranges`, content type and length, `Content-Range`, and `Sunset`
   are preserved.
-- With `READ_ACCESS=public`, today's headers are unchanged.
+- With `ALMOND_READ_ACCESS=public`, today's headers are unchanged.
 - Almond's internal blob store and request coalescing are unchanged. HTTP
   `no-store` concerns HTTP caches, not Almond's own storage.
 
@@ -262,17 +262,17 @@ The implementation and user-facing documentation must state these explicitly:
 
 | Alternative | Reason for rejection |
 | --- | --- |
-| **B: protect only upstream work on misses** (`UPSTREAM_FETCH_ACCESS`) | It protects fetch cost, not content. After one authorized fetch, a blob is publicly readable from the cache. The goal is a server whose blob reads are restricted as a whole. |
-| **C: protect upstream-derived content** (`UPSTREAM_READ_ACCESS`) | It leaves native uploads public. A later upload of the same hash takes precedence over the cache entry and makes it public. Checking by source also needs source-aware gating inside the resolver instead of one gate. |
-| `FEATURE_READ_AUTH=off\|public\|wot` naming | `off` would mean open, the opposite of other feature gates. `public` would silently become a whitelist whenever `ALLOWED_NPUBS` is set. |
+| **B: protect only upstream work on misses** (`ALMOND_UPSTREAM_FETCH_ACCESS`) | It protects fetch cost, not content. After one authorized fetch, a blob is publicly readable from the cache. The goal is a server whose blob reads are restricted as a whole. |
+| **C: protect upstream-derived content** (`ALMOND_UPSTREAM_READ_ACCESS`) | It leaves native uploads public. A later upload of the same hash takes precedence over the cache entry and makes it public. Checking by source also needs source-aware gating inside the resolver instead of one gate. |
+| `FEATURE_READ_AUTH=off\|public\|wot` naming | `off` would mean open, the opposite of other feature gates. `public` would silently become a whitelist whenever `ALMOND_ALLOWED_NPUBS` is set. |
 | Signed-but-unrestricted access group | Anyone can generate keys, so it offers no protection against deliberate fetch load. |
 | Always 401 for rejected reads | Clients could not tell a missing or invalid credential from a policy denial. |
 | Redirects while protected | An authorized redirect hands out an upstream URL that works without Almond's authorization. |
 | Admission-only authorization | Rejected in favor of enforcing expiry mid-stream. This deviates from the review recommendation and costs noticeably more to implement. |
 | `private, no-cache` | Browsers would keep protected bytes on disk. `no-store` is the stricter choice. |
 
-Only `READ_ACCESS` is part of the delivery. `UPSTREAM_FETCH_ACCESS` and
-`UPSTREAM_READ_ACCESS` are not implemented.
+Only `ALMOND_READ_ACCESS` is part of the delivery. `ALMOND_UPSTREAM_FETCH_ACCESS` and
+`ALMOND_UPSTREAM_READ_ACCESS` are not implemented.
 
 ## Out of scope
 
@@ -290,12 +290,12 @@ Only `READ_ACCESS` is part of the delivery. `UPSTREAM_FETCH_ACCESS` and
 
 These are pre-existing issues. This work does not change them.
 
-1. `verify_event_with_policy` does not use `AUTH_CLOCK_SKEW_SECS`, so future
+1. `verify_event_with_policy` does not use `ALMOND_AUTH_CLOCK_SKEW`, so future
    events are rejected strictly. Reads inherit this. Do not document skew
    tolerance for reads.
-2. `.env.example` describes `AUTH_MAX_TTL_SECS=0` as disabling the cap, but the
-   code treats zero as a maximum TTL of zero. Do not recommend a zero cap for
-   read tokens until this is resolved.
+2. `ALMOND_AUTH_MAX_TTL` must be greater than zero; `0` is a startup error
+   (older docs wrongly described it as disabling the cap). Read tokens are
+   therefore always capped.
 3. Cashu download charging happens in `serve_blob`. Upstream response paths do
    not generally go through it. This work adds no new payment guarantee.
 4. `AppError` serialization currently sends no `WWW-Authenticate` header. The
@@ -305,18 +305,18 @@ These are pre-existing issues. This work does not change them.
 
 ### Configuration
 
-- Without `READ_ACCESS`, or with `READ_ACCESS=public`, every blob request
+- Without `ALMOND_READ_ACCESS`, or with `ALMOND_READ_ACCESS=public`, every blob request
   behaves as today. That covers status, body, and headers, including
   `public, max-age=31536000, immutable`.
-- An unknown value fails startup. `whitelist` with no usable `ALLOWED_NPUBS`
-  fails startup. `dvm` without `DVM_ALLOWED_KINDS` fails startup.
-- A non-public value with `UPSTREAM_MODE=redirect` or `redirect_and_cache`
+- An unknown value fails startup. `whitelist` with an empty `ALMOND_ALLOWED_NPUBS`
+  fails startup. `dvm` without `ALMOND_DVM_KINDS` fails startup.
+- A non-public value with `ALMOND_UPSTREAM_MODE=redirect` or `redirect_and_cache`
   fails startup.
 - `wot` starts the WoT refresh job, and `dvm` starts the DVM refresh job.
 
 ### Admission
 
-- With `READ_ACCESS=whitelist`, all of the following hold for each source:
+- With `ALMOND_READ_ACCESS=whitelist`, all of the following hold for each source:
   upload, explicit mirror, native S3 (including unindexed objects), serve-files,
   upstream-cache hit, in-flight download, new upstream fetch, and known upstream
   miss.
@@ -371,7 +371,7 @@ These are pre-existing issues. This work does not change them.
 | ID | Decision | Choice | Consequence |
 | --- | --- | --- | --- |
 | D1 | Protection scope | **A:** every blob GET/HEAD from any source; one gate before `resolve_blob` | All sources and upstream work are protected. Embeds need auth-capable clients. |
-| D2 | Configuration | **`READ_ACCESS=public\|whitelist\|wot\|dvm`**, default `public` | Unknown values and `whitelist` without `ALLOWED_NPUBS` are startup errors. |
+| D2 | Configuration | **`ALMOND_READ_ACCESS=public\|whitelist\|wot\|dvm`**, default `public` | Unknown values and `whitelist` without `ALMOND_ALLOWED_NPUBS` are startup errors. |
 | D3 | Access groups | **anonymous, whitelist, WoT, DVM**; intended deployment `whitelist` | DVM relay load per unknown key is accepted and documented. There is no signed-unrestricted group. |
 | D4 | Error responses | **401** (+ `WWW-Authenticate: Nostr`) for credential problems, **403** for policy denial | Applies to the read path only. Existing operations are unchanged. |
 | D5 | Upstream delivery | **Proxy only** while protected | Redirect modes together with protection are a startup error. |
@@ -382,7 +382,7 @@ These are pre-existing issues. This work does not change them.
 
 - [`src/config.rs`](../../src/config.rs), [`src/models.rs`](../../src/models.rs),
   [`src/main.rs`](../../src/main.rs):
-  - strict `READ_ACCESS` parsing and startup validation (whitelist list, DVM
+  - strict `ALMOND_READ_ACCESS` parsing and startup validation (whitelist list, DVM
     kinds, redirect conflict);
   - `AppState` wiring;
   - WoT and DVM job conditions.
@@ -401,6 +401,6 @@ These are pre-existing issues. This work does not change them.
   header finalization. No caller authentication is added there.
 - `.env.example`, `README.md`, `CONTEXT.md`, and
   [`src/config-editor.html`](../../src/config-editor.html):
-  - the `READ_ACCESS` contract and the startup rules;
+  - the `ALMOND_READ_ACCESS` contract and the startup rules;
   - the consequences above;
   - the CDN purge note for rollout.

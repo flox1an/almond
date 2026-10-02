@@ -321,7 +321,9 @@ pub async fn enforce_storage_limits_at(state: &AppState, now: u64) {
     let mut total_files = remaining.len();
 
     for (sha256, metadata) in capacity_eviction_order(&remaining) {
-        if total_size <= state.max_total_size && total_files <= state.max_total_files {
+        let size_ok = state.max_total_size == 0 || total_size <= state.max_total_size;
+        let files_ok = state.max_total_files == 0 || total_files <= state.max_total_files;
+        if size_ok && files_ok {
             break;
         }
         if delete_cleanup_candidate(state, &sha256, &metadata, "capacity").await {
@@ -353,46 +355,41 @@ fn capacity_eviction_order(
 fn expiration_reason(state: &AppState, metadata: &FileMetadata, now: u64) -> Option<&'static str> {
     expiration_reason_for(
         metadata,
-        state.max_file_age_days,
-        state.max_upstream_cache_ttl_days,
+        state.max_file_age_secs,
+        state.max_upstream_cache_ttl_secs,
         now,
     )
 }
 
 /// Earliest deadline at which cleanup deletes this blob under the current
 /// policy, with its reason label. Several retention claims (client
-/// `X-Expiration`, `MAX_FILE_AGE_DAYS`) resolve to the earliest one.
+/// `X-Expiration`, `ALMOND_UPLOAD_MAX_AGE`) resolve to the earliest one.
+/// Limits are in seconds; 0 disables a limit.
 fn cleanup_deadline(
     metadata: &FileMetadata,
-    max_file_age_days: u64,
-    max_upstream_cache_ttl_days: u64,
+    max_file_age_secs: u64,
+    max_upstream_cache_ttl_secs: u64,
 ) -> Option<(u64, &'static str)> {
-    let age_deadline = |days: u64| {
-        (days > 0).then(|| {
-            metadata
-                .created_at
-                .saturating_add(days.saturating_mul(86_400))
-        })
-    };
+    let age_deadline = |secs: u64| (secs > 0).then(|| metadata.created_at.saturating_add(secs));
     match metadata.origin {
         BlobOrigin::Upload => metadata
             .expiration
             .map(|expiration| (expiration, "expiration"))
             .into_iter()
-            .chain(age_deadline(max_file_age_days).map(|deadline| (deadline, "upload_age")))
+            .chain(age_deadline(max_file_age_secs).map(|deadline| (deadline, "upload_age")))
             .min_by_key(|(deadline, _)| *deadline),
-        BlobOrigin::UpstreamCache => age_deadline(max_upstream_cache_ttl_days)
+        BlobOrigin::UpstreamCache => age_deadline(max_upstream_cache_ttl_secs)
             .map(|deadline| (deadline, "upstream_cache_ttl")),
     }
 }
 
 fn expiration_reason_for(
     metadata: &FileMetadata,
-    max_file_age_days: u64,
-    max_upstream_cache_ttl_days: u64,
+    max_file_age_secs: u64,
+    max_upstream_cache_ttl_secs: u64,
     now: u64,
 ) -> Option<&'static str> {
-    cleanup_deadline(metadata, max_file_age_days, max_upstream_cache_ttl_days)
+    cleanup_deadline(metadata, max_file_age_secs, max_upstream_cache_ttl_secs)
         .filter(|(deadline, _)| now >= *deadline)
         .map(|(_, reason)| reason)
 }
@@ -401,9 +398,9 @@ fn expiration_reason_for(
 /// upload. Upstream-cache copies announce none, because after eviction the
 /// same URL is transparently refetched from upstream.
 #[must_use]
-pub fn sunset_expiration(metadata: &FileMetadata, max_file_age_days: u64) -> Option<u64> {
+pub fn sunset_expiration(metadata: &FileMetadata, max_file_age_secs: u64) -> Option<u64> {
     match metadata.origin {
-        BlobOrigin::Upload => cleanup_deadline(metadata, max_file_age_days, 0).map(|(at, _)| at),
+        BlobOrigin::Upload => cleanup_deadline(metadata, max_file_age_secs, 0).map(|(at, _)| at),
         BlobOrigin::UpstreamCache => None,
     }
 }
@@ -537,7 +534,7 @@ pub fn parse_range_header(header_value: &str, total_size: u64) -> RangeSpec {
 
 /// Clean up abandoned chunked uploads and their associated files
 pub async fn cleanup_abandoned_chunks(state: &AppState) {
-    let timeout_duration = std::time::Duration::from_secs(state.chunk_cleanup_timeout_minutes * 60);
+    let timeout_duration = state.chunk_cleanup_timeout;
 
     // Remove abandoned uploads and clean up their files
     for chunk_upload in state
@@ -578,7 +575,7 @@ async fn cleanup_orphaned_chunk_files(state: &AppState) {
         return;
     }
 
-    let timeout_duration = std::time::Duration::from_secs(state.chunk_cleanup_timeout_minutes * 60);
+    let timeout_duration = state.chunk_cleanup_timeout;
     let cutoff_time = SystemTime::now() - timeout_duration;
 
     let mut entries = match fs::read_dir(&chunks_dir).await {
@@ -636,8 +633,7 @@ pub async fn cleanup_expired_failed_lookups(state: &AppState) {
 
 /// Clean up expired blossom server list cache entries
 pub async fn cleanup_expired_blossom_server_lists(state: &AppState) {
-    let cache_ttl_duration =
-        std::time::Duration::from_secs(state.blossom_server_list_cache_ttl_hours * 3600);
+    let cache_ttl_duration = state.blossom_server_list_cache_ttl;
 
     let mut cache = state.blossom_server_lists.write().await;
     let initial_count = cache.len();
@@ -768,21 +764,22 @@ mod storage_tests {
 
     #[test]
     fn expiration_policies_remain_origin_specific() {
-        let now = 86_400;
+        let day = 86_400;
+        let now = day;
         let upload = metadata(BlobOrigin::Upload, 0, None);
         let cache = metadata(BlobOrigin::UpstreamCache, 0, None);
 
-        assert_eq!(expiration_reason_for(&upload, 0, 1, now), None);
+        assert_eq!(expiration_reason_for(&upload, 0, day, now), None);
         assert_eq!(
-            expiration_reason_for(&cache, 0, 1, now),
+            expiration_reason_for(&cache, 0, day, now),
             Some("upstream_cache_ttl")
         );
         assert_eq!(
-            expiration_reason_for(&upload, 1, 0, now),
+            expiration_reason_for(&upload, day, 0, now),
             Some("upload_age")
         );
         assert_eq!(
-            expiration_reason_for(&metadata(BlobOrigin::Upload, now, Some(now)), 1, 1, now,),
+            expiration_reason_for(&metadata(BlobOrigin::Upload, now, Some(now)), day, day, now,),
             Some("expiration")
         );
     }
@@ -793,11 +790,11 @@ mod storage_tests {
         // Persisted deadline of 10 days, but the operator lowered the age limit.
         let upload = metadata(BlobOrigin::Upload, 0, Some(10 * day));
         assert_eq!(sunset_expiration(&upload, 0), Some(10 * day));
-        let sunset = sunset_expiration(&upload, 3).unwrap();
+        let sunset = sunset_expiration(&upload, 3 * day).unwrap();
         assert_eq!(sunset, 3 * day);
-        assert_eq!(expiration_reason_for(&upload, 3, 0, sunset - 1), None);
+        assert_eq!(expiration_reason_for(&upload, 3 * day, 0, sunset - 1), None);
         assert_eq!(
-            expiration_reason_for(&upload, 3, 0, sunset),
+            expiration_reason_for(&upload, 3 * day, 0, sunset),
             Some("upload_age")
         );
 
@@ -807,7 +804,7 @@ mod storage_tests {
         );
         // Cache copies are refetched from upstream after eviction.
         let cache = metadata(BlobOrigin::UpstreamCache, 0, None);
-        assert_eq!(sunset_expiration(&cache, 3), None);
+        assert_eq!(sunset_expiration(&cache, 3 * day), None);
     }
 
     #[test]
