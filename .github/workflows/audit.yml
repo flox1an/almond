@@ -1,0 +1,52 @@
+# Daily dependency audit. When cargo audit reports vulnerabilities and no `dependencies`
+# issue is open, it opens one issue labeled for the Orca issue worker. It never changes code.
+name: Dependency audit
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit and open issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cargo audit --json > audit.json || true
+          count=$(jq '.vulnerabilities.count' audit.json)
+          echo "vulnerabilities: $count"
+          if [ "$count" = null ]; then cat audit.json; exit 1; fi
+          if [ "$count" = 0 ]; then exit 0; fi
+          if [ "$(gh issue list --label dependencies --state open --json number --jq length)" != 0 ]; then
+            echo "A dependencies issue is already open."
+            exit 0
+          fi
+          {
+            echo "## Problem"
+            echo
+            echo "The daily \`cargo audit\` reports $count vulnerabilities."
+            echo
+            echo '```'
+            cargo audit || true
+            echo '```'
+            echo
+            echo "## Acceptance criteria"
+            echo
+            echo "- [ ] \`cargo audit\` reports 0 vulnerabilities, or the PR explains each remaining one (no fix released, needs a major upgrade)."
+            echo "- [ ] \`cargo fmt --check\`, \`cargo clippy --all-targets -- -D warnings\`, \`cargo build\` and \`cargo test\` pass."
+          } > body.md
+          truncate -s '<60000' body.md
+          gh issue create --title "Security: cargo audit reports $count vulnerabilities" \
+            --label dependencies --label type:maintenance --label ready-for-agent --body-file body.md
