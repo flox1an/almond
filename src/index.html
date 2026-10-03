@@ -5,60 +5,207 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>almond - Any Large Media ON Demand</title>
     <style>
+      :root {
+        --pink: rgb(255, 73, 133);
+        --light: #ffc2d6;
+        --dim: #9a5c72;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
       body {
-        height: 100dvh;
+        margin: 0;
+        overflow-x: hidden;
+      }
+      body {
+        min-height: 100dvh;
         background-color: black;
-        background: linear-gradient(to bottom, #111, #000);
+        background: radial-gradient(ellipse at top, #1d0a12, #000 70%) fixed;
+        color: var(--pink);
+        font-family: "Courier New", Courier, monospace;
+      }
+      /* static CRT scanlines */
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background: repeating-linear-gradient(
+          to bottom,
+          rgba(255, 255, 255, 0.025) 0 1px,
+          transparent 1px 3px
+        );
+      }
+      #petals {
+        position: fixed;
+        inset: 0;
         overflow: hidden;
+        pointer-events: none;
+      }
+      .petal {
+        position: absolute;
+        top: -20px;
+        left: var(--x);
+        width: var(--s);
+        height: calc(var(--s) * 0.75);
+        border-radius: 150% 0 150% 0;
+        background: radial-gradient(circle at 30% 30%, #ffe0ea, var(--pink));
+        opacity: 0.55;
+        animation: fall var(--d) linear var(--w) infinite;
+      }
+      @keyframes fall {
+        0% {
+          transform: translate(0, 0) rotate(0deg);
+        }
+        50% {
+          transform: translate(var(--drift), 55vh) rotate(200deg);
+        }
+        100% {
+          transform: translate(0, 110vh) rotate(400deg);
+        }
       }
       #terminal {
-        color: rgb(255, 73, 133);
-        font-family: "Courier New", Courier, monospace;
-        white-space: pre;
-        letter-spacing: 0.1em;
+        position: relative;
+        max-width: 60rem;
         padding: 15px;
-        overflow-y: auto;
-
+        letter-spacing: 0.05em;
+        line-height: 1.5;
+        overflow-wrap: anywhere;
+      }
+      #logo {
+        margin: 0 0 1em;
+        font-size: min(16px, 3.2vw);
+        letter-spacing: 0;
+        line-height: 1.15;
+        text-shadow: 0 0 6px rgba(255, 73, 133, 0.7), 0 0 18px rgba(255, 73, 133, 0.35);
+      }
+      p {
+        margin: 0 0 1em;
+      }
+      .dim {
+        color: var(--dim);
+        margin-bottom: 0.4em;
+      }
+      b,
+      dt {
+        color: var(--light);
+        font-weight: normal;
+      }
+      code {
+        font-family: inherit;
+        color: #fff;
+      }
+      dl {
+        margin: 0 0 1em;
+      }
+      dl div {
+        display: grid;
+        grid-template-columns: 9.5em 1fr;
+        gap: 0 1em;
+        margin-bottom: 0.25em;
+      }
+      dd {
+        margin: 0;
       }
       #cursor {
         display: inline-block;
         animation: blink 1s step-end infinite;
-        transition: opacity 0.5s ease;
       }
       ::selection {
-        background-color: rgb(255, 73, 133);
-        color: white; /* For better visibility on red background */
+        background-color: var(--pink);
+        color: white;
       }
       @keyframes blink {
         50% {
           opacity: 0;
         }
       }
+      @media (max-width: 600px) {
+        dl div {
+          grid-template-columns: 1fr;
+          margin-bottom: 0.6em;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #petals {
+          display: none;
+        }
+        #cursor {
+          animation: none;
+        }
+      }
     </style>
   </head>
   <body>
-    <div id="terminal">
-          .__                             .___
-   _____  |  |   _____   ____   ____    __| _/
-   \__  \ |  |  /     \ /  _ \ /    \  / __ | 
-    / __ \|  |_|  Y Y  (  <_> )   |  \/ /_/ | 
-   (____  /____/__|_|  /\____/|___|  /\____ | 
-        \/           \/            \/      \/             
-        <span id="text"></span><span id="cursor">▊</span></div>
+    <div id="petals" aria-hidden="true"></div>
+    <main id="terminal">
+<pre id="logo" aria-label="almond">       .__                             .___
+_____  |  |   _____   ____   ____    __| _/
+\__  \ |  |  /     \ /  _ \ /    \  / __ |
+ / __ \|  |_|  Y Y  (  &lt;_&gt; )   |  \/ /_/ |
+(____  /____/__|_|  /\____/|___|  /\____ |
+     \/           \/            \/      \/</pre>
+      <div id="text">
+        <p class="dim"># what is this</p>
+        <p><b>Any Large Media ON Demand</b> - a blossom media server for nostr, written in rust.</p>
+        <p class="dim"># what it does</p>
+        <dl>
+          <div><dt>🌸 blossom</dt><dd>BUD-01 02 03 04 06 07 09 10 11 12</dd></div>
+          <div><dt>🌸 upload</dt><dd><code>PUT /upload</code>, resumable <code>PATCH /upload</code>, <code>PUT /mirror</code> from other servers (follows HLS playlists)</dd></div>
+          <div><dt>🌸 download</dt><dd><code>GET /&lt;sha256&gt;</code> with any file extension, range requests, ETag and immutable caching</dd></div>
+          <div><dt>🌸 delete</dt><dd><code>DELETE /&lt;sha256&gt;</code> with a single-use BUD-11 authorization from an allowlisted npub</dd></div>
+          <div><dt>🌸 list</dt><dd><code>GET /list/&lt;pubkey&gt;</code> with cursor pagination, for allowlisted npubs</dd></div>
+          <div><dt>🌸 filter</dt><dd><code>GET /filter</code>: a compact filter (binary fuse or bloom) of every stored hash</dd></div>
+          <div><dt>🌸 storage</dt><dd>local filesystem or an optional S3-compatible bucket; no database, the index lives in memory</dd></div>
+          <div><dt>🌸 retention</dt><dd>built for temporary blobs: optional max age, size and count limits; oldest go first (FIFO)</dd></div>
+          <div><dt>🌸 access</dt><dd>anyone with a nostr key by default; or allowlisted npubs, their web of trust, DVMs, or off</dd></div>
+          <div><dt>🌸 upstream</dt><dd>optional fallback to other blossom servers (proxy, redirect, redirect and cache); <code>?xs=</code> / <code>?as=</code> hints are off by default</dd></div>
+          <div><dt>🌸 payments</dt><dd>optional cashu ecash per MiB (BUD-07), off by default</dd></div>
+          <div><dt>🌸 reports</dt><dd>optional BUD-09 reports that quarantine or delete a blob, off by default</dd></div>
+        </dl>
+        <p>blobs may disappear - keep your own copy.</p>
+        <p>good luck! 🎉</p>
+      </div>
+      <span id="cursor">▊</span>
+    </main>
     <script>
-      const text =
-
-        "\n 🌸 blossom api (BUD-1, BUD-2, BUD-4)\n 🌸 blobs will disappear - first in, first out\n 🌸 no ownership, no manual delete\n 🌸 filesystem only, no database\n 🌸 web of trust authorization\n\ngood luck! 🎉\n";
-      let index = 0;
-      const terminal = document.getElementById("text");
-
-      (function type() {
-        if (index < text.length) {
-          terminal.textContent += text.charAt(index);
-          index++;
-          setTimeout(type, 10 + Math.random() * 50);
+      if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        const petals = document.getElementById("petals");
+        for (let i = 0; i < 18; i++) {
+          const petal = document.createElement("i");
+          const duration = 10 + Math.random() * 12;
+          petal.className = "petal";
+          petal.style.cssText =
+            `--x:${Math.random() * 100}%;--s:${6 + Math.random() * 8}px;` +
+            `--d:${duration}s;--w:${-Math.random() * duration}s;--drift:${(Math.random() - 0.5) * 30}vw`;
+          petals.append(petal);
         }
-      })();
+
+        // Type the static text back in, node by node; without JS it is simply shown.
+        const cursor = document.getElementById("cursor");
+        const walker = document.createTreeWalker(document.getElementById("text"), NodeFilter.SHOW_TEXT);
+        const nodes = [];
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          if (node.data.trim()) nodes.push([node, Array.from(node.data)]);
+        }
+        nodes.forEach(([node]) => (node.data = ""));
+
+        let n = 0;
+        let c = 0;
+        (function type() {
+          if (n >= nodes.length) return;
+          const [node, chars] = nodes[n];
+          if (c === 0) node.after(cursor);
+          node.data += chars[c++];
+          if (c >= chars.length) {
+            n++;
+            c = 0;
+          }
+          setTimeout(type, Math.random() * 10);
+        })();
+      }
     </script>
   </body>
 </html>

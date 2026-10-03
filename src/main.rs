@@ -730,3 +730,58 @@ async fn run(cfg: config::Config) {
         }
     }
 }
+
+#[cfg(test)]
+mod homepage_tests {
+    /// The homepage is a fully static, self-contained page: every fact on it
+    /// is hand-written prose. It is public and must not call back into the
+    /// server it is served from, so drift here is a silent information leak
+    /// or a stale claim about Almond's capabilities.
+    const INDEX: &str = include_str!("index.html");
+
+    #[test]
+    fn no_network_calls_or_external_resources() {
+        for forbidden in [
+            "http://",
+            "https://",
+            "fetch",
+            "XMLHttpRequest",
+            "WebSocket",
+            "EventSource",
+            "sendBeacon",
+            "src=",
+            "href=",
+        ] {
+            assert!(
+                !INDEX.contains(forbidden),
+                "homepage must not reference external resources or server endpoints: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn logo_typing_and_cursor_survived_the_redesign() {
+        assert!(INDEX.contains("id=\"logo\""));
+        assert!(INDEX.contains("id=\"cursor\""));
+        assert!(INDEX.contains("id=\"text\""));
+    }
+
+    #[test]
+    fn eye_candy_respects_reduced_motion() {
+        assert!(INDEX.contains("prefers-reduced-motion"));
+    }
+
+    #[test]
+    fn stale_claims_are_gone() {
+        for stale in [
+            "no manual delete",
+            "(BUD-1,", // the old incomplete BUD list
+            "filesystem only, no database",
+        ] {
+            assert!(
+                !INDEX.contains(stale),
+                "outdated claim is still on the homepage: {stale}"
+            );
+        }
+    }
+}
