@@ -389,7 +389,7 @@ For a Docker-managed named volume, no host-side ownership setup is needed:
 docker volume create almond-files
 docker run --rm -p 3000:3000 \
   -v almond-files:/app/files \
-  ghcr.io/flox1an/almond:v0.5.0
+  ghcr.io/flox1an/almond:v0.5.1
 ```
 
 For a host bind mount, prepare the directory with the image's numeric identity:
@@ -398,7 +398,7 @@ For a host bind mount, prepare the directory with the image's numeric identity:
 sudo install -d -o 10001 -g 10001 -m 0750 /data/almond
 docker run --rm -p 3000:3000 \
   -v /data/almond:/app/files \
-  ghcr.io/flox1an/almond:v0.5.0
+  ghcr.io/flox1an/almond:v0.5.1
 ```
 
 Migrate an existing bind mount once before upgrading to an image using this
@@ -418,7 +418,7 @@ the fixed-image default.
 ```yaml
 services:
   almond:
-    image: ghcr.io/flox1an/almond:v0.5.0
+    image: ghcr.io/flox1an/almond:v0.5.1
     user: "${PUID:-10001}:${PGID:-10001}"
     ports:
       - "3000:3000"
@@ -442,7 +442,7 @@ docker run --rm -p 3000:3000 \
   -v /data/almond:/app/files \
   -v /data/almond-state:/app/state \
   -e ALMOND_TLS_ENABLED=true \
-  ghcr.io/flox1an/almond:v0.5.0
+  ghcr.io/flox1an/almond:v0.5.1
 ```
 
 ### FIPS-enabled Docker Image

@@ -119,6 +119,10 @@ All write operations require a Nostr authorization event:
 Authorization: Nostr <base64-encoded-event>
 ```
 
+The token is decoded leniently: base64url and standard Base64, each with or
+without `=` padding (BUD-11 mandates unpadded base64url, but most deployed
+clients send standard padded Base64; see hzrd149/blossom#113).
+
 ### Event Requirements
 
 1. **Kind**: Must be `24242`

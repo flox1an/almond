@@ -1,4 +1,7 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD_NO_PAD_INDIFFERENT, URL_SAFE_NO_PAD_INDIFFERENT},
+    Engine as _,
+};
 use nostr_sdk::prelude::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info};
@@ -30,9 +33,12 @@ pub fn parse_auth_header(auth_header: &str) -> AppResult<Event> {
         ));
     }
 
+    // BUD-11 says base64url without padding, but most deployed clients send
+    // standard padded Base64 (blossom#113). Accept both alphabets, padded or not.
     let base64_str = &auth_header[6..]; // Remove "Nostr " prefix
-    let decoded_bytes = URL_SAFE_NO_PAD
+    let decoded_bytes = URL_SAFE_NO_PAD_INDIFFERENT
         .decode(base64_str)
+        .or_else(|_| STANDARD_NO_PAD_INDIFFERENT.decode(base64_str))
         .map_err(|e| AppError::Unauthorized(format!("Failed to decode base64: {}", e)))?;
 
     let json_str = String::from_utf8(decoded_bytes)
@@ -404,7 +410,8 @@ pub async fn is_pubkey_authorized(pubkey: &PublicKey, state: &AppState) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::engine::general_purpose::STANDARD;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    use base64::Engine;
 
     const TEST_HASH: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
 
@@ -820,35 +827,50 @@ mod tests {
         assert!(matches!(err, AppError::Unauthorized(_)));
     }
 
-    #[test]
-    fn test_parse_auth_header_valid_base64url_without_padding() {
+    /// Parse headers built with `engine` for event JSON of three consecutive
+    /// lengths (covers 0, 1 and 2 padding chars). Every char in `must_see` has
+    /// to appear in some encoding, proving alphabet and padding are exercised.
+    fn assert_parses_with(engine: &impl Engine, must_see: &[char]) {
         let keys = Keys::generate();
-        let event = build_event(&keys, vec![valid_expiration_tag()]);
-        let json = serde_json::to_string(&event).unwrap();
-        let b64 = URL_SAFE_NO_PAD.encode(json.as_bytes());
-        let header = format!("Nostr {b64}");
-        let parsed = parse_auth_header(&header).unwrap();
-        assert_eq!(parsed.id, event.id);
+        let mut seen = String::new();
+        // "~" (0x7E) yields 6-bit groups 62/63, i.e. '+'/'/' or '-'/'_'.
+        for content in ["~~~", "~~~~", "~~~~~"] {
+            let event = build_event_with_content(&keys, vec![valid_expiration_tag()], content);
+            let encoded = engine.encode(serde_json::to_string(&event).unwrap().as_bytes());
+            seen.push_str(&encoded);
+            let header = format!("Nostr {encoded}");
+            let parsed = parse_auth_header(&header).unwrap_or_else(|e| panic!("{header}: {e}"));
+            assert_eq!(parsed.id, event.id);
+        }
+        for c in must_see {
+            assert!(seen.contains(*c), "test data never produced {c:?}");
+        }
     }
 
     #[test]
-    fn test_parse_auth_header_rejects_padding() {
-        let keys = Keys::generate();
-        let event = build_event(&keys, vec![valid_expiration_tag()]);
-        let json = serde_json::to_string(&event).unwrap();
-        let header = format!("Nostr {}=", URL_SAFE_NO_PAD.encode(json.as_bytes()));
-        assert!(parse_auth_header(&header).is_err());
+    fn test_parse_auth_header_base64url_unpadded() {
+        assert_parses_with(&URL_SAFE_NO_PAD, &['-']);
     }
 
     #[test]
-    fn test_parse_auth_header_rejects_standard_alphabet() {
-        let keys = Keys::generate();
-        let event = build_event_with_content(&keys, vec![valid_expiration_tag()], "~~~");
-        let json = serde_json::to_string(&event).unwrap();
-        let standard = STANDARD.encode(json.as_bytes());
-        assert!(standard.contains('+'));
-        let header = format!("Nostr {standard}");
-        assert!(parse_auth_header(&header).is_err());
+    fn test_parse_auth_header_base64url_padded() {
+        assert_parses_with(&URL_SAFE, &['-', '=']);
+    }
+
+    #[test]
+    fn test_parse_auth_header_standard_padded() {
+        assert_parses_with(&STANDARD, &['+', '=']);
+    }
+
+    #[test]
+    fn test_parse_auth_header_standard_unpadded() {
+        assert_parses_with(&STANDARD_NO_PAD, &['+']);
+    }
+
+    #[test]
+    fn test_parse_auth_header_rejects_invalid_base64() {
+        let err = parse_auth_header("Nostr !!!").unwrap_err();
+        assert!(matches!(err, AppError::Unauthorized(_)));
     }
 
     // ── extract_domain tests ──
