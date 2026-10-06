@@ -2,6 +2,7 @@ use crate::constants::DEFAULT_MIME_TYPE;
 use crate::helpers::build_public_blob_url;
 use crate::metrics::Metrics;
 use crate::services::blob_index::BlobIndex;
+#[cfg(feature = "cashu")]
 use cdk::wallet::Wallet as CdkWallet;
 use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -351,6 +352,7 @@ pub struct AppState {
     pub cashu_price_per_mb: u64,
     pub cashu_accepted_mints: Vec<String>,
     pub cashu_wallet_path: PathBuf,
+    #[cfg(feature = "cashu")]
     pub cashu_wallet: Option<Arc<RwLock<CdkWallet>>>,
     /// Maximum parallel segment fetches per HLS mirror operation
     pub hls_mirror_concurrency: usize,

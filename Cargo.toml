@@ -5,12 +5,21 @@ edition = "2021"
 rust-version = "1.85"
 
 [[bin]]
+name = "almond"
+path = "src/main.rs"
+doc = false
+
+[[bin]]
 name = "inspect_filter"
 path = "src/bin/inspect_filter.rs"
 
 [[bin]]
 name = "analyze_reports"
 path = "src/bin/analyze_reports.rs"
+
+[features]
+default = ["cashu"]
+cashu = ["dep:cdk", "dep:cdk-sqlite", "dep:cashu", "dep:rand"]
 
 [dependencies]
 axum = "0.8.9"
@@ -50,11 +59,11 @@ aws-sdk-s3 = { version = "1.143", default-features = false, features = ["default
 # streaming responses (one BytesMut per chunk per connection).
 mimalloc = { version = "0.1", default-features = false }
 
-# Cashu payment support (BUD-07)
-cdk = { version = "0.17", default-features = false, features = ["wallet"] }
-cdk-sqlite = { version = "0.17", features = ["wallet"] }
-cashu = "0.17"
-rand = "0.10"
+# Cashu payment support (BUD-07), behind the default `cashu` feature
+cdk = { version = "0.17", default-features = false, features = ["wallet"], optional = true }
+cdk-sqlite = { version = "0.17", features = ["wallet"], optional = true }
+cashu = { version = "0.17", optional = true }
+rand = { version = "0.10", optional = true }
 nostr-sdk = "0.45"
 
 # HTTPS/TLS support

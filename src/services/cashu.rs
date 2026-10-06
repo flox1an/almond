@@ -4,17 +4,20 @@
 //! Implements Cashu ecash token parsing, validation, and receiving.
 
 use crate::error::AppError;
-use cashu::nuts::nut00::token::Token;
-use cdk::wallet::Wallet as CdkWallet;
-use cdk_sqlite::wallet::WalletSqliteDatabase;
-use std::io::Write;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "cashu"))]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::PathBuf;
-use std::str::FromStr;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+#[cfg(feature = "cashu")]
+use {
+    cashu::nuts::nut00::token::Token,
+    cdk::wallet::Wallet as CdkWallet,
+    cdk_sqlite::wallet::WalletSqliteDatabase,
+    std::io::Write,
+    std::path::PathBuf,
+    std::str::FromStr,
+    std::sync::Arc,
+    tokio::sync::RwLock,
+    tracing::{error, info, warn},
+};
 
 /// A request that money can be demanded for.
 ///
@@ -101,7 +104,27 @@ pub async fn charge(
         return Err(quoted.payment_required());
     };
 
-    let token = parse_token(&token_str)?;
+    #[cfg(not(feature = "cashu"))]
+    {
+        // Unreachable in practice: `Config::validate` rejects paid
+        // operations when the crate is built without the `cashu` feature.
+        let _ = token_str;
+        Err(AppError::ServiceUnavailable(
+            "Payment service is not initialized".to_string(),
+        ))
+    }
+    #[cfg(feature = "cashu")]
+    settle(state, &token_str, quoted, operation).await
+}
+
+#[cfg(feature = "cashu")]
+async fn settle(
+    state: &crate::models::AppState,
+    token_str: &str,
+    quoted: Quote,
+    operation: PaidOperation,
+) -> Result<(), AppError> {
+    let token = parse_token(token_str)?;
     verify_token_basics(&token, quoted.amount_sats, &state.cashu_accepted_mints)?;
 
     // A configured paid feature without a wallet cannot take money, so it must
@@ -154,6 +177,7 @@ pub fn calculate_price(size_bytes: u64, price_per_mb: u64) -> u64 {
 ///
 /// # Returns
 /// The parsed Token on success, or an error if parsing fails
+#[cfg(feature = "cashu")]
 pub fn parse_token(token_str: &str) -> Result<Token, AppError> {
     let token_str = token_str.trim();
 
@@ -179,6 +203,7 @@ pub fn parse_token(token_str: &str) -> Result<Token, AppError> {
 ///
 /// # Returns
 /// Ok(()) if the token is valid, or an error describing the issue
+#[cfg(feature = "cashu")]
 pub fn verify_token_basics(
     token: &Token,
     required_amount: u64,
@@ -242,6 +267,7 @@ pub fn verify_token_basics(
 /// Persist a newly generated wallet seed without ever exposing it under
 /// process-default permissions.  The rename makes a completed seed appear
 /// atomically to another process.
+#[cfg(feature = "cashu")]
 fn write_seed_0600(path: &std::path::Path, seed: &[u8; 64]) -> Result<(), AppError> {
     let temporary = path.with_extension(format!("seed.tmp.{}", uuid::Uuid::new_v4()));
     #[cfg(unix)]
@@ -287,6 +313,7 @@ fn write_seed_0600(path: &std::path::Path, seed: &[u8; 64]) -> Result<(), AppErr
 ///
 /// # Returns
 /// An Arc-wrapped RwLock-protected wallet instance, or an error if initialization fails
+#[cfg(feature = "cashu")]
 pub async fn init_wallet(
     wallet_path: &PathBuf,
     accepted_mints: &[String],
@@ -363,6 +390,7 @@ pub async fn init_wallet(
 ///
 /// # Returns
 /// The amount received in satoshis, or an error if the swap fails
+#[cfg(feature = "cashu")]
 pub async fn receive_token(
     wallet: &Arc<RwLock<CdkWallet>>,
     token: &Token,
@@ -410,6 +438,7 @@ pub fn extract_cashu_header(headers: &axum::http::HeaderMap) -> Option<String> {
 ///
 /// # Returns
 /// The total value in satoshis, or an error if calculation fails
+#[cfg(feature = "cashu")]
 pub fn get_token_amount(token: &Token) -> Result<u64, AppError> {
     let amount = token.value().map_err(|e| {
         warn!("Failed to get token value: {}", e);
@@ -426,6 +455,7 @@ pub fn get_token_amount(token: &Token) -> Result<u64, AppError> {
 ///
 /// # Returns
 /// The mint URL as a string, or an error if extraction fails
+#[cfg(feature = "cashu")]
 pub fn get_token_mint(token: &Token) -> Result<String, AppError> {
     let mint_url = token.mint_url().map_err(|e| {
         warn!("Failed to get mint URL from token: {}", e);
@@ -527,6 +557,7 @@ mod tests {
         assert_eq!(calculate_price(1024 * 1024, 0), 1);
     }
 
+    #[cfg(feature = "cashu")]
     #[test]
     fn test_parse_token_invalid_prefix() {
         let result = parse_token("invalidtoken");
@@ -535,6 +566,7 @@ mod tests {
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 
+    #[cfg(feature = "cashu")]
     #[test]
     fn test_parse_token_empty() {
         let result = parse_token("");

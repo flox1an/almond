@@ -22,6 +22,8 @@ jobs:
       run: cargo fmt --check --verbose
     - name: Clippy (lint as errors)
       run: cargo clippy --all-targets -- -D warnings
+    - name: Clippy without cashu (library embed profile)
+      run: cargo clippy --all-targets --no-default-features -- -D warnings
     - name: Build
       run: cargo build --verbose
     - name: Run tests

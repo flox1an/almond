@@ -321,6 +321,13 @@ impl Config {
             .validate()
     }
 
+    /// Built-in defaults only: reads neither argv nor the process
+    /// environment. Override fields, then call [`Config::validate`].
+    #[must_use]
+    pub fn defaults() -> Self {
+        Self::try_parse_from(["almond"]).expect("built-in defaults parse")
+    }
+
     /// The clap command with every argument bound to its `ALMOND_*` variable.
     fn command_with_env() -> clap::Command {
         let mut heading = None;
@@ -345,7 +352,8 @@ impl Config {
         })
     }
 
-    fn validate(mut self) -> Result<Self, ConfigError> {
+    /// Cross-field validation; also normalizes a blank `metrics_token`.
+    pub fn validate(mut self) -> Result<Self, ConfigError> {
         let s3 = [
             &self.s3_endpoint,
             &self.s3_bucket,
@@ -372,6 +380,11 @@ impl Config {
         if self.chunk_max_size > self.blob_max_size {
             return Err(ConfigError::new(
                 "ALMOND_CHUNK_MAX_SIZE must not exceed ALMOND_BLOB_MAX_SIZE",
+            ));
+        }
+        if cfg!(not(feature = "cashu")) && !self.cashu_paid.is_empty() {
+            return Err(ConfigError::new(
+                "ALMOND_CASHU_PAID is set but almond was built without the cashu feature",
             ));
         }
         if !self.cashu_paid.is_empty()
@@ -749,21 +762,36 @@ mod tests {
     #[test]
     fn cross_field_rules_are_startup_errors() {
         assert!(err(&[("ALMOND_CHUNK_MAX_SIZE", "600MiB")]).contains("ALMOND_CHUNK_MAX_SIZE"));
+        assert!(err(&[("ALMOND_UPLOAD_ACCESS", "dvm")]).contains("ALMOND_DVM_KINDS"));
+        assert!(err(&[("ALMOND_CLEANUP_INTERVAL", "0")]).contains("ALMOND_CLEANUP_INTERVAL"));
+        assert!(err(&[("ALMOND_AUTH_MAX_TTL", "0")]).contains("ALMOND_AUTH_MAX_TTL"));
+        assert!(err(&[("ALMOND_S3_BUCKET", "b")]).contains("Incomplete S3"));
+    }
+
+    #[cfg(feature = "cashu")]
+    #[test]
+    fn cashu_rules_are_startup_errors() {
         assert!(err(&[("ALMOND_CASHU_PAID", "upload")]).contains("ALMOND_CASHU_MINT"));
         assert!(err(&[
             ("ALMOND_CASHU_PAID", "upload"),
             ("ALMOND_CASHU_MINT", "a,b")
         ])
         .contains("exactly one"));
-        assert!(err(&[("ALMOND_UPLOAD_ACCESS", "dvm")]).contains("ALMOND_DVM_KINDS"));
-        assert!(err(&[("ALMOND_CLEANUP_INTERVAL", "0")]).contains("ALMOND_CLEANUP_INTERVAL"));
-        assert!(err(&[("ALMOND_AUTH_MAX_TTL", "0")]).contains("ALMOND_AUTH_MAX_TTL"));
-        assert!(err(&[("ALMOND_S3_BUCKET", "b")]).contains("Incomplete S3"));
         assert!(cfg(&[
             ("ALMOND_CASHU_PAID", "upload,download"),
             ("ALMOND_CASHU_MINT", "https://m")
         ])
         .is_ok());
+    }
+
+    #[cfg(not(feature = "cashu"))]
+    #[test]
+    fn paid_operations_need_the_cashu_feature() {
+        assert!(err(&[
+            ("ALMOND_CASHU_PAID", "upload"),
+            ("ALMOND_CASHU_MINT", "https://m")
+        ])
+        .contains("without the cashu feature"));
     }
 
     #[test]

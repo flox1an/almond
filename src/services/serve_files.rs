@@ -161,6 +161,7 @@ async fn write_manifest(manifest_path: &Path, entries: &[(String, String)]) -> s
 }
 
 pub fn start_refresh_job(
+    tasks: &mut tokio::task::JoinSet<()>,
     root: PathBuf,
     manifest_name: String,
     refresh_interval_secs: u64,
@@ -172,7 +173,7 @@ pub fn start_refresh_job(
         return;
     }
 
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         let mut interval =
             tokio::time::interval(tokio::time::Duration::from_secs(refresh_interval_secs));
         interval.tick().await;
