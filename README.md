@@ -147,6 +147,65 @@ almond --config /etc/almond/almond.env --bind-addr 0.0.0.0:3000
 - **Logging:** `RUST_LOG` (e.g. `RUST_LOG=warn`, `RUST_LOG=almond=debug`) controls
   log output (default: `info`); it is also honored when set in the config file.
 
+## Library embedding
+
+Almond can also be embedded in an Axum 0.8 application. The standalone
+`almond` binary keeps its CLI, defaults, routes, TLS and signal handling.
+
+For a local sibling checkout:
+
+```toml
+[dependencies]
+almond = { path = "../almond", default-features = false }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+```
+
+Omit `default-features = false` to include Cashu payments (the standalone
+default). Without the `cashu` feature, configuring paid operations fails
+startup; it never silently makes them free.
+
+Start with `Config::defaults()`, override fields, and call
+`build_state(&cfg)`. It checks cross-field rules before touching storage
+and normalizes blank metrics tokens in the resulting state. `Config::validate()`
+is available when the host wants to normalize/check configuration separately.
+The embedding path reads no process arguments, environment variables or
+dotenv files; `Config::load()` and `config::load_env_file()` are standalone
+helpers and should not be used inside an already-running host.
+
+The host owns its runtime, tracing, allocator, rustls provider, TLS listener
+and shutdown policy. Before using WoT/DVM access or enabling custom-origin
+discovery (`?as=` can query Nostr relays), install the host's chosen rustls
+`CryptoProvider`; `build_state` returns an error if none is installed.
+For example, a host depending on
+`rustls = { version = "0.23", features = ["aws-lc-rs"] }` can install
+`rustls::crypto::aws_lc_rs::default_provider().install_default()` during
+process startup. Almond never replaces an installed provider. Local/public
+mode with custom-origin discovery disabled needs no global provider.
+
+- `create_app(state)` returns the Blossom routes, including `/{filename}`.
+  Merge it with the host's router; the host can keep its own `/` and `/health`.
+- `standalone_extras(state)` optionally adds Almond's homepage, config editor,
+  filter and diagnostics. The standalone binary merges both routers.
+- Keep the `JoinSet` returned by `spawn_background_tasks(&state, &cfg)` alive
+  while serving. It owns periodic cleanup and refresh jobs; dropping it aborts
+  them. Use the same config that built the state. Request-triggered upstream
+  and HLS jobs retain their existing lifecycle.
+- Set `public_url` to the host's externally reachable Blossom origin. Initialize
+  one state per storage root and clone it for routers: startup clears temporary
+  files and migrates/indexes existing blobs.
+
+Runnable host with its own homepage, health route and graceful shutdown:
+[`examples/embedded.rs`](examples/embedded.rs).
+
+```bash
+cargo run --example embedded --no-default-features
+```
+
+It listens on `127.0.0.1:3000` and stores blobs in `./embedded-files`.
+Pass a bind address after `--` to use another port, for example
+`cargo run --example embedded --no-default-features -- 127.0.0.1:3001`.
+
 ## Configuration
 
 The full list of settings with comments is in [`.env.example`](.env.example).

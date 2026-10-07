@@ -251,6 +251,23 @@ Every variable can also be passed as a CLI flag (`ALMOND_UPLOAD_ACCESS` ↔
 
 ## Architecture & Code Structure
 
+### Library and standalone entry points
+
+- `src/lib.rs` initializes state (`build_state`), builds Blossom routes
+  (`create_app`), provides optional Almond pages/diagnostics
+  (`standalone_extras`), and owns periodic jobs through the returned
+  `spawn_background_tasks` `JoinSet`.
+- `src/main.rs` retains CLI/env/dotenv loading, tracing, allocator, rustls
+  provider selection, TLS certificates, signals and the listener. It merges
+  both routers, preserving the standalone HTTP surface and default features.
+- Library configuration starts at `Config::defaults()` without reading argv
+  or environment. `build_state` checks it before touching storage. WoT/DVM
+  access and custom-origin author discovery require a rustls `CryptoProvider`
+  chosen and installed by the host.
+- The `cashu` Cargo feature is enabled by default. Disabling default features
+  omits payment dependencies and rejects paid-operation configuration.
+- Embedding setup and lifecycle: [README, Library embedding](README.md#library-embedding).
+
 ### Service Layer Architecture
 
 The codebase has been refactored to use a service layer pattern:

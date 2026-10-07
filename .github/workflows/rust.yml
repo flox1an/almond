@@ -28,3 +28,5 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+    - name: Run tests without cashu (library embed profile)
+      run: cargo test --no-default-features --verbose

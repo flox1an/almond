@@ -267,7 +267,7 @@ The raw view is not a second freely editable source. The form state and the loss
 
 The editor is **a hand-written HTML file with no build step**. There is no bundler, no npm, no framework, and no generation run. The file in the repo is byte-identical to the one that runs in the browser and that the server serves.
 
-The repo already has a precedent for this: `src/filter-test.html` is 466 lines of hand-written HTML with an inline script, served via `include_str!` under its own route (`src/main.rs:135`).
+The repo already has a precedent for this: `src/filter-test.html` is 466 lines of hand-written HTML with an inline script, served via `include_str!` under its own route (`src/lib.rs:standalone_extras`).
 
 That dictates the structure:
 
@@ -280,7 +280,7 @@ Realistic size: the schema table for 50 fields with help texts, plus parser, exp
 
 ### Delivery by Almond
 
-The server serves the file at `/config`, analogous to the homepage via `include_str!` (`src/main.rs:125`). The route is tied to `FEATURE_HOMEPAGE_ENABLED` — no new flag; whoever disables the homepage also disables the editor.
+The server serves the file at `/config`, analogous to the homepage via `include_str!` (`src/lib.rs:standalone_extras`). The route is tied to `FEATURE_HOMEPAGE_ENABLED` — no new flag; whoever disables the homepage also disables the editor.
 
 ### Verification instead of generation
 

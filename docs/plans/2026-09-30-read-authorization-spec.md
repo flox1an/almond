@@ -37,7 +37,7 @@ contract. No code has been changed yet.
 ## Current behavior
 
 - `create_app` routes blob GET and HEAD to `handle_file_request` in
-  [`src/main.rs`](../../src/main.rs).
+  [`src/lib.rs`](../../src/lib.rs).
 - [`src/handlers/file_serving.rs`](../../src/handlers/file_serving.rs) resolves
   indexed blobs, unindexed native S3 objects, serve-files content, recent upstream
   misses, and upstream fallback. It does not authenticate blob reads today.
@@ -60,7 +60,7 @@ contract. No code has been changed yet.
   (`refresh_trust_network`). DVM membership is cached only for positive results.
   An unknown key triggers a live relay lookup (`check_dvm_announcement`) each
   time it is checked.
-- The WoT refresh job ([`src/main.rs`](../../src/main.rs)), the DVM refresh job,
+- The WoT refresh job ([`src/lib.rs`](../../src/lib.rs)), the DVM refresh job,
   and the `ALMOND_DVM_KINDS` validation ([`src/config.rs`](../../src/config.rs))
   currently look only at upload, mirror, and custom-origin settings.
 - `ALMOND_UPSTREAM_MODE` accepts `proxy`, `redirect`, and `redirect_and_cache`.
@@ -381,7 +381,7 @@ These are pre-existing issues. This work does not change them.
 ## Expected touchpoints
 
 - [`src/config.rs`](../../src/config.rs), [`src/models.rs`](../../src/models.rs),
-  [`src/main.rs`](../../src/main.rs):
+  [`src/lib.rs`](../../src/lib.rs):
   - strict `ALMOND_READ_ACCESS` parsing and startup validation (whitelist list, DVM
     kinds, redirect conflict);
   - `AppState` wiring;

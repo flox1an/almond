@@ -55,6 +55,8 @@ Configuration comes from CLI flags, environment variables, or a dotenv file (`--
 
 ## Important Files
 - `CONTEXT.md`: Detailed technical overview and API specifications.
-- `Cargo.toml`: Project dependencies and binary targets.
-- `src/main.rs`: Entry point, routing, and background job management.
+- `Cargo.toml`: Library and binary targets; Cashu is an optional, default-enabled feature.
+- `src/lib.rs`: Library state initialization, Blossom routing and periodic jobs.
+- `src/main.rs`: Standalone entry point: config, tracing, allocator, crypto, TLS, signals and listener.
+- `examples/embedded.rs`: Runnable Axum embedding; see README for the host contract.
 - `.env.example`: Template for all supported configuration options.

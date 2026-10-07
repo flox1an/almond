@@ -1,3 +1,9 @@
+//! Embeddable Blossom server with a separate standalone binary.
+//!
+//! Configure [`Config::defaults`], initialize [`build_state`], then serve
+//! [`create_app`]. Keep [`spawn_background_tasks`]' returned set alive while
+//! serving. [`standalone_extras`] adds Almond's own pages and diagnostics.
+//!
 // Crate-level lint overrides. Deliberate casting choices acknowledged;
 // promote cast lints back to `deny` once all refactors are complete.
 // `uninlined_format_args`: 500+ tracing calls with emoji prefixes — a bulk
@@ -297,12 +303,30 @@ async fn clear_temp_directory(temp_dir: &PathBuf) -> Result<(), std::io::Error> 
     Ok(())
 }
 
-/// Errors carry the binary's historic panic messages. A Cashu wallet
-/// failure is returned as the boxed [`AppError`] so the binary can keep
-/// exiting with status 1 for it.
+/// Validate configuration and initialize storage, indexes, clients and metrics.
+///
+/// This does not read argv or environment variables, bind a listener, create
+/// TLS certificates, start periodic jobs, or install a global crypto provider.
+/// For WoT/DVM access or custom-origin author discovery, the host must install
+/// its chosen rustls [`rustls::crypto::CryptoProvider`] before calling this function.
+/// Invalid settings are rejected before storage is touched.
+///
+/// A Cashu wallet failure is returned as a boxed [`AppError`].
 pub async fn build_state(
     cfg: &Config,
 ) -> Result<AppState, Box<dyn std::error::Error + Send + Sync>> {
+    cfg.check()?;
+    let needs_relays = cfg.upload_access.requires_wot()
+        || cfg.mirror_access.requires_wot()
+        || cfg.custom_origin_access.is_enabled()
+        || cfg.upload_access.requires_dvm()
+        || cfg.mirror_access.requires_dvm();
+    if needs_relays && rustls::crypto::CryptoProvider::get_default().is_none() {
+        return Err(
+            "Relay-backed features require the host to install a rustls CryptoProvider before build_state"
+                .into(),
+        );
+    }
     let storage = models::StorageLayout::new(cfg.storage_path.clone());
     initialize_storage(&storage)
         .await
@@ -517,7 +541,11 @@ pub async fn build_state(
         auth_max_ttl_secs: cfg.auth_max_ttl.as_secs(),
         auth_clock_skew_secs: cfg.auth_clock_skew.as_secs(),
         auth_require_server_tag: cfg.auth_require_server_tag,
-        metrics_bearer_token: cfg.metrics_token.clone(),
+        metrics_bearer_token: cfg
+            .metrics_token
+            .as_ref()
+            .filter(|token| !token.trim().is_empty())
+            .cloned(),
         destructive_event_replays: Arc::new(RwLock::new(HashMap::new())),
         feature_paid_upload: cfg.cashu_paid.contains(&cashu::PaidOperation::Upload),
         feature_paid_mirror: cfg.cashu_paid.contains(&cashu::PaidOperation::Mirror),

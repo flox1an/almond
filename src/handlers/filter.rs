@@ -211,7 +211,7 @@ fn build_filter(
 /// The algorithm is determined by the `FILTER_ALGORITHM` env var:
 /// - "bloom": Bloom filter (configurable false positive rate via `fp` query param)
 /// - "binary-fuse-8": Binary Fuse8 filter (~0.4% false positive rate)
-/// - "binary-fuse-16": Binary Fuse16 filter (~0.0015% false positive rate) [default]
+/// - "binary-fuse-16": Binary Fuse16 filter (~0.0015% false positive rate), default
 /// - "binary-fuse-32": Binary Fuse32 filter (~0.00000002% false positive rate)
 pub async fn get_filter(
     State(state): State<AppState>,

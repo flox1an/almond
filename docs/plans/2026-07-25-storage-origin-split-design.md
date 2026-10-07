@@ -344,7 +344,7 @@ contract.
 | Area | Required change |
 |---|---|
 | `src/models.rs` | Add `BlobOrigin`, `StorageLayout`, metadata origin, and cache TTL state. |
-| `src/main.rs` | Parse `MAX_UPSTREAM_CACHE_TTL_DAYS`; create directories; migrate legacy blobs; scan explicit roots; schedule expiry sweeps. |
+| `src/config.rs`, `src/lib.rs` | Parse `MAX_UPSTREAM_CACHE_TTL_DAYS`; create directories; migrate legacy blobs; scan explicit roots; schedule expiry sweeps. |
 | `src/services/file_storage.rs` | Own path selection, publication, precedence, duplicate removal, and storage mutation coordination. |
 | `src/services/upload.rs` | Publish uploads and authorized mirrors as `Upload`. |
 | `src/handlers/upstream.rs` | Publish transparent fills as `UpstreamCache`; remove direct filesystem/index finalization. |

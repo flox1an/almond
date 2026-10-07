@@ -105,7 +105,7 @@ before every successful response, including non-destructive public mode.
 
 **Requirement:** Servers **SHOULD** advertise rules or terms affecting reports.
 
-**Current behavior:** The public routes in `src/main.rs:create_app` contain no
+**Current behavior:** The public routes in `src/lib.rs:create_app` contain no
 report policy/terms endpoint, and the homepage does not publish report rules.
 
 **Impact:** Reporters cannot determine moderation scope, operator policy, or
@@ -162,7 +162,7 @@ idempotent-delete semantics as an intentional compatibility choice.
 
 ### BUD-05 — Media processing
 
-`PUT /media` and `HEAD /media` are not routed in `src/main.rs:create_app`.
+`PUT /media` and `HEAD /media` are not routed in `src/lib.rs:create_app`.
 Media transformations/conversions are therefore unavailable. BUD-05 is optional;
 this is a declared unsupported capability rather than a mandatory violation.
 

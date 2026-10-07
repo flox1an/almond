@@ -1,7 +1,7 @@
 //! Configuration: command line, environment, and dotenv config file.
 //!
 //! Every setting is one clap argument. Its environment name is derived from
-//! the flag (`--upload-access` <-> `ALMOND_UPLOAD_ACCESS`, see [`env_name`]),
+//! the flag (`--upload-access` <-> `ALMOND_UPLOAD_ACCESS`, via `env_name`),
 //! so the two can never drift apart. Precedence, highest first:
 //! command line > process environment > config file > built-in default.
 //!
@@ -322,7 +322,8 @@ impl Config {
     }
 
     /// Built-in defaults only: reads neither argv nor the process
-    /// environment. Override fields, then call [`Config::validate`].
+    /// environment. Override fields, then pass to [`crate::build_state`],
+    /// which checks them, or call [`Config::validate`] for normalization.
     #[must_use]
     pub fn defaults() -> Self {
         Self::try_parse_from(["almond"]).expect("built-in defaults parse")
@@ -354,6 +355,13 @@ impl Config {
 
     /// Cross-field validation; also normalizes a blank `metrics_token`.
     pub fn validate(mut self) -> Result<Self, ConfigError> {
+        self.check()?;
+        // A blank token would enable /metrics behind an empty secret.
+        self.metrics_token = self.metrics_token.filter(|t| !t.trim().is_empty());
+        Ok(self)
+    }
+
+    pub(crate) fn check(&self) -> Result<(), ConfigError> {
         let s3 = [
             &self.s3_endpoint,
             &self.s3_bucket,
@@ -401,9 +409,7 @@ impl Config {
                 "ALMOND_DVM_KINDS must be set when any access mode is 'dvm'",
             ));
         }
-        // A blank token would enable /metrics behind an empty secret.
-        self.metrics_token = self.metrics_token.filter(|t| !t.trim().is_empty());
-        Ok(self)
+        Ok(())
     }
 
     /// Parse from `ALMOND_*` pairs without touching the process environment.
