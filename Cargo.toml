@@ -69,7 +69,7 @@ nostr-sdk = "0.45"
 # HTTPS/TLS support
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 rcgen = "0.14"
-rustls = { version = "0.23", features = ["aws-lc-rs"] }
+rustls = { version = "0.23.46", features = ["aws-lc-rs"] }
 clap = { version = "4.6", features = ["derive", "env", "string"] }
 
 [profile.release]
