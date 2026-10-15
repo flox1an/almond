@@ -178,7 +178,7 @@ and shutdown policy. Before using WoT/DVM access or enabling custom-origin
 discovery (`?as=` can query Nostr relays), install the host's chosen rustls
 `CryptoProvider`; `build_state` returns an error if none is installed.
 For example, a host depending on
-`rustls = { version = "0.23", features = ["aws-lc-rs"] }` can install
+`rustls = { version = "0.23.46", features = ["aws-lc-rs"] }` can install
 `rustls::crypto::aws_lc_rs::default_provider().install_default()` during
 process startup. Almond never replaces an installed provider. Local/public
 mode with custom-origin discovery disabled needs no global provider.
