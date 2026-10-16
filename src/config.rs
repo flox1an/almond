@@ -154,6 +154,12 @@ pub struct Config {
     /// S3 secret access key (prefer env/config file: arguments are visible in ps)
     #[arg(long, value_name = "SECRET")]
     pub s3_secret_access_key: Option<String>,
+    /// S3 region used for SigV4 signing ("auto" suits Cloudflare R2)
+    #[arg(long, value_name = "REGION", default_value = "auto")]
+    pub s3_region: String,
+    /// Address buckets as <endpoint>/<bucket> (MinIO, Garage) instead of <bucket>.<endpoint>
+    #[arg(long, value_name = "BOOL", default_value_t = false, num_args = 0..=1, default_missing_value = "true", action = ArgAction::Set, value_parser = BoolishValueParser::new())]
+    pub s3_force_path_style: bool,
 
     // ── Access ─────────────────────────────────────────────────────────────
     /// Who may upload
@@ -373,6 +379,16 @@ impl Config {
             return Err(ConfigError::new(
                 "Incomplete S3 configuration: ALMOND_S3_ENDPOINT, ALMOND_S3_BUCKET, \
                  ALMOND_S3_ACCESS_KEY_ID and ALMOND_S3_SECRET_ACCESS_KEY must be set together",
+            ));
+        }
+        if self.s3_region.is_empty()
+            || !self
+                .s3_region
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err(ConfigError::new(
+                "ALMOND_S3_REGION must be a region name such as auto or us-east-1",
             ));
         }
         if self.cleanup_interval.is_zero() {
@@ -772,6 +788,28 @@ mod tests {
         assert!(err(&[("ALMOND_CLEANUP_INTERVAL", "0")]).contains("ALMOND_CLEANUP_INTERVAL"));
         assert!(err(&[("ALMOND_AUTH_MAX_TTL", "0")]).contains("ALMOND_AUTH_MAX_TTL"));
         assert!(err(&[("ALMOND_S3_BUCKET", "b")]).contains("Incomplete S3"));
+        assert!(err(&[("ALMOND_S3_REGION", "us east")]).contains("ALMOND_S3_REGION"));
+        assert!(err(&[("ALMOND_S3_FORCE_PATH_STYLE", "maybe")]).contains("s3-force-path-style"));
+    }
+
+    #[test]
+    fn s3_region_and_path_style_default_and_parse() {
+        let base = [
+            ("ALMOND_S3_ENDPOINT", "https://s3.example.com"),
+            ("ALMOND_S3_BUCKET", "b"),
+            ("ALMOND_S3_ACCESS_KEY_ID", "k"),
+            ("ALMOND_S3_SECRET_ACCESS_KEY", "s"),
+        ];
+        let defaults = cfg(&base).unwrap();
+        assert_eq!(defaults.s3_region, "auto");
+        assert!(!defaults.s3_force_path_style);
+
+        let mut set = base.to_vec();
+        set.push(("ALMOND_S3_REGION", "us-east-1"));
+        set.push(("ALMOND_S3_FORCE_PATH_STYLE", "true"));
+        let parsed = cfg(&set).unwrap();
+        assert_eq!(parsed.s3_region, "us-east-1");
+        assert!(parsed.s3_force_path_style);
     }
 
     #[cfg(feature = "cashu")]

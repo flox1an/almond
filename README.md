@@ -238,6 +238,8 @@ New uploads and explicit mirrors use S3 when all four variables are configured. 
 
 All four variables are required together. Supplying only a subset fails startup.
 
+`ALMOND_S3_REGION` (default `auto`, which suits R2) sets the SigV4 signing region. `ALMOND_S3_FORCE_PATH_STYLE` (default `false`) addresses buckets as `<endpoint>/<bucket>` instead of `<bucket>.<endpoint>`; set it to `true` for MinIO and Garage.
+
 ```dotenv
 ALMOND_S3_ENDPOINT=https://<endpoint>
 ALMOND_S3_BUCKET=<bucket-name>
@@ -257,6 +259,7 @@ MinIO:
 ```dotenv
 ALMOND_S3_ENDPOINT=http://localhost:9000
 ALMOND_S3_BUCKET=<bucket-name>
+ALMOND_S3_FORCE_PATH_STYLE=true
 ALMOND_S3_ACCESS_KEY_ID=<minio-access-key>
 ALMOND_S3_SECRET_ACCESS_KEY=<minio-secret-key>
 ```
