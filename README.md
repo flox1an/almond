@@ -16,13 +16,14 @@ limited to an npub allowlist, to a web of trust, or to DVMs.
 1. [Features](#features)
 2. [Deployment variants](#deployment-variants)
 3. [Quick start](#quick-start)
-4. [How it works](#how-it-works)
-5. [Configuration](#configuration)
-6. [API](#api)
-7. [Deployment guides](#deployment-guides) — Docker, HTTPS, S3, Local Blossom Cache, FIPS, systemd
-8. [Embedding as a library](#embedding-as-a-library)
-9. [Migrating from pre-0.5 names](#migrating-from-pre-05-names)
-10. [Development](#development)
+4. [Command-line examples](#command-line-examples)
+5. [How it works](#how-it-works)
+6. [Configuration](#configuration)
+7. [API](#api)
+8. [Deployment guides](#deployment-guides) — Docker, HTTPS, S3, Local Blossom Cache, FIPS, systemd
+9. [Embedding as a library](#embedding-as-a-library)
+10. [Migrating from pre-0.5 names](#migrating-from-pre-05-names)
+11. [Development](#development)
 
 ## Features
 
@@ -88,6 +89,73 @@ limit:
 ALMOND_PUBLIC_URL=https://blossom.example.com
 ALMOND_ALLOWED_NPUBS=npub1...
 ```
+
+## Command-line examples
+
+Every setting is also a flag, so a server needs no config file. Install the
+binary once:
+
+```bash
+git clone https://github.com/flox1an/almond && cd almond
+cargo install --path .
+```
+
+**Minimal server**: `127.0.0.1:3000`, blobs in `./files`, uploads open to any
+valid Nostr signature:
+
+```bash
+almond
+```
+
+**Personal server**: only your npubs may upload, reachable from outside:
+
+```bash
+almond --bind-addr 0.0.0.0:3000 \
+  --public-url https://blossom.example.com \
+  --storage-path /var/lib/almond \
+  --allowed-npubs npub1you...,npub1friend...
+```
+
+**Public temporary host**: anyone uploads, blobs expire after a week, storage capped:
+
+```bash
+almond --bind-addr 0.0.0.0:3000 \
+  --public-url https://tmp.example.com \
+  --upload-max-age 7d \
+  --storage-max-size 50GiB \
+  --blob-max-size 100MiB
+```
+
+**Community server**: uploads for you and your web of trust:
+
+```bash
+almond --upload-access wot --allowed-npubs npub1you...
+```
+
+**Caching edge**: no uploads, serves and caches blobs from upstream servers:
+
+```bash
+almond --upload-access off --mirror-access off \
+  --upstream-servers https://cdn.satellite.earth,https://blossom.primal.net
+```
+
+**Local Blossom Cache** on the standard port:
+
+```bash
+almond --bind-addr 127.0.0.1:24242 --public-url http://127.0.0.1:24242 \
+  --upload-access off --mirror-access off \
+  --custom-origin-access public \
+  --storage-max-size 5GiB --upstream-cache-ttl 30d
+```
+
+**HTTPS for local testing** with a generated self-signed certificate:
+
+```bash
+almond --tls-enabled --tls-self-signed
+```
+
+`almond --help` lists every flag. Flags override environment variables and the
+config file; see [Configuration](#configuration).
 
 ## How it works
 
