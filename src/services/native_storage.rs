@@ -1,6 +1,6 @@
 use std::{
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -17,7 +17,7 @@ use tokio::fs;
 use crate::{
     error::{AppError, AppResult},
     models::{BlobOrigin, FileLocation, FileMetadata},
-    services::blob_name,
+    services::{blob_index::BlobIndex, blob_name},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,9 +30,22 @@ pub struct S3Settings {
     pub force_path_style: bool,
 }
 
+/// Whether the bucket answered the last index listing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum S3Status {
+    Available,
+    Unavailable {
+        /// The error from the most recent failed listing.
+        error: String,
+        /// Unix seconds of the most recent attempt.
+        last_attempt: u64,
+    },
+}
+
 pub struct NativeS3Storage {
     client: Client,
     bucket: String,
+    status: Mutex<S3Status>,
 }
 
 async fn build_client(settings: &S3Settings) -> Client {
@@ -171,6 +184,46 @@ impl NativeS3Storage {
         Self {
             client: build_client(&settings).await,
             bucket: settings.bucket,
+            status: Mutex::new(S3Status::Available),
+        }
+    }
+
+    pub fn status(&self) -> S3Status {
+        self.status.lock().expect("status lock").clone()
+    }
+
+    /// Fail with 503 while the bucket is unreachable, so callers neither
+    /// report a blob as gone nor fall back to local storage.
+    pub fn ensure_available(&self) -> AppResult<()> {
+        match self.status() {
+            S3Status::Available => Ok(()),
+            S3Status::Unavailable { error, .. } => Err(AppError::ServiceUnavailable(format!(
+                "S3 storage is unavailable: {error}"
+            ))),
+        }
+    }
+
+    /// List the bucket and merge it into `index` (local copies keep
+    /// precedence), then mark the bucket available. A failed listing marks it
+    /// unavailable and returns the error.
+    pub async fn sync_index(&self, index: &BlobIndex) -> AppResult<()> {
+        match self.list_all().await {
+            Ok(entries) => {
+                for (sha256, metadata) in entries {
+                    if !index.contains(&sha256).await {
+                        index.insert(sha256, metadata).await;
+                    }
+                }
+                *self.status.lock().expect("status lock") = S3Status::Available;
+                Ok(())
+            }
+            Err(error) => {
+                *self.status.lock().expect("status lock") = S3Status::Unavailable {
+                    error: error.to_string(),
+                    last_attempt: now_secs(),
+                };
+                Err(error)
+            }
         }
     }
 

@@ -65,6 +65,9 @@ use tokio::fs;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
+const S3_RETRY_INITIAL: Duration = Duration::from_secs(1);
+const S3_RETRY_MAX: Duration = Duration::from_secs(300);
+
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -374,15 +377,10 @@ pub async fn build_state(
         .await
         .map_err(|error| format!("Failed to reconstruct blob index: {error}"))?;
     if let Some(s3) = &native_s3 {
-        for (sha256, metadata) in s3
-            .list_all()
-            .await
-            .map_err(|error| format!("Failed to build S3 blob index: {error}"))?
-        {
-            // Local uploads retain precedence over same-hash S3 uploads.
-            if !file_index.contains(&sha256).await {
-                file_index.insert(sha256, metadata).await;
-            }
+        // An unreachable bucket degrades the instance instead of failing it;
+        // `start_s3_recovery_job` keeps retrying.
+        if let Err(error) = s3.sync_index(&file_index).await {
+            warn!("⚠️ S3 unavailable at startup, serving local blobs only: {error}");
         }
     }
 
@@ -567,6 +565,7 @@ pub fn spawn_background_tasks(state: &AppState, cfg: &Config) -> JoinSet<()> {
     let mut tasks = JoinSet::new();
     start_cleanup_job(&mut tasks, state.clone());
     start_chunk_cleanup_job(&mut tasks, state.clone());
+    start_s3_recovery_job(&mut tasks, state.clone());
 
     // Only spawn jobs whose features are enabled.
     if cfg.upload_access.requires_wot()
@@ -593,6 +592,24 @@ pub fn spawn_background_tasks(state: &AppState, cfg: &Config) -> JoinSet<()> {
         );
     }
     tasks
+}
+
+/// Retry the S3 listing with exponential backoff until the bucket answers.
+fn start_s3_recovery_job(tasks: &mut JoinSet<()>, state: AppState) {
+    let Some(s3) = state.native_s3.clone() else {
+        return;
+    };
+    tasks.spawn(async move {
+        let mut delay = S3_RETRY_INITIAL;
+        while s3.status() != services::native_storage::S3Status::Available {
+            tokio::time::sleep(delay).await;
+            match s3.sync_index(&state.file_index).await {
+                Ok(()) => info!("✅ S3 available again, blobs indexed"),
+                Err(error) => warn!("⚠️ S3 still unavailable: {error}"),
+            }
+            delay = (delay * 2).min(S3_RETRY_MAX);
+        }
+    });
 }
 
 fn start_cleanup_job(tasks: &mut JoinSet<()>, state: AppState) {

@@ -151,6 +151,7 @@ async fn resolve_blob(
     // An object can exist in the native backend without being indexed yet, for
     // instance after a restart against a pre-populated bucket.
     if let Some(s3) = &state.native_s3 {
+        s3.ensure_available()?;
         if let Some(metadata) = s3.find(file_hash).await? {
             let published =
                 file_storage::publish_existing_metadata(state, file_hash.to_owned(), metadata)
