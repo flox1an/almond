@@ -178,6 +178,7 @@ pub async fn publish_blob(
 
     if publication.origin == BlobOrigin::Upload {
         if let Some(s3) = &state.native_s3 {
+            s3.ensure_available()?;
             let key = s3
                 .put(
                     &temp_path,

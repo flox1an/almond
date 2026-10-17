@@ -359,6 +359,12 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Status of the native S3 backend; `None` when S3 is not configured.
+    #[must_use]
+    pub fn s3_status(&self) -> Option<crate::services::native_storage::S3Status> {
+        self.native_s3.as_ref().map(|s3| s3.status())
+    }
+
     #[must_use]
     pub fn create_blob_descriptor(&self, sha256: &str, metadata: &FileMetadata) -> BlobDescriptor {
         let content_type = metadata
