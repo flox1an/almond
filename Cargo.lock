@@ -81,6 +81,7 @@ dependencies = [
  "mimalloc",
  "mime_guess",
  "nostr-sdk",
+ "parking_lot",
  "prometheus",
  "rand 0.10.3",
  "rcgen",

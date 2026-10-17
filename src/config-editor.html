@@ -13,7 +13,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'sha256-e2rRBW9HKqvrgnGAxYDIdGs2WZs+7BkZPj70EaYqPqA='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
+      content="default-src 'none'; script-src 'sha256-PwLg0Hzmc0BZa9OO3QeH4OKOF3qCzRoQ3njPgwf73Q8='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
     />
     <style>
       /*
@@ -489,6 +489,8 @@
         { "name": "ALMOND_S3_BUCKET", "category": "s3", "kind": "string", "default": null, "empty": "like_unset", "probe": "almond-blobs", "help": "Bucket name for native S3 storage." },
         { "name": "ALMOND_S3_ACCESS_KEY_ID", "category": "s3", "kind": "secret", "default": null, "empty": "like_unset", "probe": "AKIAEXAMPLE1234", "sensitive": true, "help": "S3 access key id." },
         { "name": "ALMOND_S3_SECRET_ACCESS_KEY", "category": "s3", "kind": "secret", "default": null, "empty": "like_unset", "probe": "exampleSecretAccessKey", "sensitive": true, "help": "S3 secret access key." },
+        { "name": "ALMOND_S3_REGION", "category": "s3", "kind": "string", "default": "auto", "empty": "like_unset", "probe": "us-east-1", "help": "S3 signing region. Keep auto for Cloudflare R2; use the real region for AWS." },
+        { "name": "ALMOND_S3_FORCE_PATH_STYLE", "category": "s3", "kind": "bool", "default": "false", "empty": "like_unset", "probe": "true", "help": "Address buckets by path (endpoint/bucket) instead of subdomain. Usually true for MinIO and Garage." },
 
         { "name": "ALMOND_SERVE_FILES_PATH", "category": "serve_files", "kind": "path", "default": null, "empty": "like_unset", "probe": "./public", "help": "Optional directory of static files served alongside blobs." },
         { "name": "ALMOND_SERVE_FILES_MANIFEST_DIR", "category": "serve_files", "kind": "path", "default": "/tmp", "empty": "like_unset", "probe": "/var/lib/almond", "help": "Fallback directory for the generated SHA-256 manifest when ALMOND_SERVE_FILES_PATH is read-only." },

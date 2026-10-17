@@ -339,6 +339,8 @@ pub async fn build_state(
             bucket: cfg.s3_bucket.clone().expect("validated"),
             access_key_id: cfg.s3_access_key_id.clone().expect("validated"),
             secret_access_key: cfg.s3_secret_access_key.clone().expect("validated"),
+            region: cfg.s3_region.clone(),
+            force_path_style: cfg.s3_force_path_style,
         };
         info!("S3 native storage enabled for bucket {}", settings.bucket);
         Some(Arc::new(
