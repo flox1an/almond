@@ -6,7 +6,12 @@ use std::{
 
 use aws_config::{BehaviorVersion, Region};
 use aws_credential_types::{provider::SharedCredentialsProvider, Credentials};
-use aws_sdk_s3::{config::Builder as S3ConfigBuilder, primitives::ByteStream, Client};
+use aws_sdk_s3::{
+    config::Builder as S3ConfigBuilder,
+    error::{DisplayErrorContext, ProvideErrorMetadata},
+    primitives::ByteStream,
+    Client,
+};
 use tokio::fs;
 
 use crate::{
@@ -21,6 +26,8 @@ pub struct S3Settings {
     pub bucket: String,
     pub access_key_id: String,
     pub secret_access_key: String,
+    pub region: String,
+    pub force_path_style: bool,
 }
 
 /// Whether the bucket answered the last index listing.
@@ -41,26 +48,141 @@ pub struct NativeS3Storage {
     status: Mutex<S3Status>,
 }
 
+async fn build_client(settings: &S3Settings) -> Client {
+    let credentials = SharedCredentialsProvider::new(Credentials::new(
+        &settings.access_key_id,
+        &settings.secret_access_key,
+        None,
+        None,
+        "almond",
+    ));
+    let shared_config = aws_config::defaults(BehaviorVersion::latest())
+        .region(Region::new(settings.region.clone()))
+        .credentials_provider(credentials)
+        .endpoint_url(&settings.endpoint)
+        .load()
+        .await;
+    let config = S3ConfigBuilder::from(&shared_config)
+        .force_path_style(settings.force_path_style)
+        .build();
+    Client::from_conf(config)
+}
+
+/// The step of [`probe`] that failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeStep {
+    Put,
+    Get,
+    List,
+    Delete,
+}
+
+/// Why [`probe`] failed: the step and the provider's error code, if it sent
+/// one (`AccessDenied`, `NoSuchBucket`, `SignatureDoesNotMatch`, ...). Failures
+/// before any response (connect, TLS, DNS) have no code; read `message`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProbeFailure {
+    pub step: ProbeStep,
+    pub code: Option<String>,
+    pub message: String,
+}
+
+impl std::fmt::Display for ProbeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "S3 probe failed at {:?}", self.step)?;
+        if let Some(code) = &self.code {
+            write!(f, " ({code})")?;
+        }
+        write!(f, ": {}", self.message)
+    }
+}
+
+impl std::error::Error for ProbeFailure {}
+
+fn probe_failure<E>(step: ProbeStep, error: E) -> ProbeFailure
+where
+    E: ProvideErrorMetadata + std::error::Error,
+{
+    ProbeFailure {
+        step,
+        code: error.code().map(str::to_owned),
+        message: DisplayErrorContext(&error).to_string(),
+    }
+}
+
+/// Check that `settings` can write, read, list and delete, using one random
+/// object under `.almond-probe/` (ignored by `parse_object_key`). Blob keys are
+/// never read, listed or deleted. On success the probe object is gone; after a
+/// failure it is removed on a best-effort basis.
+pub async fn probe(settings: &S3Settings) -> Result<(), ProbeFailure> {
+    let client = build_client(settings).await;
+    let bucket = &settings.bucket;
+    let key = format!("{PROBE_PREFIX}{}", uuid::Uuid::new_v4());
+    let body = b"almond probe".to_vec();
+
+    client
+        .put_object()
+        .bucket(bucket)
+        .key(&key)
+        .body(ByteStream::from(body.clone()))
+        .send()
+        .await
+        .map_err(|e| probe_failure(ProbeStep::Put, e))?;
+
+    let result = async {
+        let got = client
+            .get_object()
+            .bucket(bucket)
+            .key(&key)
+            .send()
+            .await
+            .map_err(|e| probe_failure(ProbeStep::Get, e))?;
+        let bytes = got.body.collect().await.map_err(|e| ProbeFailure {
+            step: ProbeStep::Get,
+            code: None,
+            message: e.to_string(),
+        })?;
+        if bytes.into_bytes().as_ref() != body.as_slice() {
+            return Err(ProbeFailure {
+                step: ProbeStep::Get,
+                code: None,
+                message: "object read back differs from what was written".to_owned(),
+            });
+        }
+        let listed = client
+            .list_objects_v2()
+            .bucket(bucket)
+            .prefix(&key)
+            .send()
+            .await
+            .map_err(|e| probe_failure(ProbeStep::List, e))?;
+        if !listed.contents().iter().any(|o| o.key() == Some(&key)) {
+            return Err(ProbeFailure {
+                step: ProbeStep::List,
+                code: None,
+                message: "probe object missing from listing".to_owned(),
+            });
+        }
+        Ok(())
+    }
+    .await;
+
+    let deleted = client
+        .delete_object()
+        .bucket(bucket)
+        .key(&key)
+        .send()
+        .await
+        .map_err(|e| probe_failure(ProbeStep::Delete, e));
+    result.and(deleted.map(|_| ()))
+}
+
+const PROBE_PREFIX: &str = ".almond-probe/";
+
 impl NativeS3Storage {
     pub async fn connect(settings: S3Settings) -> Self {
-        let credentials = SharedCredentialsProvider::new(Credentials::new(
-            settings.access_key_id,
-            settings.secret_access_key,
-            None,
-            None,
-            "almond",
-        ));
-        let shared_config = aws_config::defaults(BehaviorVersion::latest())
-            .region(Region::new("auto"))
-            .credentials_provider(credentials)
-            .endpoint_url(settings.endpoint)
-            .load()
-            .await;
-        let config = S3ConfigBuilder::from(&shared_config)
-            .force_path_style(false)
-            .build();
         Self {
-            client: Client::from_conf(config),
+            client: build_client(&settings).await,
             bucket: settings.bucket,
             status: Mutex::new(S3Status::Available),
         }

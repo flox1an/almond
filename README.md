@@ -238,6 +238,8 @@ New uploads and explicit mirrors use S3 when all four variables are configured. 
 
 All four variables are required together. Supplying only a subset fails startup.
 
+`ALMOND_S3_REGION` (default `auto`, which suits R2) sets the SigV4 signing region. `ALMOND_S3_FORCE_PATH_STYLE` (default `false`) addresses buckets as `<endpoint>/<bucket>` instead of `<bucket>.<endpoint>`; set it to `true` for MinIO and Garage.
+
 If the bucket is unreachable at startup, Almond still starts and serves local blobs. Until the bucket answers, requests for unknown hashes and all uploads return `503`, and nothing is written to local disk. A background task retries the listing with backoff (1 s, doubling to 5 min), merges the bucket into the index (local copies win) and resumes S3 use. Embedders can read `AppState::s3_status()` (`Available`, or `Unavailable { error, last_attempt }`).
 
 ```dotenv
@@ -259,6 +261,7 @@ MinIO:
 ```dotenv
 ALMOND_S3_ENDPOINT=http://localhost:9000
 ALMOND_S3_BUCKET=<bucket-name>
+ALMOND_S3_FORCE_PATH_STYLE=true
 ALMOND_S3_ACCESS_KEY_ID=<minio-access-key>
 ALMOND_S3_SECRET_ACCESS_KEY=<minio-secret-key>
 ```
