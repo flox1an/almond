@@ -7,9 +7,11 @@ export default defineConfig({
   description: 'A Blossom media server for Nostr',
   cleanUrls: true,
   lastUpdated: true,
+  head: [['link', { rel: 'icon', type: 'image/x-icon', href: '/almond/favicon.ico' }]],
   // Agent tooling notes, not user documentation.
   srcExclude: ['agents/**'],
   themeConfig: {
+    logo: { src: '/logo.png', alt: 'Almond' },
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'Configuration', link: '/configuration/' },

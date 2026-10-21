@@ -21,6 +21,7 @@ Almond pages and diagnostics:
 | Method and path | Purpose |
 |---|---|
 | `GET /` | Homepage |
+| `GET /favicon.ico` | Almond favicon; disabled together with the homepage |
 | `GET /config` | Config editor |
 | `GET /filter` | BUD-11 filter over all stored hashes |
 | `GET /metrics` | Prometheus metrics; requires `Authorization: Bearer <ALMOND_METRICS_TOKEN>` |

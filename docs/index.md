@@ -5,6 +5,9 @@ hero:
   name: Almond
   text: Blossom media server for Nostr
   tagline: Temporary blob storage on your filesystem or S3 bucket. Authorized with Nostr signatures, expired automatically, cacheable from other Blossom servers.
+  image:
+    src: /logo.png
+    alt: Almond
   actions:
     - theme: brand
       text: Get started

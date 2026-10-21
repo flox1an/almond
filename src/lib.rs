@@ -185,6 +185,17 @@ async fn serve_index(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+async fn serve_favicon(State(state): State<AppState>) -> Result<impl IntoResponse, StatusCode> {
+    if !state.feature_homepage_enabled {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "image/x-icon")],
+        include_bytes!("../docs/public/favicon.ico").as_slice(),
+    ))
+}
+
 async fn serve_filter_test() -> Result<axum::response::Response<axum::body::Body>, StatusCode> {
     use axum::{http::header, response::Response};
 
@@ -242,7 +253,7 @@ pub fn create_app(state: AppState) -> Router {
     with_common_layers(routes, state)
 }
 
-/// Almond's homepage, config editor, filter and diagnostics endpoints.
+/// Almond's homepage, favicon, config editor, filter and diagnostics endpoints.
 /// The standalone binary merges these onto [`create_app`].
 pub fn standalone_extras(state: AppState) -> Router {
     let routes = Router::new()
@@ -253,6 +264,7 @@ pub fn standalone_extras(state: AppState) -> Router {
         .route("/metrics", get(get_metrics))
         .route("/", get(serve_index))
         .route("/index.html", get(serve_index))
+        .route("/favicon.ico", get(serve_favicon))
         .route("/filter-test.html", get(serve_filter_test))
         .route("/config", get(serve_config_editor));
     with_common_layers(routes, state)

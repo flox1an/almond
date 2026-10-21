@@ -1,11 +1,8 @@
-```
-        .__                             .___
- _____  |  |   _____   ____   ____    __| _/
- \__  \ |  |  /     \ /  _ \ /    \  / __ | 
-  / __ \|  |_|  Y Y  (  <_> )   |  \/ /_/ | 
- (____  /____/__|_|  /\____/|___|  /\____ | 
-      \/           \/            \/      \/  
-```
+<p align="center">
+  <img src="docs/public/logo.png" alt="Almond" width="180" />
+</p>
+
+# Almond
 
 **Almond** (Any Large Media ON Demand) is a [Blossom](https://github.com/hzrd149/blossom)
 media server for Nostr. It stores blobs on the local filesystem or in an

@@ -46,7 +46,7 @@ cargo run --example embedded --no-default-features -- 127.0.0.1:3001
 | `Config::validate(self)` | Cross-field checks, plus normalization of a blank metrics token. `build_state` runs the same checks. |
 | `build_state(&cfg).await` | Validates the config, then initializes storage, indexes, HTTP clients and metrics. Returns `AppState`. |
 | `create_app(state)` | The Blossom routes (`/upload`, `/mirror`, `/list`, `/report`, `/{filename}`) as a `Router`. |
-| `standalone_extras(state)` | Optional: Almond's homepage, config editor, `/filter`, `/metrics` and diagnostics. |
+| `standalone_extras(state)` | Optional: Almond's homepage, favicon, config editor, `/filter`, `/metrics` and diagnostics. |
 | `spawn_background_tasks(&state, &cfg)` | Starts the periodic cleanup and refresh jobs and returns them as a `JoinSet<()>`. |
 | `AppState::s3_status()` | `None` without S3. Otherwise `Available`, or `Unavailable { error, last_attempt }`. |
 
