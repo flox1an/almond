@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Almond
   text: Blossom media server for Nostr
-  tagline: Temporary blob storage on your filesystem or S3 bucket. Authorized with Nostr signatures, expired automatically, cacheable from other Blossom servers.
+  tagline: Blob storage on your filesystem or S3 bucket. No database, no user accounts — just Nostr signatures. Keep files permanently or enable automatic expiration. Cache blobs from other Blossom servers.
   image:
     src: /logo.png
     alt: Almond
@@ -27,8 +27,8 @@ features:
     title: Blossom API
     details: Upload (including resumable chunked uploads), download, mirror, list, delete and report. Implements BUD-01, BUD-02, BUD-04, BUD-06, BUD-07, BUD-09, BUD-11 and BUD-12.
   - icon: ⏳
-    title: Temporary storage
-    details: Filesystem only, no database. Age limits, size and count caps, oldest-first eviction. Optional S3-compatible bucket for uploads.
+    title: Database-free storage
+    details: Files on disk or in an S3-compatible bucket, no database or user accounts. Optional age limits, size and count caps, and oldest-first eviction.
   - icon: 🔑
     title: Nostr access control
     details: Every write endpoint is off, public, wot (web of trust) or dvm, plus an optional npub allowlist. Optional Cashu payments per operation.

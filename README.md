@@ -6,9 +6,10 @@
 
 **Almond** (Any Large Media ON Demand) is a [Blossom](https://github.com/hzrd149/blossom)
 media server for Nostr. It stores blobs on the local filesystem or in an
-S3-compatible bucket, expires them automatically, and can cache blobs from other
-Blossom servers. Writes are authorized with Nostr signatures: open to everyone,
-limited to an npub allowlist, to a web of trust, or to DVMs.
+S3-compatible bucket — no database, no user accounts — and can cache blobs from
+other Blossom servers. Blobs are kept permanently unless expiration is enabled.
+Writes are authorized with Nostr signatures: open to everyone, limited to an
+npub allowlist, to a web of trust, or to DVMs.
 
 ## Quick start
 
