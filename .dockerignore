@@ -23,3 +23,6 @@ target/
 # Ignore OS files
 .DS_Store
 Thumbs.db
+
+# Documentation site (not part of the image)
+docs/

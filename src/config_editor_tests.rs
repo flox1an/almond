@@ -1,7 +1,6 @@
 //! Drift and fidelity tests for `src/config-editor.html`.
 //!
-//! `config-editor.html` is a hand-written, build-free artifact (see
-//! `docs/plans/2026-08-11-config-editor-spec.md`). Its `ALMOND_SCHEMA`
+//! `config-editor.html` is a hand-written, build-free artifact. Its `ALMOND_SCHEMA`
 //! literal is a second, independently maintained description of the same
 //! variables `Config::from_map` reads. Nothing here generates that literal;
 //! these tests only prove it has not drifted from `src/config.rs`, by

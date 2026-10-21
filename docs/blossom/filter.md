@@ -1,8 +1,12 @@
-# BUD-11
+# Blob discovery filter
 
-## Privacy-Preserving Blob Discovery
+`draft` `optional` `Almond extension`
 
-`draft` `optional`
+::: info
+This draft was written as "BUD-11". Upstream Blossom has since assigned
+BUD-11 to [Nostr Authorization](https://github.com/hzrd149/blossom/blob/master/buds/11.md).
+Almond's code and config editor still use "BUD-11 filter" for `/filter`.
+:::
 
 Defines the `/filter` endpoint for privacy-preserving blob existence queries using Binary Fuse filters.
 

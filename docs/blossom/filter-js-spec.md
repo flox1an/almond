@@ -2,7 +2,12 @@
 
 **Version**: 1.0
 **Date**: 2025-12-04
-**Status**: Implementation Complete
+
+::: warning Needs verification
+This spec describes a bincode wire format and xorf 0.11. The server now emits a
+MessagePack array and uses xorf 0.13. Research is tracked in
+[#47](https://github.com/flox1an/almond/issues/47).
+:::
 
 ## Table of Contents
 

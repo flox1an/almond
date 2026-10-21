@@ -13,7 +13,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'sha256-PwLg0Hzmc0BZa9OO3QeH4OKOF3qCzRoQ3njPgwf73Q8='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
+      content="default-src 'none'; script-src 'sha256-PFI+3RBVd33GDKW/SeBaXCP7huSK5S6+0BWW7HIN4k0='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
     />
     <style>
       /*
@@ -1592,7 +1592,7 @@
             el("p", { text: "Variables not part of Almond's core schema (preserved unchanged on export, e.g. FIPS_* or RUST_LOG):" })
           );
           wrap.appendChild(
-            el("p", { text: "Pre-rename variable names are still read as deprecated aliases (Almond logs a warning), but this editor does not migrate them \u2014 rename them using the migration table in the README." })
+            el("p", { text: "Pre-rename variable names are still read as deprecated aliases (Almond logs a warning), but this editor does not migrate them \u2014 rename them using the migration table in the documentation (Configuration \u2192 Environment variables)." })
           );
           const ul = el("ul", { class: "panel-list" });
           unknown.forEach((k) => ul.appendChild(el("li", { text: k })));

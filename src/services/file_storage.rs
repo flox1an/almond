@@ -389,10 +389,8 @@ impl Removal {
 /// the index has moved on, so a stale retention candidate cannot delete a
 /// republished hash. Callers acting on a hash alone pass `None`.
 ///
-/// Removal is origin-agnostic by design. See
-/// `docs/plans/2026-07-25-storage-origin-split-design.md`, "Existing behavior
-/// preserved": delete and report act on the currently indexed copy regardless
-/// of origin.
+/// Removal is origin-agnostic by design: delete and report act on the
+/// currently indexed copy regardless of origin.
 ///
 /// Returns whether an indexed entry was removed. An unindexed hash is not an
 /// error — absence is already the caller's desired end state.

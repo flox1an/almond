@@ -1,4 +1,4 @@
-# Known Blossom Specification Issues
+# Spec deviations
 
 Scope: current implementation compared with Blossom BUD-00 through BUD-12 from
 [`hzrd149/blossom`](https://github.com/hzrd149/blossom), reviewed 2026-08-13.
@@ -127,7 +127,7 @@ uses empty `content`. Empty or non-explanatory content therefore remains a
 client-side protocol responsibility.
 
 
-### BUD-12 — /list/<pubkey> is not an uploader-specific list
+### BUD-12 — `/list/<pubkey>` is not an uploader-specific list
 
 **Requirement:** `/list/<pubkey>` **MUST** return blobs uploaded by the specified
 public key.

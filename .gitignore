@@ -12,3 +12,5 @@ storage5/
 node_modules/
 todelete.txt
 *.bak
+docs/.vitepress/dist/
+docs/.vitepress/cache/

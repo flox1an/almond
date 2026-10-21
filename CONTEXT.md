@@ -201,7 +201,7 @@ Standard Cashu token string starting with `cashuA` or `cashuB`.
 ### Environment Variables
 
 Every variable can also be passed as a CLI flag (`ALMOND_UPLOAD_ACCESS` ↔
-`--upload-access`) or loaded from a dotenv file with `--config`; see README.md.
+`--upload-access`) or loaded from a dotenv file with `--config`; see `docs/configuration/`.
 
 #### Server Configuration
 - `ALMOND_BIND_ADDR`: Address to bind server (default: `"127.0.0.1:3000"`)
@@ -266,7 +266,7 @@ Every variable can also be passed as a CLI flag (`ALMOND_UPLOAD_ACCESS` ↔
   chosen and installed by the host.
 - The `cashu` Cargo feature is enabled by default. Disabling default features
   omits payment dependencies and rejects paid-operation configuration.
-- Embedding setup and lifecycle: [README, Library embedding](README.md#library-embedding).
+- Embedding setup and lifecycle: [Rust library](docs/library.md).
 
 ### Service Layer Architecture
 
