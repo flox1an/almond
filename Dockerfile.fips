@@ -25,6 +25,7 @@ RUN apt-get update && \
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY docs/public/favicon.ico docs/public/favicon.ico
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/src/app/target \
@@ -58,7 +59,7 @@ RUN set -eux; \
     cp "/tmp/fips-${FIPS_VERSION}-linux-${FIPS_ARCH}/fipsctl" /tmp/fipsctl; \
     cp "/tmp/fips-${FIPS_VERSION}-linux-${FIPS_ARCH}/hosts" /tmp/fips-hosts
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS runtime
 
 WORKDIR /app
 
@@ -73,6 +74,16 @@ RUN apt-get update && \
         libdbus-1-3 \
         libssl3t64 \
         procps && \
+    dpkg --compare-versions "$(dpkg-query -W ca-certificates | awk '{print $2}')" ge '20260816ubuntu0.24.04.1' && \
+    openssl crl2pkcs7 -nocrl -certfile /etc/ssl/certs/ca-certificates.crt \
+        -out /tmp/ca-certificates.p7b && \
+    subjects="$(openssl pkcs7 -in /tmp/ca-certificates.p7b -print_certs -noout)" && \
+    test -n "$subjects" && \
+    case "$subjects" in \
+        *"emSign ECC Root CA - G3"*|*"AAA Certificate Services"*) \
+            echo "Compromised CA remains trusted" >&2; exit 1 ;; \
+    esac && \
+    rm /tmp/ca-certificates.p7b && \
     rm -rf /var/lib/apt/lists/*
 
 RUN printf '%s\n' \

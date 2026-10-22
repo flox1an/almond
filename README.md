@@ -19,7 +19,7 @@ With Docker:
 docker volume create almond-files
 docker run --rm -p 3000:3000 \
   -v almond-files:/app/files \
-  ghcr.io/flox1an/almond:v0.5.1
+  ghcr.io/flox1an/almond:v0.5.2
 ```
 
 From source:

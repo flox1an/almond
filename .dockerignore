@@ -24,5 +24,7 @@ target/
 .DS_Store
 Thumbs.db
 
-# Documentation site (not part of the image)
+# Documentation site (not part of the image) — except the favicon, which is
+# compiled into the binary via include_bytes! in src/lib.rs.
 docs/
+!docs/public/favicon.ico

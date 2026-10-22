@@ -23,6 +23,9 @@ COPY Cargo.toml Cargo.lock ./
 # Copy the actual source code
 COPY src ./src
 
+# Compiled into the binary via include_bytes! (src/lib.rs)
+COPY docs/public/favicon.ico docs/public/favicon.ico
+
 # Build the application
 # Use BuildKit cache mounts for faster builds - these persist across builds
 # Cache the cargo registry (downloaded crates) and target directory (compiled artifacts)
@@ -32,13 +35,23 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp /usr/src/app/target/release/almond /tmp/almond
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS runtime
 
 WORKDIR /app
 
 # Install runtime dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates libssl3 && \
+    dpkg --compare-versions "$(dpkg-query -W ca-certificates | awk '{print $2}')" ge '20250419~deb12u2' && \
+    openssl crl2pkcs7 -nocrl -certfile /etc/ssl/certs/ca-certificates.crt \
+        -out /tmp/ca-certificates.p7b && \
+    subjects="$(openssl pkcs7 -in /tmp/ca-certificates.p7b -print_certs -noout)" && \
+    test -n "$subjects" && \
+    case "$subjects" in \
+        *"emSign ECC Root CA - G3"*|*"AAA Certificate Services"*) \
+            echo "Compromised CA remains trusted" >&2; exit 1 ;; \
+    esac && \
+    rm /tmp/ca-certificates.p7b && \
     rm -rf /var/lib/apt/lists/*
 
 # Use a fixed numeric identity. Host bind mounts retain host ownership, so
