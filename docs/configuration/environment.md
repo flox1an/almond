@@ -122,6 +122,44 @@ see [Configuration overview](/configuration/).
 | `ALMOND_SERVE_FILES_MANIFEST_NAME` | `manifest-sha256.txt` | SHA-256 manifest file name |
 | `ALMOND_SERVE_FILES_REFRESH_INTERVAL` | `1h` | Manifest rebuild interval |
 
+## FIPS mesh
+
+These variables configure the FIPS container of the `ghcr.io/flox1an/almond-fips`
+image, not Almond itself: they are read by the image's entrypoint and are not
+command-line flags. See [FIPS mesh](/deployment/fips) for the deployment layouts.
+
+**Identity and peers**
+
+| Variable | Default | Description |
+|---|---|---|
+| `FIPS_NSEC` | – | Node secret key, hex or `nsec1`; required unless a full config is mounted and `FIPS_GENERATE_CONFIG=false` |
+| `FIPS_PEERS` | – | Peers, one `npub,addr[,alias[,transport]]` per line; overrides the single-peer variables |
+| `FIPS_PEER_NPUB`, `FIPS_PEER_ADDR` | – | A single direct peer: its npub and `host:port` |
+| `FIPS_PEER_ALIAS` | `peer` | Name of the single peer in logs and `fipsctl`; also the default for `FIPS_PEERS` lines without one |
+| `FIPS_PEER_TRANSPORT` | `udp` | Transport of the single peer; also the default for `FIPS_PEERS` lines without one |
+| `FIPS_HOSTS` | – | `.fips` aliases, one `name npub1...` per line; `media-cache npub1...` makes `media-cache.fips` resolve |
+
+**Transport and interface**
+
+| Variable | Default | Description |
+|---|---|---|
+| `FIPS_UDP_BIND` | `0.0.0.0:2121` | UDP transport listen address; publish this port |
+| `FIPS_UDP_PORT` | port of `FIPS_UDP_BIND` | Transport port that `FIPS_ISOLATE` keeps open |
+| `FIPS_TCP_BIND` | – | Optional TCP transport listen address |
+| `FIPS_TUN_NAME` | `fips0` | Name of the mesh interface |
+| `FIPS_TUN_MTU` | `1280` | MTU of the mesh interface |
+
+**Container behavior**
+
+| Variable | Default | Description |
+|---|---|---|
+| `FIPS_RUN_ALMOND` | `true` | `true`: run Almond in the same container. `false`: run only FIPS, for the pod layout |
+| `FIPS_REWRITE_DNS` | `true` | Point the container's (in a pod: the shared) `/etc/resolv.conf` at a local dnsmasq that sends `.fips` names to FIPS and everything else to the original resolver. `false` leaves DNS alone; Almond then cannot resolve `.fips` upstreams |
+| `FIPS_ISOLATE` | `false` | `true` drops all traffic on `FIPS_POD_IFACE` except the FIPS transport: mesh-only egress. In a pod this applies to Almond too |
+| `FIPS_POD_IFACE` | `eth0` | Physical container interface that `FIPS_ISOLATE` restricts |
+| `FIPS_GENERATE_CONFIG` | `true` | Write the FIPS config from these variables at every start; `false` uses a mounted config if it exists |
+| `FIPS_CONFIG_PATH` | `/etc/fips/fips.yaml` | Location of the FIPS config |
+
 ## Migrating from pre-0.5 names
 
 

@@ -42,7 +42,7 @@ a personal server with S3 storage that also caches upstream blobs).
 | Caching edge | Serves and caches blobs from other servers | `ALMOND_UPSTREAM_SERVERS`, `ALMOND_UPSTREAM_MODE` | [Upstream lookups](/guide/how-it-works#upstream-lookups) |
 | Local Blossom Cache | Per-device cache on `127.0.0.1:24242` | uploads off, `ALMOND_CUSTOM_ORIGIN_ACCESS=public` | [Guide](/deployment/local-cache) |
 | S3-backed server | Uploads stored in a bucket, served by Almond | `ALMOND_S3_*` | [S3 storage](/guide/how-it-works#s3-storage) |
-| FIPS mesh node | Serve or fetch blobs over the FIPS mesh | `almond-fips` image, `FIPS_*` | [Guide](/deployment/fips) |
+| FIPS mesh node | Serve or fetch blobs over the FIPS mesh | `docker-compose.fips.yml`, `FIPS_*` | [Guide](/deployment/fips) |
 | Embedded | Blossom routes inside your own Axum app | Rust library | [Guide](/library) |
 
 ## Quick start

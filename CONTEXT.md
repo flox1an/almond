@@ -510,9 +510,12 @@ docker run -p 3000:3000 \
 #### FIPS-enabled image
 
 GitHub Actions publishes a second image at `ghcr.io/flox1an/almond-fips`.
-It runs FIPS, dnsmasq, and Almond in one container. Almond can be reachable at
-the same time via normal Docker HTTP publishing (`-p 3000:3000`) and via the
-FIPS mesh (`http://<node-npub>.fips:3000`) when `ALMOND_BIND_ADDR=0.0.0.0:3000`.
+It runs FIPS, dnsmasq, and Almond in one container. With `FIPS_RUN_ALMOND=false`
+it runs only FIPS as a sidecar: `docker-compose.fips.yml` puts it in a pod with a
+`pause` container (owns the network namespace) and the standard Almond image.
+Almond can be reachable at the same time via normal Docker HTTP publishing
+(`-p 3000:3000`) and via the FIPS mesh (`http://<node-npub>.fips:3000`) when
+`ALMOND_BIND_ADDR=[::]:3000` (`fips0` carries IPv6 only).
 
 The container needs `NET_ADMIN`, `/dev/net/tun`, and IPv6 enabled:
 

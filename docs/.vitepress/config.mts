@@ -44,7 +44,7 @@ export default defineConfig({
           { text: 'HTTPS', link: '/deployment/https' },
           { text: 'S3 providers', link: '/deployment/s3' },
           { text: 'Local Blossom Cache', link: '/deployment/local-cache' },
-          { text: 'FIPS mesh image', link: '/deployment/fips' },
+          { text: 'FIPS mesh', link: '/deployment/fips' },
         ],
       },
       { text: 'Rust library', items: [{ text: 'Embedding in Axum', link: '/library' }] },

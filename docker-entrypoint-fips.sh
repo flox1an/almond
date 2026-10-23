@@ -13,6 +13,9 @@ FIPS_PEER_ALIAS="${FIPS_PEER_ALIAS:-peer}"
 FIPS_PEER_TRANSPORT="${FIPS_PEER_TRANSPORT:-udp}"
 FIPS_PEERS="${FIPS_PEERS:-}"
 FIPS_UDP_PORT="${FIPS_UDP_PORT:-${FIPS_UDP_BIND##*:}}"
+# false: FIPS sidecar mode. Network setup runs as usual, then this container only
+# runs FIPS; Almond runs in its own container that joins the network namespace.
+FIPS_RUN_ALMOND="${FIPS_RUN_ALMOND:-true}"
 
 cleanup() {
     [ -n "${ALMOND_PID:-}" ] && kill "$ALMOND_PID" 2>/dev/null || true
@@ -140,13 +143,15 @@ configure_dns() {
     local upstream_nameservers
     upstream_nameservers="$(awk '/^nameserver[[:space:]]+/ && $2 !~ /^127[.]/ && $2 != "::1" { print $2 }' /etc/resolv.conf || true)"
 
-    if [ -z "$upstream_nameservers" ]; then
-        upstream_nameservers="127.0.0.11"
+    # A restarted container (or a sidecar whose network namespace outlived it)
+    # already sees the rewritten resolv.conf; keep the upstreams found earlier.
+    local upstream_conf=/etc/dnsmasq.d/fips-upstream.conf
+    if [ -n "$upstream_nameservers" ] || [ ! -s "$upstream_conf" ]; then
+        : > "$upstream_conf"
+        while IFS= read -r nameserver; do
+            [ -n "$nameserver" ] && echo "server=${nameserver}" >> "$upstream_conf"
+        done <<< "${upstream_nameservers:-127.0.0.11}"
     fi
-
-    while IFS= read -r nameserver; do
-        [ -n "$nameserver" ] && echo "server=${nameserver}" >> /etc/dnsmasq.d/fips.conf
-    done <<< "$upstream_nameservers"
 
     local search_line
     search_line="$(awk '/^(search|domain)[[:space:]]+/ { print; exit }' /etc/resolv.conf || true)"
@@ -166,32 +171,53 @@ configure_fips_hosts() {
     fi
 }
 
+# Appends a rule only if it is missing: in sidecar mode the network namespace,
+# and with it every rule, survives FIPS container restarts.
+ensure_rule() {
+    local cmd="$1"
+    shift
+    "$cmd" -C "$@" 2>/dev/null || "$cmd" -A "$@"
+}
+
 configure_isolation() {
     if [ "$FIPS_ISOLATE" != "true" ]; then
         return
     fi
 
-    iptables -A OUTPUT -o lo -j ACCEPT
-    iptables -A INPUT -i lo -j ACCEPT
-    iptables -A OUTPUT -o "$FIPS_POD_IFACE" -p udp --dport "$FIPS_UDP_PORT" -j ACCEPT
-    iptables -A OUTPUT -o "$FIPS_POD_IFACE" -p udp --sport "$FIPS_UDP_PORT" -j ACCEPT
-    iptables -A INPUT -i "$FIPS_POD_IFACE" -p udp --dport "$FIPS_UDP_PORT" -j ACCEPT
-    iptables -A INPUT -i "$FIPS_POD_IFACE" -p udp --sport "$FIPS_UDP_PORT" -j ACCEPT
-    iptables -A INPUT -i "$FIPS_POD_IFACE" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    iptables -A OUTPUT -o "$FIPS_POD_IFACE" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    iptables -A OUTPUT -o "$FIPS_POD_IFACE" -j DROP
-    iptables -A INPUT -i "$FIPS_POD_IFACE" -j DROP
+    ensure_rule iptables OUTPUT -o lo -j ACCEPT
+    ensure_rule iptables INPUT -i lo -j ACCEPT
+    ensure_rule iptables OUTPUT -o "$FIPS_POD_IFACE" -p udp --dport "$FIPS_UDP_PORT" -j ACCEPT
+    ensure_rule iptables OUTPUT -o "$FIPS_POD_IFACE" -p udp --sport "$FIPS_UDP_PORT" -j ACCEPT
+    ensure_rule iptables INPUT -i "$FIPS_POD_IFACE" -p udp --dport "$FIPS_UDP_PORT" -j ACCEPT
+    ensure_rule iptables INPUT -i "$FIPS_POD_IFACE" -p udp --sport "$FIPS_UDP_PORT" -j ACCEPT
+    ensure_rule iptables INPUT -i "$FIPS_POD_IFACE" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    ensure_rule iptables OUTPUT -o "$FIPS_POD_IFACE" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    ensure_rule iptables OUTPUT -o "$FIPS_POD_IFACE" -j DROP
+    ensure_rule iptables INPUT -i "$FIPS_POD_IFACE" -j DROP
 
-    ip6tables -A OUTPUT -o lo -j ACCEPT
-    ip6tables -A INPUT -i lo -j ACCEPT
-    ip6tables -A OUTPUT -o "$FIPS_TUN_NAME" -j ACCEPT
-    ip6tables -A INPUT -i "$FIPS_TUN_NAME" -j ACCEPT
-    ip6tables -A OUTPUT -o "$FIPS_POD_IFACE" -j DROP
-    ip6tables -A INPUT -i "$FIPS_POD_IFACE" -j DROP
+    ensure_rule ip6tables OUTPUT -o lo -j ACCEPT
+    ensure_rule ip6tables INPUT -i lo -j ACCEPT
+    ensure_rule ip6tables OUTPUT -o "$FIPS_TUN_NAME" -j ACCEPT
+    ensure_rule ip6tables INPUT -i "$FIPS_TUN_NAME" -j ACCEPT
+    ensure_rule ip6tables OUTPUT -o "$FIPS_POD_IFACE" -j DROP
+    ensure_rule ip6tables INPUT -i "$FIPS_POD_IFACE" -j DROP
 }
 
 if [ "${FIPS_GENERATE_CONFIG:-true}" = "true" ] || [ ! -f "$FIPS_CONFIG_PATH" ]; then
     generate_fips_config
+fi
+
+configure_fips_hosts
+configure_dns
+configure_isolation
+
+ensure_rule ip6tables OUTPUT -t mangle -o "$FIPS_TUN_NAME" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
+dnsmasq --conf-dir=/etc/dnsmasq.d
+
+if [ "$FIPS_RUN_ALMOND" != "true" ]; then
+    echo "Starting FIPS sidecar (FIPS_RUN_ALMOND=${FIPS_RUN_ALMOND})"
+    exec fips --config "$FIPS_CONFIG_PATH"
 fi
 
 # Container defaults. They apply only when the operator set neither the new
@@ -211,13 +237,6 @@ if [ -n "${TLS_CERT:-}" ] && [ -n "${TLS_KEY:-}" ]; then
     chmod 600 "$ALMOND_TLS_KEY"
 fi
 
-configure_fips_hosts
-configure_dns
-configure_isolation
-
-ip6tables -t mangle -A OUTPUT -o "$FIPS_TUN_NAME" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-
-dnsmasq --conf-dir=/etc/dnsmasq.d
 fips --config "$FIPS_CONFIG_PATH" &
 FIPS_PID="$!"
 

@@ -1,46 +1,58 @@
+# Almond on the FIPS mesh, as a pod of three containers:
+#   pause  owns the network namespace and publishes the ports; it does nothing else
+#   fips   joins it with NET_ADMIN and the TUN device, holds the node key
+#   almond joins it with the standard image: no capabilities, UID 10001
+# Because neither fips nor almond owns the namespace, a FIPS crash or restart
+# never takes Almond's network down.
+#
+#   cp .env.fips.example .env.fips
+#   docker compose --env-file .env.fips -f docker-compose.fips.yml up -d
 services:
-  almond:
-    build:
-      context: .
-      dockerfile: Dockerfile.fips
+  pause:
+    image: registry.k8s.io/pause:3.10
+    restart: unless-stopped
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    ports:
+      - "3000:3000"
+      - "2121:2121/udp"
+
+  fips:
+    image: ghcr.io/flox1an/almond-fips:main
+    network_mode: service:pause
+    restart: unless-stopped
     cap_add:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
-    sysctls:
-      - net.ipv6.conf.all.disable_ipv6=0
-    ports:
-      - "3000:80"
-      - "2121:2121/udp"
     environment:
-      # FIPS identity (replace with your own nsec)
-      FIPS_NSEC: nsec1...
+      FIPS_RUN_ALMOND: "false"
+      FIPS_NSEC: ${FIPS_NSEC:?set FIPS_NSEC}
+      FIPS_PEER_NPUB: ${FIPS_PEER_NPUB:-}
+      FIPS_PEER_ADDR: ${FIPS_PEER_ADDR:-}
+      FIPS_PEER_ALIAS: ${FIPS_PEER_ALIAS:-gateway}
+      FIPS_PEER_TRANSPORT: ${FIPS_PEER_TRANSPORT:-udp}
+      FIPS_PEERS: ${FIPS_PEERS:-}
+      FIPS_HOSTS: ${FIPS_HOSTS:-}
 
-      # FIPS peers
-      FIPS_PEERS: |-
-        npub1260n42s06vzc7796w0fh3ny7zcpw6tlk4gq3940gmfrzl5c9pv2s3657q8,217.160.76.169:2121,test-de01,udp
-        npub1u0z26dc4qeneu5rvwvmpfhtwh3522ed6rlgxr9jarrfnjrc6ew4qxjysrs,88.208.241.33:2121,test-uk01,udp
-        npub10yffd020a4ag8zcy75f9pruq3rnghvvhd5hphl9s62zgp35s560qrksp9u,23.182.128.74:2121,test-us02,udp
+  almond:
+    image: ghcr.io/flox1an/almond:main
+    network_mode: service:pause
+    restart: unless-stopped
+    depends_on:
+      - fips
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      # IPv6 wildcard: mesh peers arrive over fips0, which has no IPv4 address.
+      ALMOND_BIND_ADDR: "[::]:3000"
+      ALMOND_PUBLIC_URL: ${ALMOND_PUBLIC_URL:?set ALMOND_PUBLIC_URL}
+      ALMOND_UPSTREAM_MODE: ${ALMOND_UPSTREAM_MODE:-proxy}
+      ALMOND_UPSTREAM_SERVERS: ${ALMOND_UPSTREAM_SERVERS:-}
+    volumes:
+      - almond-files:/app/files
 
-      # .fips hostname aliases (so http://test-de01.fips resolves for upstream)
-      FIPS_HOSTS: |-
-        test-de01 npub1260n42s06vzc7796w0fh3ny7zcpw6tlk4gq3940gmfrzl5c9pv2s3657q8
-        test-es01 npub1...
-        test-uk01 npub1u0z26dc4qeneu5rvwvmpfhtwh3522ed6rlgxr9jarrfnjrc6ew4qxjysrs
-        test-us01 npub1...
-        test-us02 npub10yffd020a4ag8zcy75f9pruq3rnghvvhd5hphl9s62zgp35s560qrksp9u
-        test-us03 npub1...
-        test-us04 npub1...
-
-      # Almond
-      RUST_LOG: info
-      ALMOND_BIND_ADDR: '[::]:80'
-      ALMOND_PUBLIC_URL: https://almond.apps2.slidestr.net
-      ALMOND_ALLOWED_NPUBS: npub1klr0dy2ul2dx9llk58czvpx73rprcmrvd5dc7ck8esg8f8es06qs427gxc,npub106nla9les99krufcx2r2ylzycvqqhpj25mgpv0l9hf8ew99hwlpqlq7ze5
-      ALMOND_CUSTOM_ORIGIN_ACCESS: wot
-      ALMOND_CHUNK_MAX_SIZE: 200MiB
-      ALMOND_STORAGE_MAX_FILES: 999999999
-      ALMOND_STORAGE_MAX_SIZE: 150000MiB
-      ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE: 5000MiB
-      ALMOND_UPSTREAM_MODE: proxy
-      ALMOND_UPSTREAM_SERVERS: https://blossom.primal.net,https://blossom.yakihonne.com/,https://haven.sovereignengineering.io,https://cdn.satellite.earth/,https://24242.io/,https://blossom.band/,https://nostr.download/,http://test-de01.fips:3000
+volumes:
+  almond-files:

@@ -33,3 +33,5 @@ Where to next:
 - [Command-line flags](/configuration/cli) — examples and CLI-specific syntax
 - [Environment variables](/configuration/environment) — value formats, full
   reference and the pre-0.5 migration table
+- [FIPS mesh variables](/configuration/environment#fips-mesh) — `FIPS_*`
+  settings of the `almond-fips` image

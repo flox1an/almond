@@ -67,3 +67,6 @@ docker run --rm -p 3000:3000 \
   -e ALMOND_TLS_ENABLED=true \
   ghcr.io/flox1an/almond:v0.5.1
 ```
+
+To serve Almond on the FIPS mesh, run this image next to a FIPS sidecar; see
+[FIPS mesh](/deployment/fips).
