@@ -103,7 +103,7 @@ async fn unreachable_bucket_degrades_startup_then_recovers() {
         panic!("S3 should be unavailable");
     };
     assert!(!error.is_empty() && last_attempt > 0);
-    let _tasks = almond::spawn_background_tasks(&state, &cfg);
+    let _tasks = almond::spawn_background_tasks(&state);
     let app = almond::create_app(state.clone());
 
     // Unknown hash: 503, not 404. Uploads: 503, nothing lands on local disk.

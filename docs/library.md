@@ -11,7 +11,7 @@ Almond is not published on crates.io. Depend on a release tag:
 
 ```toml
 [dependencies]
-almond = { git = "https://github.com/flox1an/almond", tag = "v0.5.1", default-features = false }
+almond = { git = "https://github.com/flox1an/almond", tag = "v0.5.3", default-features = false }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 ```
@@ -22,6 +22,13 @@ tokio = { version = "1", features = ["full"] }
 
 Omit `default-features = false` to include Cashu payments, as the standalone
 binary does.
+
+### Upgrading to v0.5.3
+
+Embedding hosts must change `spawn_background_tasks(&state, &cfg)` to
+`spawn_background_tasks(&state)`. Job selection and refresh settings now come
+from the initialized state, so a second, mismatched config cannot select the
+wrong background jobs. The standalone CLI is unchanged.
 
 ## Minimal host
 
@@ -47,7 +54,7 @@ cargo run --example embedded --no-default-features -- 127.0.0.1:3001
 | `build_state(&cfg).await` | Validates the config, then initializes storage, indexes, HTTP clients and metrics. Returns `AppState`. |
 | `create_app(state)` | The Blossom routes (`/upload`, `/mirror`, `/list`, `/report`, `/{filename}`) as a `Router`. |
 | `standalone_extras(state)` | Optional: Almond's homepage, favicon, config editor, `/filter`, `/metrics` and diagnostics. |
-| `spawn_background_tasks(&state, &cfg)` | Starts the periodic cleanup and refresh jobs and returns them as a `JoinSet<()>`. |
+| `spawn_background_tasks(&state)` | Starts the periodic cleanup and refresh jobs selected by the initialized state and returns them as a `JoinSet<()>`. |
 | `AppState::s3_status()` | `None` without S3. Otherwise `Available`, or `Unavailable { error, last_attempt }`. |
 
 The fields of `Config` are the [command-line flags](/configuration/cli) in
@@ -82,10 +89,10 @@ cfg.upstream_servers = vec!["https://blossom.primal.net".into()];
 - **Routing.** Merge `create_app(state)` into the host router. `/{filename}`
   is a catch-all at the root, so the host's explicit routes (`/`, `/health`)
   still take precedence.
-- **Background jobs.** Keep the `JoinSet` from `spawn_background_tasks` alive
-  while serving, and build it from the same config as the state. Dropping the
-  set aborts the jobs. Request-triggered upstream and HLS jobs manage their own
-  lifecycle.
+- **Background jobs.** Keep the `JoinSet` from `spawn_background_tasks(&state)`
+  alive while serving. Job selection and refresh settings come from the
+  initialized state; no separate config is needed. Dropping the set aborts the
+  jobs. Request-triggered upstream and HLS jobs manage their own lifecycle.
 - **One state per storage root.** Set `public_url` to the externally reachable
   Blossom origin. Build one state for each storage root and clone it for the
   routers: startup clears temporary files, then migrates and indexes the

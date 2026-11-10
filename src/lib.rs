@@ -571,36 +571,34 @@ pub async fn build_state(
     })
 }
 
-/// Spawn the periodic jobs the enabled features need. Dropping the returned
-/// set aborts them all, so hold it for as long as the state is served.
-pub fn spawn_background_tasks(state: &AppState, cfg: &Config) -> JoinSet<()> {
+/// Spawn periodic jobs using the initialized state's feature modes and settings.
+/// Dropping the returned set aborts them all, so hold it while serving the state.
+pub fn spawn_background_tasks(state: &AppState) -> JoinSet<()> {
     let mut tasks = JoinSet::new();
     start_cleanup_job(&mut tasks, state.clone());
     start_chunk_cleanup_job(&mut tasks, state.clone());
     start_s3_recovery_job(&mut tasks, state.clone());
 
     // Only spawn jobs whose features are enabled.
-    if cfg.upload_access.requires_wot()
-        || cfg.mirror_access.requires_wot()
-        || cfg.custom_origin_access.requires_wot()
+    if state.feature_upload_enabled.requires_wot()
+        || state.feature_mirror_enabled.requires_wot()
+        || state.feature_custom_upstream_origin_enabled.requires_wot()
     {
         start_trust_network_refresh_job(&mut tasks, state.clone());
     }
 
-    if (cfg.upload_access.requires_dvm() || cfg.mirror_access.requires_dvm())
-        && !cfg.dvm_kinds.is_empty()
-    {
+    if state.feature_upload_enabled.requires_dvm() || state.feature_mirror_enabled.requires_dvm() {
         start_dvm_refresh_job(&mut tasks, state.clone());
     }
 
-    if let Some(path) = &cfg.serve_files_path {
+    if let Some(path) = &state.serve_files_path {
         services::serve_files::start_refresh_job(
             &mut tasks,
             path.clone(),
-            cfg.serve_files_manifest_name.clone(),
-            cfg.serve_files_refresh_interval.as_secs(),
+            state.serve_files_manifest_name.clone(),
+            state.serve_files_refresh_interval_secs,
             state.serve_file_index.clone(),
-            cfg.serve_files_manifest_dir.clone(),
+            state.serve_files_manifest_dir.clone(),
         );
     }
     tasks

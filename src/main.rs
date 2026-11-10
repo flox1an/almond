@@ -75,7 +75,7 @@ async fn run(cfg: Config) {
     };
 
     // Named binding: dropping the set would abort every background job.
-    let _tasks = almond::spawn_background_tasks(&state, &cfg);
+    let _tasks = almond::spawn_background_tasks(&state);
 
     let app = almond::create_app(state.clone()).merge(almond::standalone_extras(state));
 

@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     cfg.bind_addr = listener.local_addr()?;
     cfg.public_url = Some(format!("http://{}", cfg.bind_addr));
     let state = almond::build_state(&cfg).await?;
-    let mut tasks = almond::spawn_background_tasks(&state, &cfg);
+    let mut tasks = almond::spawn_background_tasks(&state);
     let app = Router::new()
         .route("/", get(|| async { "Embedding host" }))
         .route("/health", get(|| async { "ok" }))
