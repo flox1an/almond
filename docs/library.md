@@ -11,7 +11,7 @@ Almond is not published on crates.io. Depend on a release tag:
 
 ```toml
 [dependencies]
-almond = { git = "https://github.com/flox1an/almond", tag = "v0.5.3", default-features = false }
+almond = { git = "https://github.com/flox1an/almond", tag = "v0.5.4", default-features = false }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 ```
@@ -23,7 +23,7 @@ tokio = { version = "1", features = ["full"] }
 Omit `default-features = false` to include Cashu payments, as the standalone
 binary does.
 
-### Upgrading to v0.5.3
+### Upgrading to v0.5.4
 
 Embedding hosts must change `spawn_background_tasks(&state, &cfg)` to
 `spawn_background_tasks(&state)`. Job selection and refresh settings now come
