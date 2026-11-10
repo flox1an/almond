@@ -107,13 +107,125 @@ server lists are cached for `ALMOND_SERVER_LIST_CACHE_TTL` (default `24h`).
 
 | Mode | Behavior |
 |---|---|
-| `proxy` (default) | Streams to the client while saving a cache copy |
-| `redirect` | Returns `302` to the upstream; nothing is cached; saves bandwidth and CPU |
-| `redirect-and-cache` | Returns `302` and fills the cache in the background |
+| `proxy` (default) | Streams to the client from a shared cache fill (below) |
+| `redirect` | Returns `307` to the upstream; nothing is cached; saves bandwidth and CPU |
+| `redirect-and-cache` | Returns `307` and fills the cache in the background |
 
-Blobs larger than `ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE` (default `100MiB`) are still
-served, but proxied without being cached. Upstream fetches are SSRF-protected:
-private and local addresses are blocked.
+Upstream fetches are SSRF-protected: every candidate URL must be HTTPS (plain
+HTTP only for `.fips` overlay hosts) and resolve to a public address; private
+and local addresses are blocked, and redirects are not followed.
+
+### Shared progressive fills (`proxy` mode)
+
+All clients asking for the same blob from the same sources share **one**
+upstream transfer. The first request starts a fill: one plain `GET` of the
+whole blob, with no `Range`, no client conditional headers and
+`Accept-Encoding: identity`. The fill writes to a temporary file under
+`temp/` and runs as its own background task, so it keeps going when the client
+that started it disconnects, even before the upstream has answered.
+
+Every other request for that blob, whether it arrives while the upstream is
+still negotiating or while bytes are flowing, attaches to the fill and reads
+from the temporary file at its own pace. A slow client never slows the
+upstream transfer or other clients, and an attached request never opens a
+second upstream connection, no matter how long it waits.
+
+- **Full `GET`**: streams from byte 0 as soon as the bytes arrive.
+- **`HEAD`**: answered from the length and type the upstream announced; it
+  takes no reader slot and does not wait for bytes.
+- **Range far ahead, or `bytes=-N` (the MP4 tail)**: when the upstream sent a
+  `Content-Length`, the `206` headers are sent immediately and the body waits
+  until the fill reaches those bytes. A player seeking to the end of a 1 GiB
+  video, or probing a trailing `moov` atom, therefore waits roughly as long as
+  it takes the single upstream transfer to get there. Encode videos with
+  `faststart` (`moov` first) for fast startup on a cold cache.
+- **Unknown length** (no upstream `Content-Length`): a `Range` request cannot be
+  resolved until the end is known, so it waits for the fill to complete and
+  is then answered against the real size. Its response headers are only sent
+  then, so Almond's 60-second handler timeout can answer `408` on a slow fill;
+  the client should retry, and is then served from the cache.
+- **Conditionals** are evaluated by Almond against the blob's own `ETag` (its
+  quoted hash) and never forwarded upstream. `If-Range` needs the exact strong
+  tag; a weak tag, a date or any other
+  value gets the full `200`. `If-Match` also compares strongly (`412` on
+  mismatch, weak tags included); `If-None-Match` compares weakly and answers
+  `304`. Because a successful `If-Match` or `If-None-Match` asserts that the
+  blob has this hash, both wait until the fill is verified (the 60-second
+  handler timeout applies to that wait as well). Malformed and multi-range
+  requests get the full `200`; a range entirely past a known end gets `416`
+  right away.
+- **Waiting has no extra timer**: an attached reader waits as long as the fill
+  makes progress. A stalled upstream fails the fill after 30 seconds without
+  data, and every attached reader then gets an aborted body.
+
+Responses served from a fill carry `Cache-Control: private, no-store`,
+because their bytes are not verified yet. When the transfer ends, Almond checks
+the length and the SHA-256 against the requested hash before publishing the
+blob to the cache index. Only then is it served locally with the normal
+immutable headers; later requests do not contact the upstream while the copy
+lasts (see [Retention and eviction](#retention-and-eviction)).
+
+**Integrity.** For a known length, the final byte of a full response is
+withheld until the hash is verified; if verification fails, or the upstream
+sends too few bytes, the client sees an aborted transfer instead of a clean
+end, and nothing is cached. Bytes already delivered cannot be taken back, and a
+range that ends before the last byte may complete before verification.
+Clients that need certainty must verify the hash themselves, as Blossom
+intends.
+
+**Source isolation.** A fill is shared by blob hash *and* the sources the
+request asked for. Requests that only use `ALMOND_UPSTREAM_SERVERS` share one
+fill; a request with `?origin=`, `?xs=` or `?as=` shares only with requests
+naming exactly the same sources, so a client-supplied origin cannot supply
+unverified bytes to requests that only use the configured upstreams. Capacity
+is still shared, see below.
+
+**Resource limits.** At most 8 fills run at once across the whole process (not
+per blob or per source), and at most 256 response bodies read from fills at
+once (`HEAD`, `304`, `412` and `416` answers do not count). When a new fill or
+a reader slot is not available, Almond answers `503 Service Unavailable`
+instead of opening an extra upstream transfer. Before a fill starts, its full
+size is reserved against `ALMOND_STORAGE_MAX_SIZE`, `ALMOND_STORAGE_MAX_FILES`
+and `ALMOND_STORAGE_MIN_FREE`, together with every other in-flight fill; an
+unknown-length fill reserves the smaller of `ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE`
+and `ALMOND_BLOB_MAX_SIZE`. If the reservation fails, the answer is
+`507 Insufficient Storage`. Reservations and temporary files are released on
+success, failure and cancellation. Upstream failures, including an upstream
+that answers with a `Content-Encoding` other than identity, are `502`; only
+"no source has this blob" is `404`, and only that is remembered as a miss.
+
+**Size limits.** A fill is cached only if the blob fits both
+`ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE` (default `100MiB`) and `ALMOND_BLOB_MAX_SIZE`
+(default `500MiB`). Larger blobs are still served but are an explicit exception
+to the one-transfer rule: the first request gets the upstream response as is
+(a `200` with the whole blob, even if it asked for a range), and every
+concurrent or later request for that blob proxies its own upstream request,
+with its `Range` forwarded, for the next 10 minutes. Nothing is written to
+disk for them. An unknown-length fill that grows past the limit fails, and its
+readers see an aborted transfer.
+
+To cache videos up to 1 GiB, raise both limits, with some headroom:
+
+```bash
+ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE=2GiB
+ALMOND_BLOB_MAX_SIZE=2GiB          # also raises the upload limit
+# Optional: no age-based expiry for upstream copies.
+ALMOND_UPSTREAM_CACHE_TTL=0
+```
+
+`ALMOND_BLOB_MAX_SIZE` must stay at least `ALMOND_CHUNK_MAX_SIZE` (default
+`100MiB`). Make sure the disk holds the expected working set plus up to eight
+concurrent fills plus `ALMOND_STORAGE_MIN_FREE`. Cached copies are never
+permanent: with the default `ALMOND_UPSTREAM_CACHE_TTL` (`1d`) they expire a day
+after they were filled, and even with `0` they are the first to be evicted
+when the storage limits are reached.
+
+**Redirect modes.** `redirect` and `redirect-and-cache` send the client to the
+upstream with `307`, so the client downloads from there itself and the
+one-transfer guarantee does not apply to it. `redirect-and-cache` starts or
+joins the same shared fill in the background (when the upstream's `HEAD`
+reports a size within the limits), so concurrent redirects never start
+competing cache fills.
 
 ## S3 storage
 

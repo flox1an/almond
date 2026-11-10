@@ -56,9 +56,35 @@ aggressive, safe caching:
   atom). An `END` past EOF is clamped rather than rejected.
 - **`416 Range Not Satisfiable`** with `Content-Range: bytes */SIZE` when the range
   lies entirely outside the blob.
-- **`If-Range`**: a stale validator falls back to the full `200` body.
+- **`If-Range`**: only the exact strong `ETag` honours the range; a weak tag, a
+  date or any other value falls back to the full `200` body.
 - Multi-range requests (`bytes=0-9,20-29`) get the full `200` representation;
   `multipart/byteranges` is not implemented.
+
+**Blobs still arriving from upstream.** A blob that is not stored yet is served
+from a shared cache fill (see [Upstream lookups](/guide/how-it-works#upstream-lookups)).
+The same range and conditional rules apply, with these differences:
+
+- **`Cache-Control: private, no-store`** on every response served before the
+  blob's SHA-256 has been verified, so no CDN or browser keeps unverified
+  bytes. Once the blob is cached, the immutable headers above apply.
+- **Waiting instead of re-fetching**: a range the fill has not reached yet,
+  including `bytes=-N`, gets its `206` headers at once (when the upstream
+  declared a length) and its body as the bytes arrive. Without a declared
+  length, range requests are answered after the fill completes.
+- **`If-None-Match`** (weak comparison) that matches gets `304`, and
+  **`If-Match`** (strong comparison) gets `412` or the blob, only after
+  verification. `If-Range` follows the rule above. `416` is returned as soon
+  as the length is known.
+- **Failed verification** (wrong hash or too few bytes) aborts the response
+  body instead of ending it cleanly, and nothing is cached.
+- **`503 Service Unavailable`** when the fill or reader ceilings are reached,
+  **`507 Insufficient Storage`** when the blob cannot be reserved against the
+  storage limits, **`502 Bad Gateway`** when the upstream fails. These are not
+  cached as misses; only `404` is.
+- Blobs above `ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE` or `ALMOND_BLOB_MAX_SIZE` are
+  proxied without caching; the first request may get a `200` with the whole
+  blob even if it asked for a range.
 
 **`Sunset`.** When an upload has a finite retention deadline, `GET` and `HEAD`
 (including extension variants, `206` and `304`) return the RFC 8594 / BUD-01

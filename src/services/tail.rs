@@ -1,9 +1,10 @@
-//! Tail-follower stream for coalesced downstream downloads.
+//! Tail-follower stream for shared upstream fills.
 //!
-//! Extracted from the 2100-line `handlers/upstream.rs`.  The stream reads from
-//! a growing temp file that a background `run_download` task writes to, using
-//! a `watch::Receiver` to block when data is not yet available.  No `AppState`
-//! dependency — it is a pure transformation of `(File, Receiver, bounds)`.
+//! Reads a spool file that the fill owner (`handlers::upstream`) is still
+//! writing, using a `watch::Receiver` to block when the requested bytes are not
+//! there yet. Every reader has its own file handle and offset, so readers never
+//! wait on each other. No `AppState` dependency — it is a pure transformation
+//! of `(File, Receiver, bounds)`.
 
 use std::io::SeekFrom;
 
@@ -12,14 +13,17 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::watch;
 
-use crate::models::{DownloadPhase, DownloadProgress};
+use crate::services::download::{DownloadPhase, DownloadProgress};
 
 /// Create a streaming response that reads from a growing file.
 ///
 /// The stream starts at byte `start` (seeking into the file) and stops at
-/// `end` (exclusive).  When `end` is `None` it follows the file until the
-/// download completes.  The caller provides a `watch::Receiver` whose sender
-/// is updated by `run_download` as new bytes are written and flushed.
+/// `end` (exclusive). When `end` is `None` it follows the file until the fill
+/// is `Complete`, so an unknown-length body only ends cleanly once verified.
+/// A bounded stream ends as soon as `written` reaches `end`; the owner keeps
+/// a known-length blob's final byte out of `written` until verification, so a
+/// range that includes the last byte also waits for it. A `Failed` phase turns
+/// into a stream error, which aborts the response body.
 pub async fn create_tailing_stream(
     mut reader: File,
     mut progress: watch::Receiver<DownloadProgress>,

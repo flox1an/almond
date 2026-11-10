@@ -217,12 +217,12 @@ Every variable can also be passed as a CLI flag (`ALMOND_UPLOAD_ACCESS` ↔
 #### Upstream Configuration
 - `ALMOND_UPSTREAM_SERVERS`: Comma-separated list of upstream servers for file fallback
 - `ALMOND_UPSTREAM_MODE`: How to handle upstream requests - `proxy`, `redirect`, or `redirect-and-cache` (default: `proxy`)
-  - `proxy`: Stream from upstream while saving locally
-  - `redirect`: Issue 302 redirect to upstream, no local caching
-  - `redirect-and-cache`: Issue 302 redirect to upstream, download in background for future requests
-- `ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE`: Maximum size for upstream downloads (default: `100MiB`).
-  A blob above the limit is proxied to the client without a cache fill, including
-  range requests, so the limit never turns a reachable blob into an error.
+  - `proxy`: One full background fetch per blob and source-selection context; clients independently read the growing local file. Far and suffix ranges wait for missing bytes instead of opening another fetch.
+  - `redirect`: Issue a `307` redirect to upstream, no local caching.
+  - `redirect-and-cache`: Issue a `307` redirect and fill the cache in the background; redirected clients still contact upstream themselves.
+- `ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE`: Maximum shared cache fill (default: `100MiB`), also capped by `ALMOND_BLOB_MAX_SIZE` (default: `500MiB`).
+  Raise both limits to cache a 1 GiB video. A larger known-length blob is streamed without caching; the response may ignore a client range and return the complete `200` representation without a second fetch.
+  Cache fills remain subject to disk admission, capacity eviction and `ALMOND_UPSTREAM_CACHE_TTL`; they are not permanent uploads.
 
 #### Chunked Upload Configuration
 - `ALMOND_CHUNK_MAX_SIZE`: Maximum size for individual chunks (default: `100MiB`)
@@ -576,16 +576,16 @@ Expected build times:
 
 ### Features
 - Automatic fallback to upstream servers when file not found locally
-- Failed lookup caching (1 hour TTL) to prevent repeated upstream queries
-- Support for custom origin via `?origin=` query parameter
-- Support for multiple upstream servers via `?xs=` query parameters (BUD-01)
-- Range request support for upstream proxying
-- Background download while proxying range requests
+- Failed lookup caching (1 hour TTL) for confirmed absence only; overload, storage and origin failures are not cached as missing blobs.
+- Support for custom origin via `?origin=` and upstream hints via `?xs=` (BUD-01); unverified downloads with different source-selection contexts do not share a session.
+- Full GET, single ranges and suffix ranges share one cacheable sequential transfer. Each reader waits on published disk progress; a slow or disconnected reader does not throttle or cancel the writer.
+- Unknown-length ranges wait for the completed length. A seek beyond the downloaded prefix, including an MP4 `moov` atom at the end, can stall until that offset arrives.
+- Length and SHA-256 are checked before cache publication. Unverified streaming responses use `private, no-store`; bytes already streamed cannot be retroactively authenticated by a whole-file hash.
 
 ### Upstream Modes
-- **proxy** (default): Stream from upstream while saving locally. Client receives data immediately while file is cached.
-- **redirect**: Issue 302 redirect to upstream. No local caching. Reduces bandwidth/CPU on Almond server.
-- **redirect-and-cache**: Issue 302 redirect to upstream, but also download in background for future requests. Best of both worlds - immediate redirect for current request, local serving for future requests.
+- **proxy** (default): Share a background fetch through the growing local file, then serve the verified cache. Oversized uncached streams are the explicit exception to sharing.
+- **redirect**: Issue a `307` redirect to upstream. No local caching; the client downloads from upstream.
+- **redirect-and-cache**: Issue a `307` redirect and start a shared server-side cache fill. The client's upstream transfer is separate from that fill.
 
 ### Configuration
 - `ALMOND_UPSTREAM_SERVERS`: Comma-separated list of upstream servers

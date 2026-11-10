@@ -99,7 +99,7 @@ see [Configuration overview](/configuration/).
 |---|---|---|
 | `ALMOND_UPSTREAM_SERVERS` | – | Trusted upstream Blossom origins |
 | `ALMOND_UPSTREAM_MODE` | `proxy` | `proxy`, `redirect` or `redirect-and-cache` |
-| `ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE` | `100MiB` | Larger blobs are proxied without caching |
+| `ALMOND_UPSTREAM_MAX_DOWNLOAD_SIZE` | `100MiB` | Maximum shared cache fill, also capped by `ALMOND_BLOB_MAX_SIZE`; larger known-length blobs are streamed without caching |
 | `ALMOND_SERVER_LIST_CACHE_TTL` | `24h` | Cache time for authors' BUD-03 server lists |
 
 **Payments** (see [Payments](/guide/how-it-works#payments-cashu-bud-07))

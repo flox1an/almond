@@ -37,7 +37,27 @@ Public immutable blobs are suitable for an edge cache. Do not cache paid
 downloads or bypass Almond by exposing its storage directories: cache hits
 would skip payment checks, and retained copies can outlive deletion or
 moderation. Keep the current `private, no-store` policy for in-flight upstream
-responses.
+responses: their bytes are not verified against the hash yet.
+
+### Streaming blobs that are still arriving from upstream
+
+A blob that is not cached yet is streamed from one shared upstream transfer
+(see [Upstream lookups](/guide/how-it-works#upstream-lookups)). Two proxy
+settings decide whether players see that progress:
+
+- **Do not buffer responses.** A buffering proxy holds bytes Almond already
+  sent; with nginx, set `proxy_buffering off;` for blob locations. Caddy
+  streams by default.
+- **Allow long gaps between bytes.** A request for a far range or the MP4 tail
+  (`moov` at the end) gets its `206` headers at once, then no bytes until the
+  shared transfer reaches that offset; for a 1 GiB video on a slow upstream
+  that can take minutes. Raise idle read timeouts accordingly, for example
+  nginx `proxy_read_timeout 600s;` (default `60s`), or such seeks fail while
+  Almond is still filling.
+
+These streams are bounded inside Almond as well: at most 8 concurrent upstream
+fills and 256 response bodies reading from them; beyond that, Almond answers
+`503` rather than opening extra upstream transfers.
 
 ## Settings
 

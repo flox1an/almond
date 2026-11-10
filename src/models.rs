@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::{Arc, OnceLock, Weak},
+    sync::{Arc, Weak},
     time::Instant,
 };
-use tokio::sync::{watch, Mutex, OwnedMutexGuard, RwLock};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
 /// Feature mode controlling access to features
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -121,44 +121,6 @@ impl ReportAction {
         }
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DownloadPhase {
-    Running,
-    Complete,
-    Failed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DownloadProgress {
-    pub written: u64,
-    pub phase: DownloadPhase,
-}
-
-pub struct DownloadHandle {
-    pub started: Instant,
-    pub temp_path: PathBuf,
-    pub content_type: String,
-    pub total_len: Option<u64>,
-    pub progress: watch::Sender<DownloadProgress>,
-    pub final_path: OnceLock<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NegotiationPhase {
-    Pending,
-    Ready,
-    Failed,
-}
-
-pub struct UpstreamNegotiation {
-    pub started: Instant,
-    pub phase: watch::Sender<NegotiationPhase>,
-}
-
-type UpstreamNegotiationsMap = Arc<RwLock<HashMap<String, Arc<UpstreamNegotiation>>>>;
-
-type OngoingDownloadsMap = Arc<RwLock<HashMap<String, Arc<DownloadHandle>>>>;
 
 #[derive(Clone)]
 pub struct ServeFileMetadata {
@@ -322,8 +284,9 @@ pub struct AppState {
     pub feature_list_enabled: bool,
     pub feature_custom_upstream_origin_enabled: FeatureMode,
     pub feature_homepage_enabled: bool,
-    pub ongoing_downloads: OngoingDownloadsMap,
-    pub upstream_negotiations: UpstreamNegotiationsMap,
+    /// Shared upstream cache fills: one upstream transfer per blob and source
+    /// context, plus the fill/reader/disk ceilings that bound them.
+    pub upstream_fills: Arc<crate::services::download::UpstreamFills>,
     pub chunk_sessions: Arc<crate::services::chunk_sessions::ChunkSessions>,
     pub failed_upstream_lookups: Arc<RwLock<HashMap<String, Instant>>>,
     pub blossom_server_lists: Arc<RwLock<HashMap<PublicKey, (Vec<String>, Instant)>>>,

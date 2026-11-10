@@ -535,8 +535,7 @@ pub async fn build_state(
         feature_list_enabled: cfg.list_enabled,
         feature_custom_upstream_origin_enabled: cfg.custom_origin_access,
         feature_homepage_enabled: cfg.homepage_enabled,
-        ongoing_downloads: Arc::new(RwLock::new(HashMap::new())),
-        upstream_negotiations: Arc::new(RwLock::new(HashMap::new())),
+        upstream_fills: Arc::new(services::download::UpstreamFills::default()),
         chunk_sessions: Arc::new(services::chunk_sessions::ChunkSessions::new(
             services::chunk_sessions::SessionLimits {
                 max_sessions: cfg.chunk_max_sessions,

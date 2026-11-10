@@ -167,7 +167,10 @@ async fn resolve_blob(
     }
 
     let plan = upstream_plan(state, query).await?;
-    if !plan.names_specific_servers() && upstream_recently_missed(state, file_hash).await {
+    if !plan.names_specific_servers()
+        && plan.author_pubkey.is_none()
+        && upstream_recently_missed(state, file_hash).await
+    {
         return Ok(BlobSource::RecentlyMissing);
     }
     Ok(BlobSource::Upstream(Box::new(plan)))
@@ -273,11 +276,24 @@ async fn fetch_from_upstream(
         .await
     };
 
-    if let Ok(response) = result {
-        return Ok(response);
+    match result {
+        Ok(response) => return Ok(response),
+        Err(StatusCode::NOT_FOUND) => {}
+        // A busy downloader, exhausted disk or failed origin is not evidence
+        // that the hash is absent. Preserve the response and let clients retry;
+        // caching it as a miss would turn a transient failure into a one-hour 404.
+        Err(status) => {
+            return Response::builder()
+                .status(status)
+                .header(header::CACHE_CONTROL, "private, no-store")
+                .body(Body::empty())
+                .map_err(|error| {
+                    AppError::InternalError(format!("Failed upstream error response: {error}"))
+                });
+        }
     }
 
-    if !plan.names_specific_servers() {
+    if !plan.names_specific_servers() && plan.author_pubkey.is_none() {
         state
             .failed_upstream_lookups
             .write()
@@ -432,12 +448,11 @@ async fn serve_file_with_range(
     })?;
     let total_size = metadata.len();
 
-    // A stale `If-Range` validator means the client's partial copy is not the
-    // blob we hold, so the range must be ignored and the full body sent.
+    // If-Range requires one strong ETag, not a weak tag or a tag list. An
+    // unrecognised/date validator cannot prove byte identity, so send 200.
     let honor_range = headers
         .get(header::IF_RANGE)
-        .and_then(|v| v.to_str().ok())
-        .is_none_or(|v| etag_list_matches(v, etag));
+        .is_none_or(|value| value.to_str().is_ok_and(|value| value.trim() == etag));
 
     let range = match (honor_range, range_header) {
         (true, Some(value)) => parse_range_header(value, total_size),
@@ -527,10 +542,11 @@ async fn serve_s3_with_range(
     headers: &axum::http::HeaderMap,
     etag: &str,
 ) -> Result<Response, AppError> {
+    // Keep native-backend ranges consistent with local and progressive reads:
+    // only an exact strong ETag permits a partial response.
     let honor_range = headers
         .get(header::IF_RANGE)
-        .and_then(|value| value.to_str().ok())
-        .is_none_or(|value| etag_list_matches(value, etag));
+        .is_none_or(|value| value.to_str().is_ok_and(|value| value.trim() == etag));
     let range = match (
         honor_range,
         headers

@@ -151,6 +151,12 @@ pub fn create_hardened_http_client() -> AppResult<Client> {
 pub fn create_upstream_client() -> AppResult<Client> {
     Client::builder()
         .redirect(redirect::Policy::none())
+        // A cache fill stores the exact identity representation. Automatic
+        // decoding would hide Content-Encoding/Length and invalidate offsets;
+        // the upstream handler explicitly requests and validates identity.
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
         .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
         .read_timeout(Duration::from_secs(UPSTREAM_READ_TIMEOUT_SECS))
         .pool_max_idle_per_host(UPSTREAM_POOL_MAX_IDLE_PER_HOST)

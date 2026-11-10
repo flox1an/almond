@@ -1,111 +1,111 @@
+//! Upstream fetch: serve a blob this server does not hold yet.
+//!
+//! # Proxy mode (`try_upstream_servers`)
+//!
+//! Every request goes through the shared fill registry in
+//! `services::download`, so one live fill makes one upstream transfer no
+//! matter how many clients ask, how slowly they read, or how they slice it.
+//!
+//! - **Owner.** The first request for a session key spawns `run_fill` and then
+//!   waits like everyone else. The owner is detached: a requester that
+//!   disconnects during source negotiation or mid-body cancels nothing.
+//! - **Full fetch.** The owner walks the upstream tiers (SSRF checks and tier
+//!   order unchanged) and sends each source one `GET` with no `Range`, no
+//!   conditional or client headers, and `Accept-Encoding: identity`. It accepts
+//!   only a whole body: `200`, or a `206` covering `bytes 0-(N-1)/N`.
+//! - **Local answers.** Every request, the creator included, is answered from
+//!   the spool: `HEAD` from the declared metadata, ranges by tailing the spool
+//!   from their own offset, preconditions evaluated here.
+//!   - Known length: any satisfiable range — near, far, suffix — answers `206`
+//!     at once and its body waits for the bytes. Out of range is `416`;
+//!     malformed or multi-range is ignored for a full `200`.
+//!   - Unknown length: a ranged request waits for the fill to complete and
+//!     then resolves against the real size. Its headers are held meanwhile, so
+//!     the router timeout can end it; it never opens a second transfer. A plain
+//!     `GET` streams chunked as bytes arrive and ends only once verified.
+//! - **Verification.** In-flight responses are `private, no-store` and carry
+//!   no `ETag`: the bytes are unverified until the owner checks length and
+//!   SHA-256, before anything reaches the index. For a known length the final
+//!   byte is withheld until that check, so a full body (or any range touching
+//!   the end) fails instead of completing on a bad hash. A range that ends
+//!   earlier can complete before verification; those bytes cannot be
+//!   authenticated retroactively. For a known length the held byte is
+//!   released on verification (length + SHA-256), not on publication: if
+//!   storing the verified blob then fails, readers already holding the spool
+//!   still finish with correct bytes. An unknown-length body can only end on
+//!   `Complete`, so a publication failure aborts it.
+//! - **Failure statuses.** Only a walk where every source answered 404/410
+//!   is `404`; transport errors, other statuses, partial or encoded bodies
+//!   make it `502`, which callers must not remember as a miss. Disk admission
+//!   failure is `507`; full fill or reader slots are `503`.
+//! - **Over the cache limit** (`MAX_UPSTREAM_DOWNLOAD_SIZE_MB`, capped by
+//!   `MAX_BLOB_SIZE_MB`): nothing is spooled and the one-transfer promise does
+//!   not hold. The first `GET` waiter streams the owner's response as is — a
+//!   full body even when it asked for a range, which RFC 9110 permits. `HEAD`
+//!   answers from that response's headers without a body. Other waiters, and
+//!   requests for the next `UNCACHEABLE_TTL`, proxy their own request with
+//!   their own `Range`.
+//!
+//! # Redirect modes (`try_upstream_redirect`)
+//!
+//! The client is sent to upstream with a `307` and downloads from there, so
+//! no one-transfer promise applies to it. Redirect-and-cache starts the same
+//! shared fill proxy mode uses, under the same key, so concurrent redirects
+//! never race each other's fills.
+
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
 use axum::{
     body::Body,
     extract::State,
-    http::{header, HeaderMap, Method, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::Response,
     Json,
 };
 use futures_util::StreamExt;
-use reqwest::{header as reqwest_header, Client};
+use reqwest::header as reqwest_header;
 use serde_json::json;
 use sha2::Digest;
-use tokio::{fs::File, io::AsyncWriteExt};
+use tokio::{fs::File, io::AsyncWriteExt, sync::watch};
 use tracing::{debug, error, info, warn};
 
-use crate::services::intake;
-use crate::services::upstream_candidates;
-
-use crate::constants::CACHE_CONTROL_IMMUTABLE;
+use crate::constants::{CACHE_CONTROL_IMMUTABLE, DEFAULT_MIME_TYPE};
 use crate::helpers::{
-    copy_headers_to_reqwest, copy_headers_without_range, extract_content_type_from_response,
-    get_extension_from_mime,
+    copy_headers_to_reqwest, extract_content_type_from_response, get_extension_from_mime,
 };
-use crate::models::{
-    AppState, DownloadHandle, DownloadPhase, NegotiationPhase, UpstreamNegotiation,
-};
+use crate::models::AppState;
 use crate::services::download::{
-    claim_upstream_negotiation, NegotiationClaim, NegotiationGuard, PreparedDownload,
+    DownloadHandle, DownloadPhase, DownloadProgress, FillLease, FillState, Join, SessionKey,
+    UncacheableResponse,
 };
+use crate::services::file_storage::{self, TempBlob};
+use crate::services::intake;
 use crate::services::tail::create_tailing_stream;
-use crate::utils::{get_sha256_hash_from_filename, parse_range_header, RangeSpec};
+use crate::services::upstream_candidates;
+use crate::utils::{find_file, get_sha256_hash_from_filename, parse_range_header, RangeSpec};
 
-const SEEK_AHEAD_LIMIT: u64 = 8 * 1024 * 1024;
-const NEGOTIATION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// SHA-256 of the empty body: the only blob a zero-length response can be.
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
-fn coalescible_range_start(headers: &HeaderMap) -> Option<u64> {
-    let value = headers.get(header::RANGE)?.to_str().ok()?;
-    let range = value.strip_prefix("bytes=")?;
-    if range.contains(',') {
-        return None;
-    }
-    let (start, _) = range.split_once('-')?;
-    let start = start.parse::<u64>().ok()?;
-    (start <= SEEK_AHEAD_LIMIT).then_some(start)
+/// Cache policy for anything served before (or instead of) a verified copy.
+const NO_STORE: &str = "private, no-store";
+
+/// Request-scoped sources, owned so the fill can outlive the request.
+struct Sources {
+    custom_origin: Option<String>,
+    xs_servers: Option<Vec<String>>,
+    author_pubkey: Option<nostr_sdk::prelude::PublicKey>,
 }
 
-fn copy_headers_for_cold_fetch(
-    headers: &HeaderMap,
-    request: reqwest::RequestBuilder,
-) -> reqwest::RequestBuilder {
-    if coalescible_range_start(headers).is_some() {
-        copy_headers_without_range(headers, request).header(reqwest_header::RANGE, "bytes=0-")
-    } else {
-        copy_headers_to_reqwest(headers, request)
-    }
-}
-
-async fn wait_for_negotiation(
-    negotiation: &UpstreamNegotiation,
-    timeout: std::time::Duration,
-) -> NegotiationPhase {
-    let mut phase = negotiation.phase.subscribe();
-    let wait = async {
-        loop {
-            let current = *phase.borrow_and_update();
-            if current != NegotiationPhase::Pending {
-                return current;
-            }
-            if phase.changed().await.is_err() {
-                return NegotiationPhase::Failed;
-            }
-        }
-    };
-    tokio::time::timeout(timeout, wait)
-        .await
-        .unwrap_or(NegotiationPhase::Pending)
-}
-
-async fn serve_existing_download(
-    handle: &DownloadHandle,
-    filename: &str,
-    headers: &HeaderMap,
-    method: &Method,
-) -> Option<Result<Response<Body>, StatusCode>> {
-    if *method == Method::HEAD {
-        return Some(serve_head_download(handle, filename));
-    }
-    if headers.get(header::RANGE).is_none() {
-        Some(serve_non_range_download(handle, filename).await)
-    } else {
-        serve_range_download(handle, filename, headers).await
-    }
-}
-
-fn track_coalesced_response(state: &AppState, method: &Method, response: &Response<Body>) {
-    state.metrics.track_coalesced_request();
-    if *method == Method::HEAD {
-        return;
-    }
-    if let Some(length) = response
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-    {
-        state.metrics.track_download(length);
-    } else {
-        state.metrics.files_downloaded.inc();
-    }
+/// How a request relates to the shared fill for its key.
+enum Attached {
+    /// `created` is true only for the request that spawned the owner.
+    Session {
+        session: watch::Receiver<FillState>,
+        created: bool,
+    },
+    /// The key recently produced an over-limit blob: proxy directly.
+    Uncacheable,
 }
 
 /// Handle upstream servers requests
@@ -124,8 +124,56 @@ pub async fn get_upstream(
     Json(response)
 }
 
-/// Try to fetch file from upstream servers, stream it to client and save locally
-/// Prioritization: `custom_origin` → `xs_servers` → `UPSTREAM_SERVERS` → user servers (lazy fetch)
+/// Lowercase hash of `filename`, the canonical form for keys and verification.
+fn canonical_hash(filename: &str) -> String {
+    get_sha256_hash_from_filename(filename)
+        .unwrap_or(filename)
+        .to_ascii_lowercase()
+}
+
+/// Attach to the live fill for this blob and source context, spawning its
+/// owner if none is live. `503` when a new fill would exceed the fill ceiling.
+fn attach_fill(
+    state: &AppState,
+    filename: &str,
+    hash: &str,
+    custom_origin: Option<&str>,
+    xs_servers: Option<&[String]>,
+    author_pubkey: Option<&nostr_sdk::prelude::PublicKey>,
+) -> Result<Attached, StatusCode> {
+    let key = SessionKey::new(hash, custom_origin, xs_servers, author_pubkey);
+    match state.upstream_fills.join(&key)? {
+        Join::Waiter(session) => Ok(Attached::Session {
+            session,
+            created: false,
+        }),
+        Join::Uncacheable => Ok(Attached::Uncacheable),
+        Join::Owner(lease) => {
+            // Subscribe before spawning so the owner's decision cannot be missed.
+            let session = lease.subscribe();
+            let sources = Sources {
+                custom_origin: custom_origin.map(ToString::to_string),
+                xs_servers: xs_servers.map(<[String]>::to_vec),
+                author_pubkey: author_pubkey.cloned(),
+            };
+            tokio::spawn(run_fill(
+                state.clone(),
+                lease,
+                sources,
+                filename.to_string(),
+                hash.to_string(),
+            ));
+            Ok(Attached::Session {
+                session,
+                created: true,
+            })
+        }
+    }
+}
+
+/// Fetch a blob from upstream through the shared fill and answer this request
+/// from it. Prioritization: `custom_origin` → `xs_servers` → `UPSTREAM_SERVERS`
+/// → user servers (lazy fetch). See the module docs for the full contract.
 pub async fn try_upstream_servers(
     state: &AppState,
     filename: &str,
@@ -135,128 +183,703 @@ pub async fn try_upstream_servers(
     xs_servers: Option<&[String]>,
     author_pubkey: Option<&nostr_sdk::prelude::PublicKey>,
 ) -> Result<Response, StatusCode> {
-    // Forward range requests to upstream servers
-    if headers.get(header::RANGE).is_some() {
-        debug!("Range request detected, forwarding to upstream server");
-    }
-
-    // Extract hash from filename for internal tracking (ongoing downloads, file index, etc.)
-    // But use the full filename (with extension) for upstream URL construction
-    let file_hash = get_sha256_hash_from_filename(filename).unwrap_or(filename);
-
-    if let Some(handle) = state.ongoing_downloads.read().await.get(file_hash).cloned() {
-        if let Some(response) = serve_existing_download(&handle, filename, headers, method).await {
-            if let Ok(response) = &response {
-                track_coalesced_response(state, method, response);
-            }
-            debug!("Attaching request to in-flight download {}", file_hash);
-            return response;
+    let hash = canonical_hash(filename);
+    let (mut session, created) = match attach_fill(
+        state,
+        filename,
+        &hash,
+        custom_origin,
+        xs_servers,
+        author_pubkey,
+    )? {
+        Attached::Session { session, created } => (session, created),
+        Attached::Uncacheable => {
+            return proxy_request_to_upstream(
+                state,
+                filename,
+                headers,
+                method,
+                custom_origin,
+                xs_servers,
+                author_pubkey,
+            )
+            .await
         }
-        return proxy_request_to_upstream(
-            state,
-            filename,
-            headers,
-            custom_origin,
-            xs_servers,
-            author_pubkey,
-        )
-        .await;
-    }
-
-    let should_coalesce =
-        headers.get(header::RANGE).is_none() || coalescible_range_start(headers).is_some();
-    let negotiation = if should_coalesce {
-        loop {
-            match claim_upstream_negotiation(state, file_hash).await {
-                NegotiationClaim::Leader(guard) => break Some(guard),
-                NegotiationClaim::Follower(existing) => {
-                    match wait_for_negotiation(&existing, NEGOTIATION_WAIT_TIMEOUT).await {
-                        NegotiationPhase::Ready => {
-                            if let Some(handle) =
-                                state.ongoing_downloads.read().await.get(file_hash).cloned()
-                            {
-                                if let Some(response) =
-                                    serve_existing_download(&handle, filename, headers, method)
-                                        .await
-                                {
-                                    if let Ok(response) = &response {
-                                        track_coalesced_response(state, method, response);
-                                    }
-                                    return response;
-                                }
-                                return proxy_request_to_upstream(
-                                    state,
-                                    filename,
-                                    headers,
-                                    custom_origin,
-                                    xs_servers,
-                                    author_pubkey,
-                                )
-                                .await;
-                            }
-                        }
-                        NegotiationPhase::Failed => continue,
-                        NegotiationPhase::Pending => {
-                            debug!(
-                                "Timed out waiting for upstream negotiation for {}",
-                                file_hash
-                            );
-                            break None;
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        None
     };
 
-    let client = state.upstream_client.clone();
-    let mut walk =
-        upstream_candidates::Walk::new(state, filename, custom_origin, xs_servers, author_pubkey);
+    // No timeout here on purpose: giving up on the owner could only mean
+    // opening a second transfer. The owner's walk is bounded by the upstream
+    // client's connect/read timeouts, this request by the router's.
+    let decided = session
+        .wait_for(|state| !matches!(state, FillState::Pending))
+        .await
+        .map_or(FillState::Failed(StatusCode::BAD_GATEWAY), |state| {
+            state.clone()
+        });
 
+    match decided {
+        FillState::Ready(handle) => {
+            let response =
+                serve_from_spool(state, &handle, &hash, filename, headers, method).await?;
+            track_served(state, method, &response, !created);
+            Ok(response)
+        }
+        FillState::Uncacheable(over_limit) => {
+            serve_uncacheable(
+                state,
+                &over_limit,
+                filename,
+                headers,
+                method,
+                custom_origin,
+                xs_servers,
+                author_pubkey,
+            )
+            .await
+        }
+        FillState::Failed(status) => Err(status),
+        // `wait_for` only returns a decided state.
+        FillState::Pending => Err(StatusCode::BAD_GATEWAY),
+    }
+}
+
+/// Count a response served from a spool. Requests that attached to someone
+/// else's fill are also counted as coalesced.
+fn track_served(state: &AppState, method: &Method, response: &Response<Body>, coalesced: bool) {
+    if coalesced {
+        state.metrics.track_coalesced_request();
+    }
+    if *method == Method::HEAD || !response.status().is_success() {
+        return;
+    }
+    match response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        Some(length) => state.metrics.track_download(length),
+        None => state.metrics.files_downloaded.inc(),
+    }
+}
+
+/// The fill owner, detached from every request.
+///
+/// Ends by publishing exactly one decision (`Ready`, `Uncacheable`, or
+/// `Failed`); dropping the lease on return ends the session, frees the fill
+/// slot, and fails anything left undecided (see `FillLease`).
+async fn run_fill(
+    state: AppState,
+    lease: FillLease,
+    sources: Sources,
+    filename: String,
+    hash: String,
+) {
+    if let Some(handle) = published_spool(&state, &hash).await {
+        debug!("Blob {hash} was published while this fill was starting");
+        lease.publish(FillState::Ready(handle));
+        return;
+    }
+
+    let limit = intake::size_limit(&state, intake::Intake::UpstreamFetch);
+    let mut walk = upstream_candidates::Walk::new(
+        &state,
+        &filename,
+        sources.custom_origin.as_deref(),
+        sources.xs_servers.as_deref(),
+        sources.author_pubkey.as_ref(),
+    );
+
+    // Only a walk where every source said 404/410 (or there were none) proves
+    // the blob absent. Anything else is an upstream problem: 502, which the
+    // caller must not remember as a miss.
+    let mut failure = StatusCode::NOT_FOUND;
     while let Some(candidate) = walk.next().await {
-        let request = copy_headers_for_cold_fetch(headers, client.get(&candidate.url));
-        match request.send().await {
-            Ok(response) if response.status().is_success() => {
+        let response = match state
+            .upstream_client
+            .get(&candidate.url)
+            .header(reqwest_header::ACCEPT_ENCODING, "identity")
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
                 debug!(
-                    "Found file on {}: {}",
+                    "Failed to fetch from {} {}: {error}",
                     candidate.tier.label(),
                     candidate.url
                 );
-                return handle_successful_upstream_response(
-                    state,
-                    &client,
-                    response,
-                    &candidate.url,
-                    file_hash,
-                    filename,
-                    headers,
-                    method,
-                    negotiation,
-                )
-                .await;
+                failure = StatusCode::BAD_GATEWAY;
+                continue;
             }
-            Ok(response) => debug!(
-                "{} {} returned status: {}",
+        };
+        let Some(total_len) = full_body_length(&response) else {
+            debug!(
+                "{} {} returned {} without a usable full body",
                 candidate.tier.label(),
                 candidate.url,
                 response.status()
-            ),
-            Err(error) => debug!(
-                "Failed to fetch from {} {}: {error}",
-                candidate.tier.label(),
-                candidate.url
-            ),
+            );
+            if !is_absent(response.status().as_u16()) {
+                failure = StatusCode::BAD_GATEWAY;
+            }
+            continue;
+        };
+        if total_len == Some(0) && hash != EMPTY_SHA256 {
+            debug!("{} returned an empty body for {hash}", candidate.url);
+            failure = StatusCode::BAD_GATEWAY;
+            continue;
+        }
+
+        let content_type = extract_content_type_from_response(response.headers());
+        if total_len.is_some_and(|length| length > limit) {
+            info!(
+                "Blob {hash} is {total_len:?} bytes, above the {limit} byte upstream cache limit: proxying without caching"
+            );
+            lease.mark_uncacheable();
+            lease.publish(FillState::Uncacheable(Arc::new(UncacheableResponse {
+                content_type,
+                total_len,
+                response: Mutex::new(Some(response)),
+            })));
+            return;
+        }
+
+        debug!(
+            "Filling {hash} from {} {}",
+            candidate.tier.label(),
+            candidate.url
+        );
+        spool(
+            &state,
+            &lease,
+            response,
+            &candidate.url,
+            &hash,
+            content_type,
+            total_len,
+            limit,
+        )
+        .await;
+        return;
+    }
+
+    lease.publish(FillState::Failed(failure));
+}
+
+/// Statuses that say a source does not have the blob, as opposed to failing.
+fn is_absent(status: u16) -> bool {
+    status == 404 || status == 410
+}
+
+/// Whether upstream sent a content-coded body. The upstream client never
+/// decodes, and every request asks for identity, so such bytes are not the
+/// blob (and could not be relayed without the header).
+fn is_encoded(response: &reqwest::Response) -> bool {
+    response
+        .headers()
+        .get(reqwest_header::CONTENT_ENCODING)
+        .is_some_and(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
+}
+
+/// The full body length when `response` carries the whole blob, unencoded,
+/// from byte 0.
+///
+/// `Some(None)` is a `200` without a declared length. A `206` qualifies only
+/// as `bytes 0-(N-1)/N`: some origins answer every `GET` that way. Anything
+/// else (`204`, a partial `206`, a content-coded body, errors) is `None` and
+/// the next source is tried.
+fn full_body_length(response: &reqwest::Response) -> Option<Option<u64>> {
+    if is_encoded(response) {
+        return None;
+    }
+    match response.status().as_u16() {
+        200 => Some(response.content_length()),
+        206 => {
+            let content_range = response
+                .headers()
+                .get(reqwest_header::CONTENT_RANGE)?
+                .to_str()
+                .ok()?;
+            full_content_range(content_range).map(Some)
+        }
+        _ => None,
+    }
+}
+
+/// `N` when a `Content-Range` value is exactly `bytes 0-(N-1)/N`.
+fn full_content_range(value: &str) -> Option<u64> {
+    let (range, total) = value.trim().strip_prefix("bytes ")?.split_once('/')?;
+    let total = total.parse::<u64>().ok()?;
+    let (start, end) = range.split_once('-')?;
+    (start == "0" && end.parse::<u64>().ok()?.checked_add(1)? == total).then_some(total)
+}
+
+/// A blob already in the index, as a completed spool.
+///
+/// A request can miss the index, then reach the registry just after the
+/// previous fill published and ended its session. That fill published before
+/// removing its session, and this session exists before this check, so the
+/// index is guaranteed to show it here: no second transfer, no missing file.
+async fn published_spool(state: &AppState, hash: &str) -> Option<Arc<DownloadHandle>> {
+    let metadata = find_file(&state.file_index, hash).await?;
+    let path = file_storage::local_path(&metadata)?.to_path_buf();
+    let (progress, _) = watch::channel(DownloadProgress {
+        written: metadata.size,
+        phase: DownloadPhase::Complete,
+    });
+    Some(Arc::new(DownloadHandle {
+        temp_path: path.clone(),
+        content_type: metadata
+            .mime_type
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MIME_TYPE.to_string()),
+        total_len: Some(metadata.size),
+        progress,
+        final_path: OnceLock::from(path),
+    }))
+}
+
+/// Admit, spool, verify and publish one response. Publishes `Ready` once the
+/// spool exists, and drives the handle to `Complete` or `Failed`.
+#[allow(clippy::too_many_arguments)]
+async fn spool(
+    state: &AppState,
+    lease: &FillLease,
+    response: reqwest::Response,
+    url: &str,
+    hash: &str,
+    content_type: String,
+    total_len: Option<u64>,
+    limit: u64,
+) {
+    // An undeclared length may grow to the cache limit, so it reserves all of
+    // it up front. Released when this function returns, after publication.
+    let _reservation = match state
+        .upstream_fills
+        .reserve_disk(state, total_len.unwrap_or(limit))
+        .await
+    {
+        Ok(reservation) => reservation,
+        Err(status) => {
+            lease.publish(FillState::Failed(status));
+            return;
+        }
+    };
+
+    let extension = get_extension_from_mime(&content_type);
+    let temp = TempBlob::reserve(state, "upstream", extension.as_deref());
+    let writer = match file_storage::ensure_temp_dir(state).await {
+        Ok(_) => File::create(temp.path())
+            .await
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    let writer = match writer {
+        Ok(writer) => writer,
+        Err(error) => {
+            error!("Failed to create upstream spool for {hash}: {error}");
+            lease.publish(FillState::Failed(StatusCode::INTERNAL_SERVER_ERROR));
+            return;
+        }
+    };
+
+    // The file exists before `Ready` is published, so every reader that sees
+    // the handle can open it.
+    let (progress, _) = watch::channel(DownloadProgress {
+        written: 0,
+        phase: DownloadPhase::Running,
+    });
+    let handle = Arc::new(DownloadHandle {
+        temp_path: temp.path().to_path_buf(),
+        content_type,
+        total_len,
+        progress,
+        final_path: OnceLock::new(),
+    });
+    lease.publish(FillState::Ready(handle.clone()));
+
+    match fill_spool(state, lease, &handle, response, writer, temp, hash, limit).await {
+        Ok(size) => {
+            state.metrics.track_upstream_download(url, size);
+            handle
+                .progress
+                .send_modify(|progress| progress.phase = DownloadPhase::Complete);
+            info!("Upstream fill completed: {url} -> {hash} ({size} bytes)");
+        }
+        Err(error) => {
+            warn!("Upstream fill failed for {url}: {error}");
+            handle
+                .progress
+                .send_modify(|progress| progress.phase = DownloadPhase::Failed);
+        }
+    }
+}
+
+/// Stream the body into the spool, verify it, and publish it to the index.
+///
+/// On any error `temp` drops and unlinks the spool. Readers that already
+/// opened it keep their handle and see `Failed` as a stream error.
+#[allow(clippy::too_many_arguments)]
+async fn fill_spool(
+    state: &AppState,
+    lease: &FillLease,
+    handle: &DownloadHandle,
+    response: reqwest::Response,
+    mut writer: File,
+    temp: TempBlob,
+    hash: &str,
+    limit: u64,
+) -> Result<u64, String> {
+    let mut chunks = response.bytes_stream();
+    let mut hasher = sha2::Sha256::new();
+    let mut size = 0u64;
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.map_err(|error| error.to_string())?;
+        size += chunk.len() as u64;
+        if handle.total_len.is_some_and(|total| size > total) {
+            return Err(format!(
+                "body is longer than the declared {:?} bytes",
+                handle.total_len
+            ));
+        }
+        if size > limit {
+            // Only an undeclared length gets here; a declared over-limit body
+            // never spools. Proxy this key directly for a while.
+            lease.mark_uncacheable();
+            return Err(format!(
+                "body exceeded the {limit} byte upstream cache limit"
+            ));
+        }
+        writer
+            .write_all(&chunk)
+            .await
+            .map_err(|error| error.to_string())?;
+        // `flush` waits for tokio's blocking write, so the bytes are readable
+        // through other file handles before progress announces them.
+        writer.flush().await.map_err(|error| error.to_string())?;
+        hasher.update(&chunk);
+        // Hold back a declared body's final byte until verification.
+        let readable = handle
+            .total_len
+            .map_or(size, |total| size.min(total.saturating_sub(1)));
+        handle
+            .progress
+            .send_modify(|progress| progress.written = readable);
+    }
+    drop(writer);
+
+    if handle.total_len.is_some_and(|total| total != size) {
+        return Err(format!(
+            "body length mismatch: declared {:?}, received {size}",
+            handle.total_len
+        ));
+    }
+    let sha256 = hex::encode(hasher.finalize());
+    if sha256 != hash {
+        return Err(format!(
+            "hash mismatch: requested {hash}, received {sha256}"
+        ));
+    }
+
+    // Verified: release the held-back byte. Readers holding the spool finish
+    // now, even if publication below fails.
+    handle
+        .progress
+        .send_modify(|progress| progress.written = size);
+
+    let published = intake::accept(
+        state,
+        temp,
+        intake::Accepted {
+            sha256,
+            origin: crate::models::BlobOrigin::UpstreamCache,
+            size,
+            extension: get_extension_from_mime(&handle.content_type),
+            mime_type: Some(handle.content_type.clone()),
+            expiration: None,
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    // Publication renamed the spool. Late readers that find it gone wait for
+    // `Complete` and open this path instead.
+    if let Some(path) = file_storage::local_path(&published.metadata) {
+        let _ = handle.final_path.set(path.to_path_buf());
+    }
+    Ok(size)
+}
+
+/// Answer one request from a spool.
+async fn serve_from_spool(
+    state: &AppState,
+    handle: &DownloadHandle,
+    hash: &str,
+    filename: &str,
+    headers: &HeaderMap,
+    method: &Method,
+) -> Result<Response<Body>, StatusCode> {
+    let etag = format!("\"{hash}\"");
+
+    // A body-bearing request takes its reader slot before any wait below, so
+    // the reader ceiling also bounds requests parked on validators or on an
+    // unknown length. `HEAD` never streams and takes none.
+    let slot = if *method == Method::HEAD {
+        None
+    } else {
+        Some(state.upstream_fills.reader_slot()?)
+    };
+
+    // `If-Match` (strong) and a matching `If-None-Match` (weak) compare against
+    // the hash, which only becomes this response's validator once the fill is
+    // verified, so both wait for completion. Date validators are ignored: no
+    // trustworthy modification time exists for a blob.
+    let if_match = etag_list_matches(headers, &header::IF_MATCH, &etag, false);
+    let not_modified =
+        etag_list_matches(headers, &header::IF_NONE_MATCH, &etag, true) == Some(true);
+    if if_match.is_some() || not_modified {
+        wait_for_completion(handle).await?;
+        if if_match == Some(false) {
+            return empty_response(StatusCode::PRECONDITION_FAILED, NO_STORE);
+        }
+        if not_modified {
+            let mut response = empty_response(StatusCode::NOT_MODIFIED, CACHE_CONTROL_IMMUTABLE)?;
+            response.headers_mut().insert(
+                header::ETAG,
+                HeaderValue::from_str(&etag).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            );
+            return Ok(response);
         }
     }
 
-    Err(StatusCode::NOT_FOUND)
+    if *method == Method::HEAD {
+        return head_response(&handle.content_type, handle.total_len, filename);
+    }
+
+    // `If-Range` holds only for exactly our strong tag; a weak tag, a date, or
+    // anything else means the client's partial copy may differ, so the range
+    // is ignored and everything is sent.
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|_| if_range_holds(headers, &etag));
+    let total_len = match (range, handle.total_len) {
+        // A range cannot be resolved against an unknown size.
+        (Some(_), None) => Some(wait_for_completion(handle).await?),
+        (_, known) => known,
+    };
+    let (status, start, end) = match (range, total_len) {
+        (Some(range), Some(total)) => match parse_range_header(range, total) {
+            RangeSpec::Satisfiable { start, end } => {
+                (StatusCode::PARTIAL_CONTENT, start, Some(end + 1))
+            }
+            RangeSpec::Unsatisfiable => {
+                let mut response = empty_response(StatusCode::RANGE_NOT_SATISFIABLE, NO_STORE)?;
+                let headers = response.headers_mut();
+                headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+                headers.insert(
+                    header::CONTENT_RANGE,
+                    HeaderValue::from_str(&format!("bytes */{total}"))
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+                );
+                return Ok(response);
+            }
+            RangeSpec::Ignore => (StatusCode::OK, 0, Some(total)),
+        },
+        (_, total) => (StatusCode::OK, 0, total),
+    };
+
+    let reader = open_spool(handle).await.map_err(|error| {
+        warn!(
+            "Failed to open upstream spool {}: {error}",
+            handle.temp_path.display()
+        );
+        match handle.progress.borrow().phase {
+            DownloadPhase::Failed => StatusCode::BAD_GATEWAY,
+            // The verified spool was dropped because an equal copy already
+            // existed elsewhere (for example in S3). That copy is now indexed,
+            // so a retry is served from it; never fetch upstream again here.
+            DownloadPhase::Complete if handle.final_path.get().is_none() => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    })?;
+    let stream = create_tailing_stream(reader, handle.progress.subscribe(), start, end)
+        .await
+        .map_err(|error| {
+            error!("Failed to attach to upstream spool: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    // The reader slot rides inside the body: released when the body finishes
+    // or the client goes away.
+    let body = Body::from_stream(stream.map(move |chunk| {
+        let _slot = &slot;
+        chunk
+    }));
+
+    let mut builder = Response::builder().status(status);
+    if let Some(end) = end {
+        builder = builder.header(header::CONTENT_LENGTH, end - start);
+        if status == StatusCode::PARTIAL_CONTENT {
+            let total = total_len.unwrap_or(end);
+            builder = builder.header(
+                header::CONTENT_RANGE,
+                format!("bytes {start}-{}/{total}", end - 1),
+            );
+        }
+    }
+    let response = builder
+        .body(body)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(apply_streaming_headers(
+        response,
+        &handle.content_type,
+        filename,
+    ))
 }
 
-/// Try to find file on upstream servers and return a 307 redirect response
-/// Prioritization: `custom_origin` → `xs_servers` → `UPSTREAM_SERVERS` → user servers (lazy fetch)
-/// Uses HEAD requests to verify file exists before redirecting
+/// RFC 9110 §8.8.3.2 comparison of an entity-tag list header against `etag`:
+/// weak for `If-None-Match`, strong for `If-Match` (a `W/` tag never matches
+/// strongly). `None` when the header is absent; an unreadable header matches
+/// nothing.
+fn etag_list_matches(
+    headers: &HeaderMap,
+    name: &HeaderName,
+    etag: &str,
+    weak: bool,
+) -> Option<bool> {
+    let Ok(list) = headers.get(name)?.to_str() else {
+        return Some(false);
+    };
+    Some(list.split(',').any(|candidate| {
+        let candidate = candidate.trim();
+        candidate == "*"
+            || candidate == etag
+            || (weak && candidate.strip_prefix("W/") == Some(etag))
+    }))
+}
+
+/// RFC 9110 §13.1.5: a range is honoured when `If-Range` is absent or is
+/// exactly our strong tag. Weak tags and dates never hold.
+fn if_range_holds(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(header::IF_RANGE)
+        .is_none_or(|value| value.to_str().is_ok_and(|value| value.trim() == etag))
+}
+
+/// Wait for a fill to end; its verified length when it completed.
+async fn wait_for_completion(handle: &DownloadHandle) -> Result<u64, StatusCode> {
+    let mut progress = handle.progress.subscribe();
+    let done = progress
+        .wait_for(|progress| progress.phase != DownloadPhase::Running)
+        .await
+        .map(|progress| *progress);
+    match done {
+        Ok(DownloadProgress {
+            written,
+            phase: DownloadPhase::Complete,
+        }) => Ok(written),
+        _ => Err(StatusCode::BAD_GATEWAY),
+    }
+}
+
+/// Open a spool for reading, following it to its published path.
+///
+/// The spool is created before `Ready` and only disappears at the end: renamed
+/// by publication or unlinked on failure. Either way the terminal phase says
+/// which, and `final_path` is set before `Complete`.
+async fn open_spool(handle: &DownloadHandle) -> std::io::Result<File> {
+    match File::open(&handle.temp_path).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut progress = handle.progress.subscribe();
+            let _ = progress
+                .wait_for(|progress| progress.phase != DownloadPhase::Running)
+                .await;
+            match handle.final_path.get() {
+                Some(path) => File::open(path).await,
+                None => Err(error),
+            }
+        }
+        result => result,
+    }
+}
+
+fn empty_response(
+    status: StatusCode,
+    cache_control: &'static str,
+) -> Result<Response<Body>, StatusCode> {
+    Response::builder()
+        .status(status)
+        .header(header::CACHE_CONTROL, cache_control)
+        .body(Body::empty())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// `HEAD` from declared metadata; never a body.
+fn head_response(
+    content_type: &str,
+    total_len: Option<u64>,
+    filename: &str,
+) -> Result<Response<Body>, StatusCode> {
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::empty())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Some(length) = total_len {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+    }
+    Ok(apply_streaming_headers(response, content_type, filename))
+}
+
+/// Answer a request whose fill found the blob above the cache limit.
+#[allow(clippy::too_many_arguments)]
+async fn serve_uncacheable(
+    state: &AppState,
+    over_limit: &UncacheableResponse,
+    filename: &str,
+    headers: &HeaderMap,
+    method: &Method,
+    custom_origin: Option<&str>,
+    xs_servers: Option<&[String]>,
+    author_pubkey: Option<&nostr_sdk::prelude::PublicKey>,
+) -> Result<Response, StatusCode> {
+    if *method == Method::HEAD {
+        return head_response(&over_limit.content_type, over_limit.total_len, filename);
+    }
+    // The owner's transfer is already running: the first GET streams it as is
+    // instead of starting another. Everyone after asks upstream themselves.
+    let taken = over_limit
+        .response
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    match taken {
+        Some(response) => proxy_upstream_response(response, &over_limit.content_type, filename),
+        None => {
+            proxy_request_to_upstream(
+                state,
+                filename,
+                headers,
+                method,
+                custom_origin,
+                xs_servers,
+                author_pubkey,
+            )
+            .await
+        }
+    }
+}
+
+/// Find the blob upstream and `307` the client there.
+///
+/// Uses `HEAD` to verify a source has it. With `cache_in_background`, also
+/// starts (or joins) the shared fill for the same key proxy mode would use;
+/// a declared length above the cache limit skips it. The fill walks the tiers
+/// itself and verifies like any other fill; the client's own download from
+/// upstream is outside this server's control.
 pub async fn try_upstream_redirect(
     state: &AppState,
     filename: &str,
@@ -265,122 +888,57 @@ pub async fn try_upstream_redirect(
     author_pubkey: Option<&nostr_sdk::prelude::PublicKey>,
     cache_in_background: bool,
 ) -> Result<Response, StatusCode> {
-    // Extract hash from filename for internal tracking
-    let file_hash = get_sha256_hash_from_filename(filename).unwrap_or(filename);
-
-    // Check if this file is already being downloaded
-    if state.ongoing_downloads.read().await.contains_key(file_hash) {
-        debug!(
-            "File {} is already being downloaded in background, redirecting to upstream",
-            file_hash
-        );
-    }
-
-    let client = state.upstream_client.clone();
     let mut walk =
         upstream_candidates::Walk::new(state, filename, custom_origin, xs_servers, author_pubkey);
 
+    // As in `run_fill`: only all-404/410 is absence; anything else is 502.
+    let mut failure = StatusCode::NOT_FOUND;
     while let Some(candidate) = walk.next().await {
-        if let Some(response) = try_head_and_redirect(
-            state,
-            &client,
-            &candidate.url,
-            file_hash,
-            filename,
-            cache_in_background,
-        )
-        .await
-        {
-            return Ok(response);
-        }
-    }
-
-    Err(StatusCode::NOT_FOUND)
-}
-
-/// Try HEAD request and return redirect response if successful
-async fn try_head_and_redirect(
-    state: &AppState,
-    client: &Client,
-    file_url: &str,
-    file_hash: &str,
-    filename: &str,
-    cache_in_background: bool,
-) -> Option<Response<Body>> {
-    match client.head(file_url).send().await {
-        Ok(response) if response.status().is_success() => {
-            debug!("HEAD check succeeded for: {}", file_url);
-
-            // Get content type and size from HEAD response for background download
-            let content_type = extract_content_type_from_response(response.headers());
-            let content_length = response.content_length();
-
-            // Start background download if requested and not already downloading
-            if cache_in_background {
-                let already_downloading =
-                    state.ongoing_downloads.read().await.contains_key(file_hash);
-
-                if already_downloading {
-                    debug!(
-                        "File {} already being downloaded, skipping duplicate background download",
-                        file_hash
-                    );
-                } else {
-                    // Check size limit before starting background download
-                    let max_size_bytes = intake::size_limit(state, intake::Intake::UpstreamFetch);
-                    let should_cache = match content_length {
-                        Some(len) if len > max_size_bytes => {
-                            debug!(
-                                "File {} too large for background cache: {} bytes (max: {} bytes)",
-                                file_hash, len, state.max_upstream_download_size_bytes
-                            );
-                            false
-                        }
-                        _ => true,
-                    };
-
-                    if should_cache {
-                        debug!("Starting background download for caching: {}", file_hash);
-                        let state_clone = state.clone();
-                        let file_url_clone = file_url.to_string();
-                        let file_hash_clone = file_hash.to_string();
-                        let content_type_clone = content_type.clone();
-
-                        tokio::spawn(async move {
-                            start_background_download_for_redirect(
-                                &state_clone,
-                                &file_url_clone,
-                                &file_hash_clone,
-                                &content_type_clone,
-                            )
-                            .await;
-                        });
-                    }
+        let response = match state.upstream_client.head(&candidate.url).send().await {
+            Ok(response) if response.status().is_success() => response,
+            Ok(response) => {
+                debug!(
+                    "HEAD check failed for {} with status: {}",
+                    candidate.url,
+                    response.status()
+                );
+                if !is_absent(response.status().as_u16()) {
+                    failure = StatusCode::BAD_GATEWAY;
                 }
+                continue;
             }
+            Err(error) => {
+                debug!("HEAD request failed for {}: {error}", candidate.url);
+                failure = StatusCode::BAD_GATEWAY;
+                continue;
+            }
+        };
 
-            // Build 307 redirect response.
-            match build_redirect_response(file_url, filename) {
-                Ok(response) => Some(response),
-                Err(e) => {
-                    error!("Failed to build redirect response: {}", e);
-                    None
-                }
+        if cache_in_background {
+            let declared = response
+                .headers()
+                .get(reqwest_header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok());
+            let limit = intake::size_limit(state, intake::Intake::UpstreamFetch);
+            if declared.is_some_and(|length| length > limit) {
+                debug!("{filename} is {declared:?} bytes, too large for the background cache");
+            } else if let Err(status) = attach_fill(
+                state,
+                filename,
+                &canonical_hash(filename),
+                custom_origin,
+                xs_servers,
+                author_pubkey,
+            ) {
+                debug!("Skipping background cache fill for {filename}: {status}");
             }
         }
-        Ok(response) => {
-            debug!(
-                "HEAD check failed for {} with status: {}",
-                file_url,
-                response.status()
-            );
-            None
-        }
-        Err(e) => {
-            debug!("HEAD request failed for {}: {}", file_url, e);
-            None
-        }
+
+        return build_redirect_response(&candidate.url, filename);
     }
+
+    Err(failure)
 }
 
 /// Build a 307 redirect response to the upstream URL.
@@ -399,7 +957,7 @@ fn build_redirect_response(
     Response::builder()
         .status(StatusCode::TEMPORARY_REDIRECT)
         .header(header::LOCATION, upstream_url)
-        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(header::CACHE_CONTROL, NO_STORE)
         .header(
             header::CONTENT_DISPOSITION,
             format!("inline; filename=\"{}\"", clean_filename),
@@ -411,400 +969,81 @@ fn build_redirect_response(
         })
 }
 
-/// Start a background download for caching after redirect
-async fn start_background_download_for_redirect(
-    state: &AppState,
-    file_url: &str,
-    file_hash: &str,
-    content_type: &str,
-) {
-    let client = state.upstream_client.clone();
-
-    // Make GET request to download the file
-    match client.get(file_url).send().await {
-        Ok(response) if response.status().is_success() => {
-            debug!("Starting background download from: {}", file_url);
-
-            let total_len = response.content_length();
-            match prepare_download_state(state, file_hash, content_type, total_len).await {
-                Ok(prepared) => {
-                    download_file_from_upstream_background(
-                        state, file_url, response, file_hash, prepared,
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to prepare download state for {}: {:?}",
-                        file_hash, e
-                    );
-                }
-            }
-        }
-        Ok(response) => {
-            warn!(
-                "Background download GET failed for {} with status: {}",
-                file_url,
-                response.status()
-            );
-        }
-        Err(e) => {
-            warn!(
-                "Background download GET request failed for {}: {}",
-                file_url, e
-            );
-        }
-    }
-}
-
-/// Handle successful upstream response (consolidates range and non-range logic)
-async fn handle_successful_upstream_response(
-    state: &AppState,
-    client: &Client,
-    response: reqwest::Response,
-    file_url: &str,
-    file_hash: &str,
-    filename: &str,
-    headers: &HeaderMap,
-    method: &Method,
-    negotiation: Option<NegotiationGuard>,
-) -> Result<Response, StatusCode> {
-    let content_type = extract_content_type_from_response(response.headers());
-    if *method == Method::HEAD {
-        let total_len = upstream_response_total_len(&response);
-        let prepared = prepare_download_state(state, file_hash, &content_type, total_len).await?;
-        let handle = prepared.handle.clone();
-        let head_response = serve_head_download(&handle, filename)?;
-        if let Some(negotiation) = negotiation {
-            negotiation.finish(NegotiationPhase::Ready).await;
-        }
-
-        let state_clone = state.clone();
-        let file_url_clone = file_url.to_string();
-        let file_hash_clone = file_hash.to_string();
-        tokio::spawn(async move {
-            download_file_from_upstream_background(
-                &state_clone,
-                &file_url_clone,
-                response,
-                &file_hash_clone,
-                prepared,
-            )
-            .await;
-        });
-        return Ok(head_response);
-    }
-    if headers.get(header::RANGE).is_none() {
-        let prepared =
-            prepare_download_state(state, file_hash, &content_type, response.content_length())
-                .await?;
-        return stream_and_save_from_upstream(
-            state,
-            file_url,
-            response,
-            file_hash,
-            prepared,
-            negotiation,
-        )
-        .await;
-    }
-
-    // Far seeks and suffix/multi-ranges were sent upstream unchanged. They are
-    // latency-sensitive and intentionally bypass the sequential cache fill.
-    if coalescible_range_start(headers).is_none() {
-        return proxy_upstream_response(response, &content_type, filename).await;
-    }
-
-    let Some(total_len) = upstream_response_total_len(&response) else {
-        // A compliant 206 carries the complete length in Content-Range. If the
-        // origin supplied neither it nor Content-Length, issue the original
-        // range request so the client still receives correct range semantics.
-        drop(response);
-        return proxy_original_range(
-            client,
-            file_url,
-            headers,
-            &content_type,
-            filename,
-            negotiation,
-        )
-        .await;
-    };
-
-    // Above the intake limit no cacheable download will ever exist, so this
-    // request has nothing to follow. Answering the client's own range from
-    // origin beats promising a `206` that the aborted download cannot fill.
-    if total_len > intake::size_limit(state, intake::Intake::UpstreamFetch) {
-        debug!(
-            "Blob {} is {} bytes, above the upstream cache limit: proxying the range instead",
-            file_hash, total_len
-        );
-        drop(response);
-        return proxy_original_range(
-            client,
-            file_url,
-            headers,
-            &content_type,
-            filename,
-            negotiation,
-        )
-        .await;
-    }
-
-    let prepared = prepare_download_state(state, file_hash, &content_type, Some(total_len)).await?;
-    let handle = prepared.handle.clone();
-    let range_response = serve_range_download(&handle, filename, headers)
-        .await
-        .ok_or(StatusCode::RANGE_NOT_SATISFIABLE)??;
-
-    if let Some(negotiation) = negotiation {
-        negotiation.finish(NegotiationPhase::Ready).await;
-    }
-    let state_clone = state.clone();
-    let file_url_clone = file_url.to_string();
-    let file_hash_clone = file_hash.to_string();
-    tokio::spawn(async move {
-        download_file_from_upstream_background(
-            &state_clone,
-            &file_url_clone,
-            response,
-            &file_hash_clone,
-            prepared,
-        )
-        .await;
-    });
-    Ok(range_response)
-}
-
-fn upstream_response_total_len(response: &reqwest::Response) -> Option<u64> {
-    response
-        .headers()
-        .get(reqwest_header::CONTENT_RANGE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.rsplit_once('/'))
-        .and_then(|(_, total)| total.parse::<u64>().ok())
-        .or_else(|| response.content_length())
-}
-
-/// Re-ask the origin with the client's own `Range` and proxy that answer.
+/// Proxy this request to upstream unchanged, `Range` and validators included.
 ///
-/// A coalescible range was rewritten to `bytes=0-` for the cold fetch
-/// (`copy_headers_for_cold_fetch`) so one download could both serve and fill
-/// the cache. Once that download turns out to be impossible, the response in
-/// hand answers a different question than the client asked, and the only
-/// correct reply is a fresh, correctly ranged request.
-async fn proxy_original_range(
-    client: &Client,
-    file_url: &str,
-    headers: &HeaderMap,
-    content_type: &str,
-    filename: &str,
-    negotiation: Option<NegotiationGuard>,
-) -> Result<Response, StatusCode> {
-    // No attachable download will be registered, so parked followers must stop
-    // waiting and run their own lookup.
-    if let Some(negotiation) = negotiation {
-        negotiation.finish(NegotiationPhase::Failed).await;
-    }
-    let request = copy_headers_to_reqwest(headers, client.get(file_url));
-    let response = request.send().await.map_err(|error| {
-        warn!("Failed range fallback for {}: {}", file_url, error);
-        StatusCode::BAD_GATEWAY
-    })?;
-    proxy_upstream_response(response, content_type, filename).await
-}
-
-async fn open_download_file(handle: &DownloadHandle) -> std::io::Result<File> {
-    match File::open(&handle.temp_path).await {
-        Ok(file) => Ok(file),
-        Err(temp_error) => {
-            if let Some(final_path) = handle.final_path.get() {
-                File::open(final_path).await
-            } else {
-                Err(temp_error)
-            }
-        }
-    }
-}
-
-fn serve_head_download(
-    handle: &DownloadHandle,
-    filename: &str,
-) -> Result<Response<Body>, StatusCode> {
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::empty())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    response = apply_streaming_headers(response, &handle.content_type, filename);
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("private, no-store"),
-    );
-    if let Some(length) = handle.total_len {
-        if let Ok(value) = length.to_string().parse() {
-            response.headers_mut().insert(header::CONTENT_LENGTH, value);
-        }
-    }
-    Ok(response)
-}
-
-async fn serve_non_range_download(
-    handle: &DownloadHandle,
-    filename: &str,
-) -> Result<Response<Body>, StatusCode> {
-    let reader = open_download_file(handle).await.map_err(|error| {
-        error!(
-            "Failed to open in-flight download {}: {}",
-            handle.temp_path.display(),
-            error
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let stream = create_tailing_stream(reader, handle.progress.subscribe(), 0, handle.total_len)
-        .await
-        .map_err(|error| {
-            error!("Failed to attach to in-flight download: {error}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    let body = Body::from_stream(stream);
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .body(body)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    response = apply_streaming_headers(response, &handle.content_type, filename);
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("private, no-store"),
-    );
-    if let Some(length) = handle.total_len {
-        if let Ok(value) = length.to_string().parse() {
-            response.headers_mut().insert(header::CONTENT_LENGTH, value);
-        }
-    }
-    Ok(response)
-}
-
-async fn serve_range_download(
-    handle: &DownloadHandle,
-    filename: &str,
-    headers: &HeaderMap,
-) -> Option<Result<Response<Body>, StatusCode>> {
-    let total_len = handle.total_len?;
-    let range = headers.get(header::RANGE)?.to_str().ok()?;
-
-    match parse_range_header(range, total_len) {
-        RangeSpec::Satisfiable { start, end } => {
-            let snapshot = *handle.progress.borrow();
-            if snapshot.phase == DownloadPhase::Running
-                && start > snapshot.written.saturating_add(SEEK_AHEAD_LIMIT)
-            {
-                return None;
-            }
-
-            let reader = match open_download_file(handle).await {
-                Ok(reader) => reader,
-                Err(error) => {
-                    error!("Failed to open in-flight range source: {error}");
-                    return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
-                }
-            };
-            let stream = match create_tailing_stream(
-                reader,
-                handle.progress.subscribe(),
-                start,
-                Some(end + 1),
-            )
-            .await
-            {
-                Ok(stream) => stream,
-                Err(error) => {
-                    error!("Failed to create range tailing stream: {error}");
-                    return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
-                }
-            };
-            let length = end - start + 1;
-            let body = Body::from_stream(stream);
-            let mut response = match Response::builder()
-                .status(StatusCode::PARTIAL_CONTENT)
-                .header(
-                    header::CONTENT_RANGE,
-                    format!("bytes {}-{}/{}", start, end, total_len),
-                )
-                .header(header::CONTENT_LENGTH, length)
-                .body(body)
-            {
-                Ok(response) => response,
-                Err(_) => return Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
-            };
-            response = apply_streaming_headers(response, &handle.content_type, filename);
-            response.headers_mut().insert(
-                header::CACHE_CONTROL,
-                axum::http::HeaderValue::from_static("private, no-store"),
-            );
-            Some(Ok(response))
-        }
-        RangeSpec::Unsatisfiable => Some(
-            Response::builder()
-                .status(StatusCode::RANGE_NOT_SATISFIABLE)
-                .header(header::CONTENT_RANGE, format!("bytes */{}", total_len))
-                .header(header::ACCEPT_RANGES, "bytes")
-                .body(Body::empty())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR),
-        ),
-        RangeSpec::Ignore => Some(serve_non_range_download(handle, filename).await),
-    }
-}
-
-/// Proxy request to upstream server while download is in progress
-/// Uses the same prioritization as `try_upstream_servers`
+/// Only for blobs over the cache limit, where no spool exists to share. `HEAD`
+/// stays `HEAD` upstream, so it never pulls a body. `304`, `412` and `416`
+/// answer the client's own validators or range and are forwarded as is; only
+/// all-404/410 is absence, and other failures are `502`.
 async fn proxy_request_to_upstream(
     state: &AppState,
     filename: &str,
     headers: &HeaderMap,
+    method: &Method,
     custom_origin: Option<&str>,
     xs_servers: Option<&[String]>,
     author_pubkey: Option<&nostr_sdk::prelude::PublicKey>,
 ) -> Result<Response<Body>, StatusCode> {
-    debug!(
-        "Proxying request to upstream for ongoing download: {}",
-        filename
-    );
+    debug!("Proxying over-limit request to upstream: {}", filename);
 
-    let client = state.upstream_client.clone();
+    let client = &state.upstream_client;
     let mut walk =
         upstream_candidates::Walk::new(state, filename, custom_origin, xs_servers, author_pubkey);
 
+    let mut failure = StatusCode::NOT_FOUND;
     while let Some(candidate) = walk.next().await {
-        let request = copy_headers_to_reqwest(headers, client.get(&candidate.url));
+        let request = if *method == Method::HEAD {
+            client.head(&candidate.url)
+        } else {
+            client.get(&candidate.url)
+        };
+        // Identity only: `proxy_upstream_response` does not relay
+        // `Content-Encoding`, so a coded body would reach the client as garbage.
+        // One that arrives anyway falls through to `502`.
+        let request = copy_headers_to_reqwest(headers, request)
+            .header(reqwest_header::ACCEPT_ENCODING, "identity");
         match request.send().await {
-            Ok(response) if response.status().is_success() => {
+            Ok(response)
+                if (response.status().is_success()
+                    || matches!(response.status().as_u16(), 304 | 412 | 416))
+                    && !is_encoded(&response) =>
+            {
                 debug!(
-                    "Successfully proxied request to {}: {}",
+                    "Proxied request to {} {}: {}",
+                    candidate.tier.label(),
+                    candidate.url,
+                    response.status()
+                );
+                let content_type = extract_content_type_from_response(response.headers());
+                return proxy_upstream_response(response, &content_type, filename);
+            }
+            Ok(response) => {
+                debug!(
+                    "{} {} returned status: {}",
+                    candidate.tier.label(),
+                    candidate.url,
+                    response.status()
+                );
+                if !is_absent(response.status().as_u16()) {
+                    failure = StatusCode::BAD_GATEWAY;
+                }
+            }
+            Err(error) => {
+                warn!(
+                    "Failed to proxy to {} {}: {error}",
                     candidate.tier.label(),
                     candidate.url
                 );
-                let content_type = extract_content_type_from_response(response.headers());
-                return proxy_upstream_response(response, &content_type, filename).await;
+                failure = StatusCode::BAD_GATEWAY;
             }
-            Ok(response) => debug!(
-                "{} {} returned status: {}",
-                candidate.tier.label(),
-                candidate.url,
-                response.status()
-            ),
-            Err(error) => warn!(
-                "Failed to proxy to {} {}: {error}",
-                candidate.tier.label(),
-                candidate.url
-            ),
         }
     }
 
-    Err(StatusCode::NOT_FOUND)
+    Err(failure)
 }
 
 /// Proxy upstream response directly to client
-async fn proxy_upstream_response(
+fn proxy_upstream_response(
     response: reqwest::Response,
     content_type: &str,
     filename: &str,
@@ -848,10 +1087,6 @@ async fn proxy_upstream_response(
         .headers()
         .get(reqwest_header::ACCEPT_RANGES)
         .cloned();
-    let cache_control = response
-        .headers()
-        .get(reqwest_header::CACHE_CONTROL)
-        .cloned();
     let etag = response.headers().get(reqwest_header::ETAG).cloned();
     let last_modified = response
         .headers()
@@ -888,14 +1123,10 @@ async fn proxy_upstream_response(
     if let Some(accept_ranges) = accept_ranges {
         response_builder = response_builder.header(header::ACCEPT_RANGES, accept_ranges);
     }
-    // IMPORTANT: When proxying upstream responses, do NOT use upstream's cache-control.
-    // Use no-store to prevent CDNs from caching potentially incomplete streaming responses.
-    // This fixes 416 errors when CDNs cache partial range responses that fail mid-transfer.
-    // Once the file is fully downloaded and stored locally, Almond will serve it with
-    // proper immutable cache headers from serve_file_with_range().
-    let _ = cache_control; // Intentionally ignore upstream's cache-control
+    // Never forward upstream's cache-control: these bytes are unverified, and a
+    // CDN caching a partial or failed stream would serve it to everyone.
     response_builder = response_builder
-        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(header::CACHE_CONTROL, NO_STORE)
         // Vary: Range tells CDNs that responses differ based on Range header,
         // preventing cache collisions between different range requests
         .header(header::VARY, "Range");
@@ -923,257 +1154,12 @@ async fn proxy_upstream_response(
     Ok(response)
 }
 
-/// Prepare download state and return metadata for either streaming or background download
-async fn prepare_download_state(
-    state: &AppState,
-    filename: &str,
-    content_type: &str,
-    total_len: Option<u64>,
-) -> Result<PreparedDownload, StatusCode> {
-    crate::services::download::prepare_download_state(state, filename, content_type, total_len)
-        .await
-        .map_err(|error| {
-            error!("Failed to prepare upstream download for {filename}: {error}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
-}
-
-/// Stream file from upstream server to client while saving to local storage
-async fn stream_and_save_from_upstream(
-    state: &AppState,
-    file_url: &str,
-    upstream_resp: reqwest::Response,
-    filename: &str,
-    prepared: PreparedDownload,
-    negotiation: Option<NegotiationGuard>,
-) -> Result<Response<Body>, StatusCode> {
-    let content_length = upstream_resp.content_length();
-    let max_size_bytes = intake::size_limit(state, intake::Intake::UpstreamFetch);
-    if content_length.is_some_and(|length| length > max_size_bytes) {
-        // Too large to cache, but the response in hand is exactly the
-        // representation the client asked for: proxy it rather than turning a
-        // storage policy into a client error.
-        let temp_path = prepared.handle.temp_path.clone();
-        let content_type = prepared.handle.content_type.clone();
-        drop(prepared); // DownloadGuard drop removes the ongoing-downloads entry
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        if let Some(negotiation) = negotiation {
-            negotiation.finish(NegotiationPhase::Failed).await;
-        }
-        debug!(
-            "Blob {} is {:?} bytes, above the upstream cache limit: proxying without caching",
-            filename, content_length
-        );
-        return proxy_upstream_response(upstream_resp, &content_type, filename).await;
-    }
-
-    let reader = match File::open(&prepared.handle.temp_path).await {
-        Ok(file) => file,
-        Err(error) => {
-            error!("Failed to open temp file for streaming: {error}");
-            let _ = tokio::fs::remove_file(&prepared.handle.temp_path).await;
-            drop(prepared);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-    let stream = match create_tailing_stream(
-        reader,
-        prepared.handle.progress.subscribe(),
-        0,
-        content_length,
-    )
-    .await
-    {
-        Ok(stream) => stream,
-        Err(error) => {
-            error!("Failed to create tailing stream: {error}");
-            drop(prepared);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    let content_type = prepared.handle.content_type.clone();
-    let body = Body::from_stream(stream);
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .body(body)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    response = apply_streaming_headers(response, &content_type, filename);
-    if let Some(length) = content_length {
-        if let Ok(value) = length.to_string().parse() {
-            response.headers_mut().insert(header::CONTENT_LENGTH, value);
-        }
-    }
-
-    if let Some(negotiation) = negotiation {
-        negotiation.finish(NegotiationPhase::Ready).await;
-    }
-    let state = state.clone();
-    let file_url = file_url.to_string();
-    let filename = filename.to_string();
-    tokio::spawn(async move {
-        run_download(state, file_url, upstream_resp, filename, prepared, true).await;
-    });
-
-    Ok(response)
-}
-
-/// Download file from upstream in background (without streaming to client)
-async fn download_file_from_upstream_background(
-    state: &AppState,
-    file_url: &str,
-    upstream_resp: reqwest::Response,
-    filename: &str,
-    prepared: PreparedDownload,
-) {
-    run_download(
-        state.clone(),
-        file_url.to_string(),
-        upstream_resp,
-        filename.to_string(),
-        prepared,
-        false,
-    )
-    .await;
-}
-
-fn upstream_hash_matches_filename(computed_hash: &str, filename: &str) -> bool {
-    get_sha256_hash_from_filename(filename)
-        .unwrap_or(filename)
-        .eq_ignore_ascii_case(computed_hash)
-}
-
-async fn run_download(
-    state: AppState,
-    file_url: String,
-    upstream_resp: reqwest::Response,
-    filename: String,
-
-    mut prepared: PreparedDownload,
-    count_as_served: bool,
-) {
-    let handle = prepared.handle.clone();
-    let guard = prepared.take_guard();
-    let max_size_bytes = intake::size_limit(&state, intake::Intake::UpstreamFetch);
-    let expected_len = handle.total_len.or_else(|| upstream_resp.content_length());
-    let content_type = handle.content_type.clone();
-    let extension = get_extension_from_mime(&content_type);
-    let temp_path = handle.temp_path.clone();
-
-    let result: Result<(String, u64), String> = async {
-        if expected_len.is_some_and(|length| length > max_size_bytes) {
-            return Err(format!(
-                "upstream file exceeds the {} byte limit",
-                max_size_bytes
-            ));
-        }
-
-        let mut chunks = upstream_resp.bytes_stream();
-        let mut hasher = sha2::Sha256::new();
-        let mut body_size = 0u64;
-        while let Some(next) = chunks.next().await {
-            let chunk = next.map_err(|error| error.to_string())?;
-            let new_size = body_size + chunk.len() as u64;
-            if new_size > max_size_bytes {
-                return Err(format!(
-                    "upstream body exceeded the {} byte limit",
-                    max_size_bytes
-                ));
-            }
-
-            prepared
-                .writer
-                .write_all(&chunk)
-                .await
-                .map_err(|error| error.to_string())?;
-            // `flush` waits for tokio's blocking-file operation. Publishing
-            // progress afterwards guarantees followers can read these bytes.
-            prepared
-                .writer
-                .flush()
-                .await
-                .map_err(|error| error.to_string())?;
-            hasher.update(&chunk);
-            body_size = new_size;
-            handle.progress.send_modify(|progress| {
-                progress.written = body_size;
-            });
-        }
-
-        if expected_len.is_some_and(|length| length != body_size) {
-            return Err(format!(
-                "upstream body length mismatch: expected {:?}, received {}",
-                expected_len, body_size
-            ));
-        }
-
-        let sha256 = hex::encode(hasher.finalize());
-        if !upstream_hash_matches_filename(&sha256, &filename) {
-            let requested_hash = get_sha256_hash_from_filename(&filename).unwrap_or(&filename);
-            return Err(format!(
-                "upstream hash mismatch: requested {requested_hash}, received {sha256}"
-            ));
-        }
-        // The coalescing machinery owned this file while followers tailed it;
-        // publication is the point where ownership transfers to storage.
-        let published = intake::accept(
-            &state,
-            crate::services::file_storage::TempBlob::adopt(temp_path.clone()),
-            intake::Accepted {
-                sha256: sha256.clone(),
-                origin: crate::models::BlobOrigin::UpstreamCache,
-                size: body_size,
-                extension,
-                mime_type: Some(content_type),
-                expiration: None,
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        // Followers tail the file on disk, so there is only a path to publish
-        // when the filesystem adapter is the one that took the blob.
-        if let Some(path) = crate::services::file_storage::local_path(&published.metadata) {
-            let _ = handle.final_path.set(path.to_path_buf());
-        }
-        Ok((sha256, body_size))
-    }
-    .await;
-
-    match result {
-        Ok((sha256, total)) => {
-            if count_as_served {
-                state.metrics.track_download(total);
-            } else {
-                state.metrics.files_downloaded.inc();
-            }
-            state.metrics.track_upstream_download(&file_url, total);
-            handle.progress.send_modify(|progress| {
-                progress.phase = DownloadPhase::Complete;
-            });
-            info!(
-                "Upstream download completed: {} -> {} ({} bytes)",
-                file_url, sha256, total
-            );
-            guard.finish(DownloadPhase::Complete).await;
-        }
-        Err(error) => {
-            error!("Upstream download failed for {}: {}", file_url, error);
-            handle.progress.send_modify(|progress| {
-                progress.phase = DownloadPhase::Failed;
-            });
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            guard.finish(DownloadPhase::Failed).await;
-        }
-    }
-}
-
+/// Content headers shared by every spool response; always `no-store`.
 fn apply_streaming_headers(
     mut response: Response<Body>,
     content_type: &str,
     filename: &str,
 ) -> Response<Body> {
-    use axum::http::HeaderValue;
-
     let headers = response.headers_mut();
 
     // Extract MIME type essence (without parameters like codecs=avc1) to prevent browser from appending to filename
@@ -1188,11 +1174,7 @@ fn apply_streaming_headers(
         headers.insert(header::CONTENT_TYPE, header_value);
     }
 
-    // Static header values - these are compile-time constants
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static(CACHE_CONTROL_IMMUTABLE),
-    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(NO_STORE));
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
 
     // Add Content-Disposition header to prevent save dialog
@@ -1205,231 +1187,51 @@ fn apply_streaming_headers(
         headers.insert(header::CONTENT_DISPOSITION, header_value);
     }
 
-    debug!(
-        "Applied streaming headers: Content-Type={}, Content-Disposition=inline; filename=\"{}\"",
-        mime_type, filename_display
-    );
-
     response
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::DownloadProgress;
-    use tokio::{io::AsyncWriteExt, sync::watch};
 
-    async fn temp_download_file() -> (std::path::PathBuf, File, File) {
-        let path = std::env::temp_dir().join(format!("almond-tail-{}", uuid::Uuid::new_v4()));
-        let writer = File::create(&path).await.unwrap();
-        let reader = File::open(&path).await.unwrap();
-        (path, writer, reader)
-    }
-
-    #[tokio::test]
-    async fn non_range_follower_streams_from_existing_download() {
-        let (path, mut writer, _) = temp_download_file().await;
-        let (progress, _) = watch::channel(DownloadProgress {
-            written: 0,
-            phase: DownloadPhase::Running,
-        });
-        let handle = DownloadHandle {
-            started: std::time::Instant::now(),
-            temp_path: path.clone(),
-            content_type: "application/octet-stream".to_string(),
-            total_len: Some(11),
-            progress: progress.clone(),
-            final_path: std::sync::OnceLock::new(),
-        };
-
-        let response = serve_non_range_download(&handle, "blob.bin").await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::CONTENT_LENGTH], "11");
-        assert_eq!(
-            response.headers()[header::CACHE_CONTROL],
-            "private, no-store"
-        );
-
-        let download = tokio::spawn(async move {
-            writer.write_all(b"hello").await.unwrap();
-            writer.flush().await.unwrap();
-            progress.send_modify(|state| state.written = 5);
-            writer.write_all(b" world").await.unwrap();
-            writer.flush().await.unwrap();
-            progress.send_modify(|state| {
-                state.written = 11;
-                state.phase = DownloadPhase::Complete;
-            });
-        });
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        download.await.unwrap();
-        assert_eq!(body, bytes::Bytes::from_static(b"hello world"));
-        tokio::fs::remove_file(path).await.unwrap();
+    #[test]
+    fn only_a_whole_body_206_counts_as_a_full_fetch() {
+        assert_eq!(full_content_range("bytes 0-9/10"), Some(10));
+        assert_eq!(full_content_range("bytes 1-9/10"), None);
+        assert_eq!(full_content_range("bytes 0-8/10"), None);
+        assert_eq!(full_content_range("bytes 0-9/*"), None);
+        assert_eq!(full_content_range("garbage"), None);
     }
 
     #[test]
-    fn cold_range_fetch_starts_at_zero() {
+    fn validators_compare_weakly_only_for_if_none_match() {
+        let etag = "\"abc\"";
         let mut headers = HeaderMap::new();
-        headers.insert(header::RANGE, "bytes=1024-2047".parse().unwrap());
-        let request =
-            copy_headers_for_cold_fetch(&headers, Client::new().get("http://127.0.0.1/blob"))
-                .build()
-                .unwrap();
-        assert_eq!(request.headers()[reqwest_header::RANGE], "bytes=0-");
-
-        headers.insert(
-            header::RANGE,
-            format!("bytes={}-", SEEK_AHEAD_LIMIT + 1).parse().unwrap(),
-        );
-        let request =
-            copy_headers_for_cold_fetch(&headers, Client::new().get("http://127.0.0.1/blob"))
-                .build()
-                .unwrap();
         assert_eq!(
-            request.headers()[reqwest_header::RANGE],
-            format!("bytes={}-", SEEK_AHEAD_LIMIT + 1)
+            etag_list_matches(&headers, &header::IF_MATCH, etag, false),
+            None
         );
-    }
+        assert!(if_range_holds(&headers, etag));
 
-    #[tokio::test]
-    async fn range_follower_streams_requested_bytes_from_full_fetch() {
-        let (path, mut writer, _) = temp_download_file().await;
-        let (progress, _) = watch::channel(DownloadProgress {
-            written: 0,
-            phase: DownloadPhase::Running,
-        });
-        let handle = DownloadHandle {
-            started: std::time::Instant::now(),
-            temp_path: path.clone(),
-            content_type: "application/octet-stream".to_string(),
-            total_len: Some(11),
-            progress: progress.clone(),
-            final_path: std::sync::OnceLock::new(),
-        };
-        let mut headers = HeaderMap::new();
-        headers.insert(header::RANGE, "bytes=6-10".parse().unwrap());
-
-        let response = serve_range_download(&handle, "blob.bin", &headers)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
-        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 6-10/11");
-        assert_eq!(response.headers()[header::CONTENT_LENGTH], "5");
-
-        let download = tokio::spawn(async move {
-            writer.write_all(b"hello world").await.unwrap();
-            writer.flush().await.unwrap();
-            progress.send_modify(|state| {
-                state.written = 11;
-                state.phase = DownloadPhase::Complete;
-            });
-        });
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        download.await.unwrap();
-        assert_eq!(body, bytes::Bytes::from_static(b"world"));
-        tokio::fs::remove_file(path).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn far_range_follower_declines_to_avoid_stalling() {
-        let path = std::env::temp_dir().join(format!("almond-tail-{}", uuid::Uuid::new_v4()));
-        let (progress, _) = watch::channel(DownloadProgress {
-            written: 0,
-            phase: DownloadPhase::Running,
-        });
-        let handle = DownloadHandle {
-            started: std::time::Instant::now(),
-            temp_path: path,
-            content_type: "application/octet-stream".to_string(),
-            total_len: Some(32 * 1024 * 1024),
-            progress,
-            final_path: std::sync::OnceLock::new(),
-        };
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::RANGE,
-            format!("bytes={}-", SEEK_AHEAD_LIMIT + 1).parse().unwrap(),
-        );
-
-        assert!(serve_range_download(&handle, "blob.bin", &headers)
-            .await
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn negotiation_wait_times_out_for_stalled_leader() {
-        let (phase, _) = watch::channel(NegotiationPhase::Pending);
-        let negotiation = UpstreamNegotiation {
-            started: std::time::Instant::now(),
-            phase,
-        };
-
+        headers.insert(header::IF_NONE_MATCH, "W/\"abc\"".parse().unwrap());
+        headers.insert(header::IF_MATCH, "W/\"abc\"".parse().unwrap());
+        headers.insert(header::IF_RANGE, "W/\"abc\"".parse().unwrap());
         assert_eq!(
-            wait_for_negotiation(&negotiation, std::time::Duration::from_millis(1)).await,
-            NegotiationPhase::Pending
+            etag_list_matches(&headers, &header::IF_NONE_MATCH, etag, true),
+            Some(true)
         );
-    }
-
-    #[tokio::test]
-    async fn negotiation_wait_observes_leader_completion() {
-        let (phase, _) = watch::channel(NegotiationPhase::Pending);
-        let negotiation = UpstreamNegotiation {
-            started: std::time::Instant::now(),
-            phase: phase.clone(),
-        };
-        tokio::spawn(async move {
-            tokio::task::yield_now().await;
-            phase.send_replace(NegotiationPhase::Ready);
-        });
-
         assert_eq!(
-            wait_for_negotiation(&negotiation, std::time::Duration::from_secs(1)).await,
-            NegotiationPhase::Ready
+            etag_list_matches(&headers, &header::IF_MATCH, etag, false),
+            Some(false)
         );
-    }
+        assert!(!if_range_holds(&headers, etag));
 
-    #[test]
-    fn upstream_hash_comparison_accepts_case_insensitive_filenames() {
-        let hash = "a3f5c01f0f87b6e1d2c3a4b5c6d7e8f90123456789abcdef0123456789abcdef";
-        assert!(upstream_hash_matches_filename(hash, &hash.to_uppercase()));
-        assert!(upstream_hash_matches_filename(hash, &format!("{hash}.mp4")));
-        assert!(!upstream_hash_matches_filename(
-            hash,
-            "b3f5c01f0f87b6e1d2c3a4b5c6d7e8f90123456789abcdef0123456789abcdef"
-        ));
-    }
-
-    #[tokio::test]
-    async fn head_follower_uses_download_metadata_without_reading_body() {
-        let (progress, _) = watch::channel(DownloadProgress {
-            written: 3,
-            phase: DownloadPhase::Running,
-        });
-        let handle = DownloadHandle {
-            started: std::time::Instant::now(),
-            temp_path: std::path::PathBuf::from("/path/does/not/need/to/exist"),
-            content_type: "video/mp4".to_string(),
-            total_len: Some(42),
-            progress,
-            final_path: std::sync::OnceLock::new(),
-        };
-
-        let response = serve_head_download(&handle, "blob.mp4").unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp4");
-        assert_eq!(response.headers()[header::CONTENT_LENGTH], "42");
+        headers.insert(header::IF_MATCH, "\"x\", \"abc\"".parse().unwrap());
+        headers.insert(header::IF_RANGE, "\"abc\"".parse().unwrap());
         assert_eq!(
-            response.headers()[header::CACHE_CONTROL],
-            "private, no-store"
+            etag_list_matches(&headers, &header::IF_MATCH, etag, false),
+            Some(true)
         );
-        assert!(axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(if_range_holds(&headers, etag));
     }
 }
