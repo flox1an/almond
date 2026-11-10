@@ -1,6 +1,13 @@
 # Development
 
-Prerequisites: Rust 1.85 or later and the OpenSSL development libraries.
+Prerequisites: Rust 1.95 or later and the OpenSSL development libraries.
+`rust-toolchain.toml` pins Rust 1.99.1 for development and CI; both Docker
+builders use the same stable release. The library's dependency graph requires
+at least Rust 1.94.1; development dependencies require Rust 1.95.
+
+Cargo dependencies are refreshed in `Cargo.lock`. `rusqlite` remains on 0.31
+because CDK's SQLite backend requires that series; Cargo permits only one
+native `sqlite3` link dependency. Updating it independently is not supported.
 
 ```bash
 cargo build --release
@@ -12,8 +19,10 @@ Before opening a PR, run what CI runs:
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --no-default-features -- -D warnings
 cargo build
 cargo test
+cargo test --no-default-features
 ```
 
 ## Documentation

@@ -8,13 +8,14 @@ ENV PATH=/usr/local/cargo/bin:$PATH
 
 WORKDIR /usr/src/app
 
-# Install build dependencies and the pinned Rust nightly (ICE #159815 fixed there; pinned for reproducible builds).
+# Install build dependencies and the stable Rust pinned in rust-toolchain.toml
+# (the nightly pin for ICE rust-lang/rust#159815 is obsolete: fix #159825 shipped in 1.99.0).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates curl gcc libc6-dev pkg-config libssl-dev && \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-        sh -s -- -y --default-toolchain nightly-2026-09-27 --profile minimal && \
-    rustup default nightly-2026-09-27 && \
+        sh -s -- -y --default-toolchain 1.99.1 --profile minimal && \
+    rustup default 1.99.1 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy dependency files for caching

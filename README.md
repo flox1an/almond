@@ -60,7 +60,8 @@ Preview locally with `cd docs && npm install && npm run docs:dev`.
 
 ## Development
 
-Prerequisites: Rust 1.85 or later and the OpenSSL development libraries.
+Prerequisites: Rust 1.94.1 or later (1.95 for development checks), and the OpenSSL
+development libraries. `rust-toolchain.toml` pins the current stable build toolchain.
 Before opening a PR, run what CI runs: `cargo fmt --check`,
 `cargo clippy --all-targets -- -D warnings`, `cargo build`, `cargo test`.
 

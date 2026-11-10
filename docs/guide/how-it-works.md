@@ -86,6 +86,11 @@ from the single mint in `ALMOND_CASHU_MINT` and are received into the wallet at
 `ALMOND_CASHU_WALLET_PATH`. Payments apply on top of the access mode. Builds
 without the `cashu` feature refuse to start with paid operations configured.
 
+The CDK 0.18 dependency upgrade automatically migrates the wallet database,
+including transaction keys. Stop Almond and back up the wallet database and
+its seed before the first upgraded start. Do not point an older binary at the
+migrated database; a rollback requires restoring the matching pre-upgrade backup.
+
 ## Upstream lookups
 
 When a requested hash is not stored locally, Almond looks for it in this order:
