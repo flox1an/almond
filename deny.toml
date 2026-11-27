@@ -1,0 +1,47 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+# Run locally with `cargo deny check`.
+
+[graph]
+# Almond builds with and without the default `cashu` feature; check both trees.
+all-features = true
+
+[advisories]
+# Each entry needs a reason and an exit condition. Remove it when the exit
+# condition is met; cargo-deny then enforces the advisory again.
+ignore = [
+    # Bundled SQLite < 3.54 in libsqlite3-sys 0.28. Only reachable through a
+    # wallet database file that a less trusted party could write (local
+    # attack). Pinned by rusqlite 0.31, which must match cdk-sqlite 0.18.
+    # Exit: upgrade cdk to a release built on rusqlite >= 0.41.
+    { id = "RUSTSEC-2026-0459", reason = "bundled SQLite via cdk-sqlite pin; local-file attack only" },
+    # chrono is flagged unmaintained, not vulnerable. Used directly and by
+    # cashu/cdk. Exit: migrate to jiff or time and upgrade cdk.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, no vulnerability; used by cashu/cdk" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MITNFA",
+    "BlueOak-1.0.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

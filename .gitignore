@@ -10,6 +10,7 @@ fips-key.pem
 # Local development artifacts
 storage5/
 node_modules/
+almond-test-files/
 todelete.txt
 *.bak
 docs/.vitepress/dist/

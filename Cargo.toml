@@ -3,6 +3,7 @@ name = "almond"
 version = "0.5.4"
 edition = "2021"
 rust-version = "1.94.1"
+license = "MIT"
 
 [[bin]]
 name = "almond"
@@ -99,6 +100,13 @@ cast_sign_loss = "warn"
 # Flag discarded JoinHandles and similar must-use values.
 let_underscore_must_use = "warn"
 redundant_clone = "warn"
+# unwrap_used / expect_used are reported by a separate non-blocking CI step
+# (see .github/workflows/rust.yml): enabling them here would turn every
+# existing use into an error under `clippy -D warnings`.
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+await_holding_lock = "warn"
 # Deliberately not enforcing across 500+ tracing calls
 uninlined_format_args = "allow"
 # All panics are boot-only — revisit once Config::from_env lands

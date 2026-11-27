@@ -25,6 +25,23 @@ cargo test
 cargo test --no-default-features
 ```
 
+CI additionally runs these checks; each can be run locally:
+
+| Check | Command | What it guards |
+|---|---|---|
+| Dependencies | `cargo deny check` | Advisories, licenses, registry sources (`deny.toml`) |
+| MSRV | `rustup run <rust-version> cargo check --lib --bins --locked` | `rust-version` in `Cargo.toml`; dev-dependencies may need a newer rustc |
+| Secrets | `gitleaks git --log-opts="--all" .` | Credentials in history; known false positives live in `.gitleaksignore` |
+| Workflows | `actionlint` | Syntax and shell errors in `.github/workflows/` |
+| Coverage | `cargo llvm-cov report --summary-only` | Report only, no threshold |
+
+`deny.toml` ignores two advisories on purpose. Each entry states a reason and
+the condition for removing it; do not add one without both.
+
+A non-blocking CI step reports `unwrap()`/`expect()` in shipped code
+(`cargo clippy --lib --bins -- -W clippy::unwrap_used -W clippy::expect_used`).
+New request-path uses need a reason; test code is exempt (`clippy.toml`).
+
 ## Documentation
 
 This site is built with [VitePress](https://vitepress.dev) from `docs/`.

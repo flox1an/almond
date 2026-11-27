@@ -1,0 +1,3 @@
+# unwrap/expect in tests are assertions, not production panics.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

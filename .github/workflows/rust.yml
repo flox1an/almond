@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -24,9 +27,90 @@ jobs:
       run: cargo clippy --all-targets -- -D warnings
     - name: Clippy without cashu (library embed profile)
       run: cargo clippy --all-targets --no-default-features -- -D warnings
+    # Report only. Boot-time and invariant-backed expect() calls exist, so this
+    # is a ratchet to watch, not a gate. Tests are excluded (clippy.toml).
+    - name: Report unwrap/expect in shipped code
+      run: |
+        cargo clippy --lib --bins --message-format=short -- -W clippy::unwrap_used -W clippy::expect_used 2>&1 | grep -E '^src/.*warning: used' > unwrap-report.txt || true
+        {
+          echo '### unwrap/expect in shipped code'
+          echo
+          echo "$(wc -l < unwrap-report.txt) occurrences"
+          echo
+          echo '```'
+          cut -d: -f1 unwrap-report.txt | sort | uniq -c | sort -rn
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
     - name: Build
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
     - name: Run tests without cashu (library embed profile)
       run: cargo test --no-default-features --verbose
+
+  deny:
+    name: Dependencies (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: EmbarkStudios/cargo-deny-action@v2
+      with:
+        command: check
+
+  msrv:
+    name: MSRV (rust-version in Cargo.toml)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Read rust-version
+      run: echo "MSRV=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_ENV"
+    - name: Install MSRV toolchain
+      run: rustup toolchain install "$MSRV" --profile minimal
+    # Dev-dependencies (parking_lot) need a newer rustc, so only the shipped
+    # targets are checked; `rustup run` overrides rust-toolchain.toml.
+    - name: Check library and binaries
+      run: rustup run "$MSRV" cargo check --lib --bins --locked
+    - name: Check without cashu (library embed profile)
+      run: rustup run "$MSRV" cargo check --lib --bins --locked --no-default-features
+
+  hygiene:
+    name: Secrets and workflows
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - name: actionlint
+      run: |
+        bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+        ./actionlint -color
+    - name: gitleaks
+      env:
+        GITLEAKS_VERSION: 8.30.1
+      run: |
+        curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz gitleaks
+        ./gitleaks git --redact=100 --no-banner --log-opts="--all" .
+
+  coverage:
+    name: Coverage report
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Install llvm-tools
+      run: rustup component add llvm-tools-preview
+    - uses: taiki-e/install-action@cargo-llvm-cov
+    # Report only: no threshold until a baseline exists.
+    - name: Measure coverage
+      run: cargo llvm-cov --lcov --output-path lcov.info
+    - name: Summarize
+      run: |
+        {
+          echo '### Coverage'
+          echo '```'
+          cargo llvm-cov report --summary-only
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+    - uses: actions/upload-artifact@v4
+      with:
+        name: lcov
+        path: lcov.info
