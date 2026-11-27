@@ -20,7 +20,7 @@ path = "src/bin/analyze_reports.rs"
 
 [features]
 default = ["cashu"]
-cashu = ["dep:cdk", "dep:cdk-sqlite", "dep:cashu", "dep:rand"]
+cashu = ["dep:cdk", "dep:cdk-sqlite", "dep:cashu", "dep:rand", "dep:rusqlite"]
 
 [dependencies]
 axum = "0.8.9"
@@ -65,6 +65,8 @@ cdk = { version = "0.18", default-features = false, features = ["wallet"], optio
 cdk-sqlite = { version = "0.18", features = ["wallet"], optional = true }
 cashu = { version = "0.18", optional = true }
 rand = { version = "0.10", optional = true }
+# Must match cdk-sqlite's rusqlite ^0.31: libsqlite3-sys `links = "sqlite3"` allows one copy.
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 nostr-sdk = "0.45"
 
 # HTTPS/TLS support

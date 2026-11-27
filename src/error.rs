@@ -1,8 +1,28 @@
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use base64::{engine::general_purpose::URL_SAFE, Engine};
 use std::fmt;
+
+/// NUT-24 challenge for the `X-Cashu` header: a NUT-18 `creqA` payment request
+/// carrying only amount, unit and mints (in-band payment, so no transport).
+#[cfg(feature = "cashu")]
+fn nut24_challenge(amount_sats: u64, unit: &str, mints: &[String]) -> Result<String, String> {
+    use std::{fmt::Write, str::FromStr};
+    let mints = mints
+        .iter()
+        .map(|mint| cashu::MintUrl::from_str(mint).map_err(|e| format!("mint {mint}: {e}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let unit = cashu::nuts::CurrencyUnit::from_str(unit).map_err(|e| e.to_string())?;
+    let request = cashu::nuts::nut18::PaymentRequest::builder()
+        .amount(amount_sats)
+        .unit(unit)
+        .mints(mints)
+        .build();
+    // `to_string` would panic if CBOR encoding failed; surface it instead.
+    let mut encoded = String::new();
+    write!(encoded, "{request}").map_err(|e| e.to_string())?;
+    Ok(encoded)
+}
 
 /// Custom error type for the application
 #[derive(Debug)]
@@ -78,28 +98,32 @@ impl std::error::Error for AppError {}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        // Handle PaymentRequired specially with X-Cashu header
+        // Handle PaymentRequired specially with the NUT-24 X-Cashu challenge
         if let AppError::PaymentRequired {
             amount_sats,
             unit,
             mints,
         } = &self
         {
-            // Build NUT-18 payment request
-            let payment_request = serde_json::json!({
-                "a": amount_sats,
-                "u": unit,
-                "m": mints,
-            });
-
-            // Encode as cashuA (base64url of JSON)
-            let encoded = format!("cashuA{}", URL_SAFE.encode(payment_request.to_string()));
-
             let reason = self.to_string();
-            return Response::builder()
+            #[cfg_attr(not(feature = "cashu"), allow(unused_mut))]
+            let mut response = Response::builder()
                 .status(StatusCode::PAYMENT_REQUIRED)
-                .header("X-Cashu", encoded)
-                .header("X-Reason", &reason)
+                .header("X-Reason", &reason);
+            // Without the `cashu` feature no operation can be paid
+            // (`Config::validate`), so there is no challenge to encode.
+            #[cfg(feature = "cashu")]
+            match nut24_challenge(*amount_sats, unit, mints) {
+                Ok(challenge) => response = response.header("X-Cashu", challenge),
+                Err(error) => {
+                    tracing::error!("Failed to encode NUT-24 payment request: {error}");
+                    return AppError::InternalError("Failed to encode payment request".to_string())
+                        .into_response();
+                }
+            }
+            #[cfg(not(feature = "cashu"))]
+            let _ = mints;
+            return response
                 .body(Body::from(format!(
                     "Payment required: {} {}",
                     amount_sats, unit
@@ -172,3 +196,29 @@ impl From<AppError> for StatusCode {
 }
 
 pub type AppResult<T> = Result<T, AppError>;
+
+#[cfg(all(test, feature = "cashu"))]
+mod tests {
+    use std::str::FromStr;
+
+    #[test]
+    fn payment_required_carries_a_decodable_nut24_creq_a() {
+        let response =
+            axum::response::IntoResponse::into_response(super::AppError::PaymentRequired {
+                amount_sats: 21,
+                unit: "sat".to_string(),
+                mints: vec!["https://mint.example.com".to_string()],
+            });
+        assert_eq!(response.status(), axum::http::StatusCode::PAYMENT_REQUIRED);
+        let header = response.headers()["X-Cashu"].to_str().unwrap();
+        assert!(header.starts_with("creqA"));
+        let request = cashu::nuts::nut18::PaymentRequest::from_str(header).unwrap();
+        assert_eq!(request.amount, Some(cashu::Amount::from(21)));
+        assert_eq!(request.unit, Some(cashu::nuts::CurrencyUnit::Sat));
+        assert_eq!(
+            request.mints,
+            vec![cashu::MintUrl::from_str("https://mint.example.com").unwrap()]
+        );
+        assert!(request.transports.is_empty());
+    }
+}

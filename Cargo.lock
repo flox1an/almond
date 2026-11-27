@@ -89,6 +89,7 @@ dependencies = [
  "reqwest",
  "rmp",
  "rmp-serde",
+ "rusqlite",
  "rustls",
  "serde",
  "serde_html_form 0.4.1",

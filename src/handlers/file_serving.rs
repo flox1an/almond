@@ -86,6 +86,7 @@ pub async fn handle_file_request(
             AppError::NotFound("Blob not found".to_owned())
         });
     };
+    file_storage::ensure_not_quarantined(&state, file_hash).await?;
 
     // Split the request up front: a borrowed `Request` is not `Send`, because
     // its body is not `Sync`, and every path below awaits.
@@ -111,7 +112,7 @@ pub async fn handle_file_request(
                 file_hash,
                 metadata.size,
                 metadata.mime_type.as_deref(),
-                crate::utils::sunset_expiration(&metadata, state.max_file_age_secs),
+                state.sunset(file_hash, &metadata),
                 bytes,
             )
             .await

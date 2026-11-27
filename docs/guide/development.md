@@ -49,6 +49,10 @@ Every push to `main` that touches `docs/` deploys it to GitHub Pages
 (`.github/workflows/docs.yml`); pull requests only run the build, which fails
 on dead links.
 
+The [admin interface concept](../admin-concept.md) describes proposed scope,
+authentication, configuration ownership and implementation acceptance criteria.
+It is a planning document, not a description of currently available features.
+
 Preview locally:
 
 ```bash

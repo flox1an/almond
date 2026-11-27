@@ -81,7 +81,7 @@ Terms (Blossom, BUD-xx, WoT, DVM, Cashu) and every setting in detail:
 https://github.com/flox1an/almond#readme";
 
 /// Every Almond setting, parsed and validated.
-#[derive(Parser, Debug, Clone, PartialEq)]
+#[derive(Parser, Debug, Clone, PartialEq, serde::Serialize)]
 #[command(
     name = "almond",
     version,
@@ -92,6 +92,13 @@ pub struct Config {
     /// dotenv file with ALMOND_* settings; defaults to ./.env if present
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
+
+    /// Deployment-owned administrator Nostr public keys
+    #[arg(long, value_name = "NPUB", value_delimiter = ',', value_parser = parse_npub)]
+    pub admin_npubs: Vec<PublicKey>,
+    /// Optional managed settings JSON file
+    #[arg(long, value_name = "FILE")]
+    pub managed_config: Option<PathBuf>,
 
     // ── Network ────────────────────────────────────────────────────────────
     /// Listen address (literal IP:port)
@@ -336,7 +343,7 @@ impl Config {
     }
 
     /// The clap command with every argument bound to its `ALMOND_*` variable.
-    fn command_with_env() -> clap::Command {
+    pub(crate) fn command_with_env() -> clap::Command {
         let mut heading = None;
         Self::command().mut_args(move |arg| {
             let Some(long) = arg.get_long() else {
@@ -461,6 +468,7 @@ impl Config {
 /// Must run before any other thread exists (it calls `set_var`).
 /// Returns deprecation warnings to log once tracing is up.
 pub fn load_env_file() -> Result<Vec<String>, ConfigError> {
+    crate::admin::capture_environment();
     remove_empty_almond_vars();
     let path = config_path_from_args(std::env::args_os())
         .or_else(|| std::env::var_os(env_name("config")).map(PathBuf::from))
@@ -470,12 +478,15 @@ pub fn load_env_file() -> Result<Vec<String>, ConfigError> {
             ConfigError::new(format!("Cannot load config file {}: {e}", path.display()))
         })?;
     }
+    crate::admin::capture_dotenv();
     remove_empty_almond_vars();
 
     let (translated, warnings) = translate_legacy(|name| std::env::var(name).ok());
     for (name, value) in translated {
         std::env::set_var(name, value);
     }
+    crate::admin::capture_external();
+    crate::admin::install_managed()?;
     Ok(warnings)
 }
 
@@ -628,7 +639,9 @@ const LEGACY_PAID: [(&str, &str); 3] = [
 
 /// New `(ALMOND_* name, value)` pairs for every set deprecated name whose
 /// new name is unset, plus one warning per deprecated name seen.
-fn translate_legacy(get: impl Fn(&str) -> Option<String>) -> (Vec<(String, String)>, Vec<String>) {
+pub(crate) fn translate_legacy(
+    get: impl Fn(&str) -> Option<String>,
+) -> (Vec<(String, String)>, Vec<String>) {
     let get = |name: &str| get(name).filter(|v| !v.trim().is_empty());
 
     // (old name, new name, translated value)

@@ -13,8 +13,8 @@ ALMOND_UPLOAD_MAX_AGE=7d
 ALMOND_METRICS_TOKEN=change-me
 ```
 
-Command-line flags override the environment, which overrides the config file;
-see [Configuration overview](/configuration/).
+Command-line flags override the environment, which overrides the config file,
+then optional managed settings and built-in defaults. See [Configuration overview](/configuration/).
 [`.env.example`](https://github.com/flox1an/almond/blob/main/.env.example) documents every variable with comments.
 
 ## Value formats
@@ -38,6 +38,8 @@ see [Configuration overview](/configuration/).
 | `ALMOND_BIND_ADDR` | `127.0.0.1:3000` | Listen address; use `0.0.0.0:3000` in a container or behind a proxy |
 | `ALMOND_PUBLIC_URL` | `http://127.0.0.1:3000` (`https://` with TLS) | Public origin used in blob descriptors; no trailing slash |
 | `ALMOND_CORS_ORIGINS` | – | Browser origins allowed to read discovery and metrics responses; blob `GET`/`HEAD` is always public |
+| `ALMOND_ADMIN_NPUBS` | – | Root administrator public keys; administration is disabled without them |
+| `ALMOND_MANAGED_CONFIG` | – | Optional managed settings JSON file on a persistent directory mount |
 | `ALMOND_TLS_ENABLED` | `false` | Terminate TLS in Almond; leave off behind a TLS proxy |
 | `ALMOND_TLS_CERT` / `ALMOND_TLS_KEY` | `./cert.pem` / `./key.pem` | Certificate and private key |
 | `ALMOND_TLS_SELF_SIGNED` | `false` | Generate a self-signed pair when the files are missing; development only |

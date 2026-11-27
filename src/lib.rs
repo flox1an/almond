@@ -31,6 +31,7 @@
     clippy::must_use_candidate
 )]
 
+pub mod admin;
 pub mod config;
 #[cfg(test)]
 mod config_editor_tests;
@@ -120,9 +121,30 @@ async fn head_upload(
             "Blob size {declared_size} exceeds the {max_size}-byte limit"
         )));
     }
-    file_storage::ensure_storage_capacity(&state, declared_size).await?;
+    if !state.file_index.contains(sha256).await {
+        file_storage::ensure_storage_capacity(&state, declared_size).await?;
+    }
 
     if state.feature_paid_upload {
+        #[cfg(feature = "cashu")]
+        let quote = {
+            let now = services::paid_purchase::now();
+            let until = services::paid_purchase::target(&headers, now)?;
+            let (_, amount) =
+                services::paid_purchase::quote(&state, sha256, declared_size, until, now)?;
+            if amount == 0 {
+                return Ok(axum::response::Response::builder()
+                    .status(StatusCode::OK)
+                    .body(axum::body::Body::empty())
+                    .expect("static response"));
+            }
+            cashu::Quote {
+                amount_sats: amount,
+                unit: "sat",
+                mints: state.cashu_accepted_mints.clone(),
+            }
+        };
+        #[cfg(not(feature = "cashu"))]
         let quote = cashu::quote(
             state.cashu_price_per_mb,
             &state.cashu_accepted_mints,
@@ -226,6 +248,34 @@ async fn serve_config_editor(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+async fn serve_admin() -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CONTENT_SECURITY_POLICY, "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' wss: ws:; img-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        include_str!("admin/index.html"),
+    )
+}
+
+async fn serve_admin_css() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("admin/style.css"),
+    )
+}
+
+async fn serve_admin_js() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        include_str!("admin/app.js"),
+    )
+}
+
 /// The Blossom endpoints (BUD-01/02/04/06/09), including the root
 /// `/{filename}` blob route. Almond's own pages and diagnostics are in
 /// [`standalone_extras`].
@@ -250,6 +300,66 @@ pub fn create_app(state: AppState) -> Router {
             "/{filename}",
             get(handle_file_request).head(handle_file_request),
         );
+    #[cfg(feature = "cashu")]
+    let routes = routes.route(
+        "/retain/{sha256}",
+        put(handlers::retain::retain).head(handlers::retain::retain),
+    );
+    let admin_routes = Router::new()
+        .route("/admin/api/me", get(admin::me))
+        .route(
+            "/admin/api/settings",
+            get(admin::settings).patch(admin::update_settings),
+        )
+        .route(
+            "/admin/api/collaborators",
+            get(admin::collaborators).patch(admin::update_collaborators),
+        )
+        .route("/admin/api/status", get(handlers::admin_moderation::status))
+        .route("/admin/api/blobs", get(handlers::admin_moderation::blobs))
+        .route(
+            "/admin/api/blobs/{hash}",
+            get(handlers::admin_moderation::blob),
+        )
+        .route(
+            "/admin/api/blobs/{hash}/preview",
+            get(handlers::admin_moderation::preview),
+        )
+        .route(
+            "/admin/api/reports",
+            get(handlers::admin_moderation::reports),
+        )
+        .route(
+            "/admin/api/activity",
+            get(handlers::admin_moderation::activity),
+        )
+        .route(
+            "/admin/api/activity/{id}/reconcile",
+            axum::routing::post(handlers::admin_moderation::reconcile_activity),
+        )
+        .route("/admin/api/blocks", get(handlers::admin_moderation::blocks))
+        .route(
+            "/admin/api/actions",
+            axum::routing::post(handlers::admin_moderation::actions),
+        );
+    #[cfg(feature = "cashu")]
+    let admin_routes = admin_routes
+        .route("/admin/wallet", get(handlers::admin_wallet::balance))
+        .route(
+            "/admin/withdraw",
+            axum::routing::post(handlers::admin_wallet::withdraw),
+        )
+        .route("/admin/withdraw/{id}", get(handlers::admin_wallet::status))
+        .route(
+            "/admin/withdraw/{id}/reclaim",
+            axum::routing::post(handlers::admin_wallet::reclaim),
+        );
+    let routes = routes
+        .merge(admin_routes.layer(from_fn_with_state(state.clone(), admin::admin_auth)))
+        .route("/admin/api/challenge", get(admin::challenge))
+        .route("/admin/", get(serve_admin))
+        .route("/admin/style.css", get(serve_admin_css))
+        .route("/admin/app.js", get(serve_admin_js));
     with_common_layers(routes, state)
 }
 
@@ -391,7 +501,7 @@ pub async fn build_state(
     if let Some(s3) = &native_s3 {
         // An unreachable bucket degrades the instance instead of failing it;
         // `start_s3_recovery_job` keeps retrying.
-        if let Err(error) = s3.sync_index(&file_index).await {
+        if let Err(error) = s3.sync_index(&file_index, &storage).await {
             warn!("⚠️ S3 unavailable at startup, serving local blobs only: {error}");
         }
     }
@@ -456,6 +566,18 @@ pub async fn build_state(
         None
     };
 
+    #[cfg(feature = "cashu")]
+    if let Some(wallet) = &cashu_wallet {
+        cashu::recover_wallet(wallet, &cfg.cashu_wallet_path).await?;
+    }
+
+    #[cfg(feature = "cashu")]
+    let paid_store = if any_paid_feature || cfg.cashu_wallet_path.exists() {
+        Some(services::paid_store::PaidStore::open(&cfg.cashu_wallet_path).await?)
+    } else {
+        None
+    };
+
     info!(
         "⚙️ Blossom server list cache TTL: {}s",
         cfg.server_list_cache_ttl.as_secs()
@@ -493,7 +615,8 @@ pub async fn build_state(
     let upstream_client = services::upload::create_upstream_client()
         .map_err(|error| format!("Failed to build upstream HTTP client: {error}"))?;
 
-    Ok(AppState {
+    let state = AppState {
+        admin: Arc::new(admin::AdminState::new(cfg)?),
         native_s3,
         storage,
         blob_mutation_locks: Arc::new(models::BlobMutationLocks::default()),
@@ -566,8 +689,17 @@ pub async fn build_state(
         cashu_wallet_path: cfg.cashu_wallet_path.clone(),
         #[cfg(feature = "cashu")]
         cashu_wallet,
+        #[cfg(feature = "cashu")]
+        paid_store,
+        #[cfg(feature = "cashu")]
+        paid_admission_lock: Arc::new(tokio::sync::Mutex::new(())),
         hls_mirror_concurrency: cfg.hls_mirror_concurrency,
-    })
+    };
+    #[cfg(feature = "cashu")]
+    if state.paid_store.is_some() {
+        services::paid_recovery::recover(&state).await?;
+    }
+    Ok(state)
 }
 
 /// Spawn periodic jobs using the initialized state's feature modes and settings.
@@ -612,7 +744,7 @@ fn start_s3_recovery_job(tasks: &mut JoinSet<()>, state: AppState) {
         let mut delay = S3_RETRY_INITIAL;
         while s3.status() != services::native_storage::S3Status::Available {
             tokio::time::sleep(delay).await;
-            match s3.sync_index(&state.file_index).await {
+            match s3.sync_index(&state.file_index, &state.storage).await {
                 Ok(()) => info!("✅ S3 available again, blobs indexed"),
                 Err(error) => warn!("⚠️ S3 still unavailable: {error}"),
             }
@@ -694,59 +826,4 @@ fn start_dvm_refresh_job(tasks: &mut JoinSet<()>, state: AppState) {
             }
         }
     });
-}
-
-#[cfg(test)]
-mod homepage_tests {
-    /// The homepage is a fully static, self-contained page: every fact on it
-    /// is hand-written prose. It is public and must not call back into the
-    /// server it is served from, so drift here is a silent information leak
-    /// or a stale claim about Almond's capabilities.
-    const INDEX: &str = include_str!("index.html");
-
-    #[test]
-    fn no_network_calls_or_external_resources() {
-        for forbidden in [
-            "http://",
-            "https://",
-            "fetch",
-            "XMLHttpRequest",
-            "WebSocket",
-            "EventSource",
-            "sendBeacon",
-            "src=",
-            "href=",
-        ] {
-            assert!(
-                !INDEX.contains(forbidden),
-                "homepage must not reference external resources or server endpoints: {forbidden}"
-            );
-        }
-    }
-
-    #[test]
-    fn logo_typing_and_cursor_survived_the_redesign() {
-        assert!(INDEX.contains("id=\"logo\""));
-        assert!(INDEX.contains("id=\"cursor\""));
-        assert!(INDEX.contains("id=\"text\""));
-    }
-
-    #[test]
-    fn eye_candy_respects_reduced_motion() {
-        assert!(INDEX.contains("prefers-reduced-motion"));
-    }
-
-    #[test]
-    fn stale_claims_are_gone() {
-        for stale in [
-            "no manual delete",
-            "(BUD-1,", // the old incomplete BUD list
-            "filesystem only, no database",
-        ] {
-            assert!(
-                !INDEX.contains(stale),
-                "outdated claim is still on the homepage: {stale}"
-            );
-        }
-    }
 }

@@ -15,7 +15,7 @@ use std::{
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
 /// Feature mode controlling access to features
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize)]
 pub enum FeatureMode {
     /// Feature is disabled
     Off,
@@ -62,7 +62,7 @@ impl FeatureMode {
 }
 
 /// Upstream mode controlling how files are fetched from upstream servers
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, Serialize)]
 pub enum UpstreamMode {
     /// Stream from upstream while saving a local copy
     #[default]
@@ -103,7 +103,7 @@ impl UpstreamMode {
 }
 
 /// Action to take when a blob is reported (BUD-09)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize)]
 pub enum ReportAction {
     /// Quarantine the blob (move to quarantine directory, still accessible to admins)
     Quarantine,
@@ -225,6 +225,7 @@ pub struct CachedFilter {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub admin: Arc<crate::admin::AdminState>,
     pub storage: StorageLayout,
     pub blob_mutation_locks: Arc<BlobMutationLocks>,
     /// Superseded copies whose deletion failed after a preferred entry was indexed.
@@ -317,6 +318,12 @@ pub struct AppState {
     pub cashu_wallet_path: PathBuf,
     #[cfg(feature = "cashu")]
     pub cashu_wallet: Option<Arc<RwLock<CdkWallet>>>,
+    /// Durable paid retention; consulted by cleanup even when payments are off.
+    #[cfg(feature = "cashu")]
+    pub paid_store: Option<Arc<crate::services::paid_store::PaidStore>>,
+    /// Serializes admission of paid uploads against capacity checks.
+    #[cfg(feature = "cashu")]
+    pub paid_admission_lock: Arc<Mutex<()>>,
     /// Maximum parallel segment fetches per HLS mirror operation
     pub hls_mirror_concurrency: usize,
 }
@@ -349,9 +356,27 @@ impl AppState {
             size: metadata.size,
             r#type: content_type,
             uploaded: metadata.created_at,
-            expiration: crate::utils::sunset_expiration(metadata, self.max_file_age_secs),
+            expiration: self.sunset(sha256, metadata),
             nip94,
         }
+    }
+
+    /// The `Sunset` deadline: the cleanup deadline, extended to `paid_until`
+    /// while paid coverage outlasts it. No deadline stays no deadline.
+    #[must_use]
+    pub fn sunset(&self, sha256: &str, metadata: &FileMetadata) -> Option<u64> {
+        let sunset = crate::utils::sunset_expiration(metadata, self.max_file_age_secs);
+        #[cfg(feature = "cashu")]
+        if let Some(paid_until) = self
+            .paid_store
+            .as_ref()
+            .and_then(|store| store.paid_until(sha256))
+        {
+            return Some(sunset.map_or(paid_until, |at| at.max(paid_until)));
+        }
+        #[cfg(not(feature = "cashu"))]
+        let _ = sha256;
+        sunset
     }
 
     pub async fn get_stats(&self) {

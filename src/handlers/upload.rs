@@ -1,6 +1,8 @@
 // Refactored upload handlers using the new service layer
 // This file shows the improved structure - handlers should be thin and delegate to services
 
+#[cfg(feature = "cashu")]
+use axum::response::IntoResponse;
 use axum::{
     body::Body,
     extract::{Request, State},
@@ -29,6 +31,13 @@ pub async fn upload_file(
         authorization::authorize(&headers, &state, authorization::Operation::Upload).await?;
 
     let declared_sha256 = extract_declared_upload_hash(&headers)?;
+    // ponytail: serialize paid uploads; add durable per-upload reservations if throughput matters.
+    #[cfg(feature = "cashu")]
+    let _paid_capacity = if state.feature_paid_upload {
+        Some(state.paid_admission_lock.lock().await)
+    } else {
+        None
+    };
     auth::validate_upload_auth(authorized.event(), declared_sha256)?;
 
     // Extract content type, extension, and expiration
@@ -40,7 +49,24 @@ pub async fn upload_file(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(state.max_blob_size_bytes);
-    file_storage::ensure_storage_capacity(&state, declared_size).await?;
+    #[cfg(feature = "cashu")]
+    if state.feature_paid_upload {
+        let store = state.paid_store.as_ref().ok_or_else(|| {
+            AppError::ServiceUnavailable("Paid retention is unavailable".to_owned())
+        })?;
+        for pending in store.unresolved().await? {
+            if pending.terms.sha256 != declared_sha256
+                && !state.file_index.contains(&pending.terms.sha256).await
+            {
+                return Err(AppError::ServiceUnavailable(
+                    "A paid upload awaits recovery; retry after reconciliation".to_owned(),
+                ));
+            }
+        }
+    }
+    if !state.file_index.contains(declared_sha256).await {
+        file_storage::ensure_storage_capacity(&state, declared_size).await?;
+    }
 
     // Prepare temp file
     file_storage::ensure_temp_dir(&state).await?;
@@ -60,22 +86,121 @@ pub async fn upload_file(
     authorized.bind(&state, declared_sha256).await?;
     file_storage::ensure_not_quarantined(&state, &sha256).await?;
 
-    // Check payment if required (after we know the size and auth is validated)
-    cashu::charge(&state, &headers, cashu::PaidOperation::Upload, total_bytes).await?;
-
-    // Finalize upload. The returned metadata is the server's authoritative
-    // representation: a re-upload retains its original MIME, expiration, and
-    // upload time.
-    let stored = upload::finalize_upload(
-        &state,
-        temp,
-        &sha256,
-        total_bytes,
-        extension.clone(),
-        Some(content_type.clone()),
-        expiration,
-    )
-    .await?;
+    #[cfg(feature = "cashu")]
+    let stored = if state.feature_paid_upload {
+        use crate::services::paid_purchase;
+        let now = paid_purchase::now();
+        let until = paid_purchase::target(&headers, now)?;
+        if cashu::extract_cashu_header(&headers).is_none() {
+            let (_, amount) = paid_purchase::quote(&state, &sha256, total_bytes, until, now)?;
+            if amount == 0 {
+                let metadata = state
+                    .file_index
+                    .get(&sha256)
+                    .await
+                    .ok_or_else(|| AppError::Conflict("Paid blob is not stored".to_owned()))?;
+                let descriptor = state.create_blob_descriptor(&sha256, &metadata);
+                return Ok((StatusCode::OK, axum::Json(descriptor)).into_response());
+            }
+            return Err(paid_purchase::payment_required(&state, amount));
+        }
+        let token =
+            cashu::parse_token(&cashu::extract_cashu_header(&headers).expect("header checked"))?;
+        let id = cashu::payment_id(&token)?;
+        let stage = state
+            .storage
+            .root
+            .join("paid-pending")
+            .join(format!("{id}_{sha256}"));
+        file_storage::create_parent_dirs(&stage).await?;
+        if !tokio::fs::try_exists(&stage)
+            .await
+            .map_err(|e| AppError::IoError(e.to_string()))?
+        {
+            tokio::fs::hard_link(temp.path(), &stage)
+                .await
+                .map_err(|e| AppError::IoError(format!("Unable to stage paid upload: {e}")))?;
+            #[cfg(unix)]
+            {
+                let directory = stage.parent().expect("staged file has parent").to_owned();
+                tokio::task::spawn_blocking(move || std::fs::File::open(directory)?.sync_all())
+                    .await
+                    .map_err(|e| {
+                        AppError::IoError(format!("Unable to sync staging directory: {e}"))
+                    })?
+                    .map_err(|e| {
+                        AppError::IoError(format!("Unable to sync staging directory: {e}"))
+                    })?;
+            }
+        }
+        let operation =
+            match paid_purchase::purchase(&state, &headers, &sha256, total_bytes, until, false)
+                .await
+            {
+                Ok(operation) => operation,
+                Err(error) => {
+                    let keep = match state
+                        .paid_store
+                        .as_ref()
+                        .expect("paid store")
+                        .operation(&id)
+                        .await?
+                    {
+                        Some(operation) => matches!(
+                            operation.state,
+                            crate::services::paid_store::OpState::Pending
+                                | crate::services::paid_store::OpState::Settled
+                        ),
+                        None => false,
+                    };
+                    if !keep {
+                        let _ = tokio::fs::remove_file(&stage).await;
+                    }
+                    return Err(error);
+                }
+            };
+        let stored = upload::finalize_upload(
+            &state,
+            temp,
+            &sha256,
+            total_bytes,
+            extension.clone(),
+            Some(content_type.clone()),
+            None,
+        )
+        .await?;
+        file_storage::apply_paid_operation(&state, &operation, paid_purchase::now()).await?;
+        tokio::fs::remove_file(&stage)
+            .await
+            .map_err(|e| AppError::IoError(format!("Unable to remove staged upload: {e}")))?;
+        stored
+    } else {
+        cashu::charge(&state, &headers, cashu::PaidOperation::Upload, total_bytes).await?;
+        upload::finalize_upload(
+            &state,
+            temp,
+            &sha256,
+            total_bytes,
+            extension.clone(),
+            Some(content_type.clone()),
+            expiration,
+        )
+        .await?
+    };
+    #[cfg(not(feature = "cashu"))]
+    let stored = {
+        cashu::charge(&state, &headers, cashu::PaidOperation::Upload, total_bytes).await?;
+        upload::finalize_upload(
+            &state,
+            temp,
+            &sha256,
+            total_bytes,
+            extension.clone(),
+            Some(content_type.clone()),
+            expiration,
+        )
+        .await?
+    };
 
     track_upload_stats(&state);
 
@@ -260,6 +385,11 @@ pub async fn patch_upload(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Response, AppError> {
+    if state.feature_paid_upload {
+        return Err(AppError::ServiceUnavailable(
+            "Paid retention requires PUT /upload".to_owned(),
+        ));
+    }
     use crate::constants::{
         DEFAULT_CONTENT_TYPE, UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER, UPLOAD_TYPE_HEADER,
         X_SHA_256_HEADER,

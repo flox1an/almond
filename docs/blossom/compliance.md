@@ -58,36 +58,6 @@ when its bytes or URL extension identify it.
 **Resolution:** Run bounded MIME detection after the streamed download when the
 origin has no usable content type.
 
-### BUD-07 — X-Cashu 402 challenges are not NUT-24 payment requests (paid mode)
-
-**Requirement:** A server using `X-Cashu` **MUST** follow NUT-24.
-
-**Current behavior:** `src/error.rs:AppError::into_response` serializes a JSON
-object and labels its Base64url encoding `cashuA`. NUT-24 requires an HTTP 402
-payment request in `creqA` (Base64url CBOR) or `creqB` form.
-
-**Impact:** NUT-24 wallets cannot decode the challenge and therefore cannot
-complete paid upload, mirror, or download flows interoperably.
-
-**Resolution:** Construct the NUT-24 `PaymentRequest` type and emit the
-specified `creqA`/CBOR representation. Keep accepting `cashuB` for retries as
-NUT-24 requires.
-
-### BUD-07 — A settled but insufficient payment returns 402 instead of 400 (paid mode)
-
-**Requirement:** Failed payment proof, including an insufficient payment, **MUST**
-return `400 Bad Request` with `X-Reason`.
-
-**Current behavior:** `src/services/cashu.rs:charge` returns a new
-`PaymentRequired` error when `received_sats < quoted.amount_sats`; the response
-is `402`.
-
-**Impact:** Clients cannot distinguish a missing payment challenge from a proof
-that was supplied but did not satisfy the quote.
-
-**Resolution:** Return `AppError::BadRequest` with an `X-Reason` after settlement
-proves the amount is short.
-
 ### BUD-09 — Public reports can succeed without a blob `x` tag
 
 **Requirement:** A `/report` body **MUST** be a signed NIP-56 event with one or

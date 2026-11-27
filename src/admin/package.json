@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "scripts": { "build": "esbuild source.js --bundle --format=esm --minify --outfile=app.js" },
+  "devDependencies": {
+    "applesauce-relay": "^7.1.0",
+    "applesauce-signers": "^6.2.3",
+    "esbuild": "^0.28.2"
+  }
+}

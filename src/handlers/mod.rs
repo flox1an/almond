@@ -1,9 +1,14 @@
+pub mod admin_moderation;
+#[cfg(feature = "cashu")]
+pub mod admin_wallet;
 pub mod delete;
 pub mod file_serving;
 pub mod filter;
 pub mod list;
 pub mod metrics;
 pub mod report;
+#[cfg(feature = "cashu")]
+pub mod retain;
 pub mod upload;
 pub mod upstream;
 pub mod wot;

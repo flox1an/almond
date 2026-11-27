@@ -13,7 +13,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'sha256-PFI+3RBVd33GDKW/SeBaXCP7huSK5S6+0BWW7HIN4k0='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
+      content="default-src 'none'; script-src 'sha256-50TQmxaYWkG5BK3c01gXNB0l7vbBBUBKAtrGHLmFvkg='; style-src 'sha256-2Ck2tdkHtv8ccbvsbudkOXqfqcR5nTQuua4gBQFU64w='; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'"
     />
     <style>
       /*
@@ -484,6 +484,7 @@
         { "name": "ALMOND_TLS_SELF_SIGNED", "category": "tls", "kind": "bool", "default": "false", "empty": "like_unset", "probe": "true", "help": "Generate a self-signed cert/key pair when the files are missing. Development only." },
 
         { "name": "ALMOND_STORAGE_PATH", "category": "storage", "kind": "path", "default": "./files", "empty": "like_unset", "probe": "/data/almond", "help": "Storage root. Almond creates uploads/, upstream-cache/, temp/ and quarantine/ underneath it." },
+        { "name": "ALMOND_MANAGED_CONFIG", "category": "storage", "kind": "path", "default": null, "empty": "like_unset", "probe": "/data/almond/settings.json", "help": "Optional managed settings file. Use persistent directory storage; restart to apply saved server settings." },
 
         { "name": "ALMOND_S3_ENDPOINT", "category": "s3", "kind": "url", "default": null, "empty": "like_unset", "probe": "https://s3.example.com", "help": "S3-compatible endpoint. All four ALMOND_S3_* variables must be set together, or none at all." },
         { "name": "ALMOND_S3_BUCKET", "category": "s3", "kind": "string", "default": null, "empty": "like_unset", "probe": "almond-blobs", "help": "Bucket name for native S3 storage." },
@@ -536,6 +537,7 @@
         { "name": "ALMOND_DVM_REFRESH_INTERVAL", "category": "dvm", "kind": "duration", "default": "5m", "empty": "like_unset", "probe": "10m", "help": "How often the DVM-authorized pubkey set is refreshed." },
 
         { "name": "ALMOND_ALLOWED_NPUBS", "category": "auth", "kind": "list_npub", "default": null, "empty": "like_unset", "probe": "npub1klr0dy2ul2dx9llk58czvpx73rprcmrvd5dc7ck8esg8f8es06qs427gxc", "help": "Comma-separated allowed npubs. When non-empty, restricts public upload/mirror access to this list. An invalid npub stops Almond at startup \u2014 this editor checks the bech32 checksum, but (unlike Almond) does not verify the decoded bytes are a valid secp256k1 point." },
+        { "name": "ALMOND_ADMIN_NPUBS", "category": "auth", "kind": "list_npub", "default": null, "empty": "like_unset", "probe": "npub1klr0dy2ul2dx9llk58czvpx73rprcmrvd5dc7ck8esg8f8es06qs427gxc", "help": "Root administrator public keys. When unset, admin access is disabled. These keys cannot be changed in the browser." },
         { "name": "ALMOND_AUTH_MAX_TTL", "category": "auth", "kind": "duration", "nonZero": true, "default": "24h", "empty": "like_unset", "probe": "1h", "help": "Maximum validity window of an authorization event. Must be greater than zero." },
         { "name": "ALMOND_AUTH_CLOCK_SKEW", "category": "auth", "kind": "duration", "default": "30s", "empty": "like_unset", "probe": "1m", "help": "Tolerated clock skew when validating authorization timestamps." },
         { "name": "ALMOND_AUTH_REQUIRE_SERVER_TAG", "category": "auth", "kind": "bool", "default": "false", "empty": "like_unset", "probe": "true", "help": "Require authorization events to contain a matching server tag." },

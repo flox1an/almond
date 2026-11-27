@@ -24,10 +24,11 @@ static CORS_EXPOSE: HeaderValue = HeaderValue::from_static(
 /// web-of-trust / upstream diagnostics describe this specific operator's
 /// instance and stay behind the `cors_allowed_origins` allowlist.
 fn is_internal_path(path: &str) -> bool {
-    matches!(
-        path,
-        "/config" | "/metrics" | "/_metrics" | "/_wot" | "/_upstream" | "/filter-test.html"
-    )
+    path.starts_with("/admin/")
+        || matches!(
+            path,
+            "/config" | "/metrics" | "/_metrics" | "/_wot" | "/_upstream" | "/filter-test.html"
+        )
 }
 
 fn allowed_origin<'a>(

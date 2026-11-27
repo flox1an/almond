@@ -309,7 +309,17 @@ pub async fn enforce_storage_limits_at(state: &AppState, now: u64) {
     file_storage::reconcile_superseded_blobs(state).await;
     let entries = state.file_index.snapshot().await;
     for (sha256, metadata) in entries {
-        if let Some(reason) = expiration_reason(state, &metadata, now) {
+        let reason = expiration_reason(state, &metadata, now);
+        #[cfg(feature = "cashu")]
+        let reason = reason.or_else(|| {
+            state
+                .paid_store
+                .as_ref()
+                .and_then(|store| store.paid_until(&sha256))
+                .filter(|until| *until <= now)
+                .map(|_| "paid_expiration")
+        });
+        if let Some(reason) = reason {
             delete_cleanup_candidate(state, &sha256, &metadata, reason).await;
         }
     }
@@ -887,6 +897,82 @@ mod storage_tests {
         assert_eq!(cached.origin, BlobOrigin::UpstreamCache);
         assert_eq!(index.stats().await.count, 2);
         assert_eq!(uploaded.created_at, 123);
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[cfg(feature = "cashu")]
+    #[tokio::test]
+    async fn paid_blobs_survive_expiration_and_capacity_cleanup() {
+        use crate::services::paid_store::PaidStore;
+
+        let root = std::env::temp_dir().join(format!("almond-paid-{}", uuid::Uuid::new_v4()));
+        let mut cfg = crate::config::Config::defaults();
+        cfg.storage_path = root.clone();
+        cfg.cashu_wallet_path = root.join("wallet.db");
+        let mut state = crate::build_state(&cfg).await.unwrap();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let (paid_old, paid_expired, unpaid) = (hash('a'), hash('c'), hash('b'));
+        write_blob(&state.storage.uploads, &paid_old, b"paid-old").await;
+        write_blob(
+            &state.storage.uploads,
+            &format!("{paid_expired}_{}", now - 1),
+            b"paid-expired",
+        )
+        .await;
+        write_blob(&state.storage.uploads, &unpaid, b"unpaid").await;
+        for (name, mtime) in [
+            (paid_old.clone(), 100),
+            (format!("{paid_expired}_{}", now - 1), 200),
+        ] {
+            std::fs::File::options()
+                .write(true)
+                .open(
+                    state
+                        .storage
+                        .uploads
+                        .join(&name[..1])
+                        .join(&name[1..2])
+                        .join(&name),
+                )
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(mtime)),
+                )
+                .unwrap();
+        }
+        build_file_index(&state.storage, &state.file_index)
+            .await
+            .unwrap();
+        assert_eq!(state.file_index.stats().await.count, 3);
+
+        let store = PaidStore::open(&root.join("wallet.db")).await.unwrap();
+        store.extend(&paid_old, now + 3_600, now).await.unwrap();
+        store.extend(&paid_expired, now + 3_600, now).await.unwrap();
+        state.paid_store = Some(store);
+        state.max_total_files = 2;
+
+        super::enforce_storage_limits_at(&state, now).await;
+
+        assert!(
+            state.file_index.contains(&paid_old).await,
+            "capacity skips paid"
+        );
+        assert!(
+            state.file_index.contains(&paid_expired).await,
+            "expiration waits for paid_until"
+        );
+        assert!(
+            !state.file_index.contains(&unpaid).await,
+            "unpaid evicted as before"
+        );
+        let metadata = state.file_index.get(&paid_expired).await.unwrap();
+        assert_eq!(state.sunset(&paid_expired, &metadata), Some(now + 3_600));
 
         tokio::fs::remove_dir_all(root).await.unwrap();
     }

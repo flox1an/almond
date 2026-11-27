@@ -1,11 +1,12 @@
 # Configuration overview
 
-Every setting can come from four sources, highest precedence first:
+Settings resolve from these sources, highest precedence first:
 
 1. command-line flag (`--upload-access wot`)
 2. process environment (`ALMOND_UPLOAD_ACCESS=wot`)
 3. config file (dotenv format, same `ALMOND_*` names)
-4. built-in default
+4. optional managed settings file, for permitted settings
+5. built-in default
 
 ```bash
 almond --config /etc/almond/almond.env --bind-addr 0.0.0.0:3000
@@ -15,6 +16,10 @@ almond --config /etc/almond/almond.env --bind-addr 0.0.0.0:3000
   without it, `./.env` is loaded when present. Values in the file never override
   real environment variables. [`.env.example`](https://github.com/flox1an/almond/blob/main/.env.example)
   documents every setting and is a good starting point.
+- **Managed settings:** opt in with `--managed-config <FILE>`; use a persistent
+  directory mount. Browser saves require a restart, except collaborator changes.
+  A single Almond instance may write the file. Stop Almond before manual edits;
+  an external editor can race the revision check and atomic replacement.
 - **Name mapping:** env name = `ALMOND_` + flag name upper-cased with `-` → `_`
   (`--chunk-max-sessions-per-pubkey` ↔ `ALMOND_CHUNK_MAX_SESSIONS_PER_PUBKEY`),
   so flags and environment variables can never drift apart.

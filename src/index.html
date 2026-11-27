@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+    <!-- Every request this page makes stays on this server: tokens and the admin credential cannot leak elsewhere. -->
+    <meta http-equiv="Content-Security-Policy" content="connect-src 'self'; form-action 'none'; base-uri 'none'; object-src 'none'" />
     <title>almond - Any Large Media ON Demand</title>
     <style>
       :root {
@@ -126,6 +129,126 @@
           margin-bottom: 0.6em;
         }
       }
+      h2 {
+        font-size: inherit;
+        font-weight: normal;
+        color: var(--dim);
+        margin: 2em 0 0.6em;
+      }
+      section,
+      details {
+        max-width: 44rem;
+      }
+      summary {
+        cursor: pointer;
+        color: var(--dim);
+        margin: 2em 0 0.6em;
+      }
+      fieldset {
+        border: 1px dashed var(--dim);
+        margin: 0 0 1em;
+        padding: 0.4em 1em 1em;
+        min-width: 0;
+      }
+      legend,
+      label {
+        color: var(--light);
+      }
+      label {
+        display: block;
+        margin: 0.8em 0 0.2em;
+      }
+      label.inline {
+        display: flex;
+        gap: 0.5em;
+        align-items: baseline;
+        margin: 0.3em 0;
+      }
+      input,
+      textarea,
+      button {
+        font: inherit;
+        letter-spacing: normal;
+        color: #fff;
+        background: #14070c;
+        border: 1px solid var(--dim);
+        border-radius: 3px;
+        padding: 0.45em 0.6em;
+        max-width: 100%;
+      }
+      input[type="text"],
+      input[type="password"],
+      input[type="number"],
+      input[type="file"],
+      textarea {
+        width: 100%;
+      }
+      input[type="number"] {
+        max-width: 12em;
+      }
+      input[readonly] {
+        color: var(--light);
+      }
+      textarea {
+        min-height: 5.5em;
+        resize: vertical;
+        word-break: break-all;
+      }
+      button {
+        cursor: pointer;
+        color: var(--light);
+        background: #2a0d18;
+        border-color: var(--pink);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      :focus-visible {
+        outline: 2px solid #fff;
+        outline-offset: 2px;
+      }
+      a {
+        color: #fff;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6em;
+        align-items: center;
+        margin-top: 0.8em;
+      }
+      .note {
+        color: var(--dim);
+        font-size: 0.9em;
+        margin: 0.3em 0;
+      }
+      .status {
+        white-space: pre-line;
+        min-height: 1.5em;
+        margin: 0.8em 0;
+      }
+      .qr {
+        width: min(17rem, 100%);
+        margin: 0.6em 0;
+      }
+      .qr svg {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      [data-kind="ok"] {
+        color: #9dffb0;
+      }
+      [data-kind="warn"] {
+        color: #ffd27a;
+      }
+      [data-kind="err"] {
+        color: #ff9a9a;
+      }
+      [hidden] {
+        display: none !important;
+      }
       @media (prefers-reduced-motion: reduce) {
         #petals {
           display: none;
@@ -169,17 +292,86 @@
           <div><dt>🌸 delete</dt><dd><code>DELETE /&lt;sha256&gt;</code> with a single-use BUD-11 authorization from an allowlisted npub</dd></div>
           <div><dt>🌸 list</dt><dd><code>GET /list/&lt;pubkey&gt;</code> with cursor pagination, for allowlisted npubs</dd></div>
           <div><dt>🌸 filter</dt><dd><code>GET /filter</code>: a compact filter (binary fuse or bloom) of every stored hash</dd></div>
-          <div><dt>🌸 storage</dt><dd>local filesystem or an optional S3-compatible bucket; no database, the index lives in memory</dd></div>
-          <div><dt>🌸 retention</dt><dd>built for temporary blobs: optional max age, size and count limits; oldest go first (FIFO)</dd></div>
+          <div><dt>🌸 storage</dt><dd>local filesystem or an optional S3-compatible bucket; the blob index lives in memory, and with cashu on, one embedded SQLite file holds the wallet and paid retention</dd></div>
+          <div><dt>🌸 retention</dt><dd>built for temporary blobs: optional max age, size and count limits; oldest go first (FIFO), but paid blobs stay until their paid date</dd></div>
           <div><dt>🌸 access</dt><dd>anyone with a nostr key by default; or allowlisted npubs, their web of trust, DVMs, or off</dd></div>
           <div><dt>🌸 upstream</dt><dd>optional fallback to other blossom servers (proxy, redirect, redirect and cache); <code>?xs=</code> / <code>?as=</code> hints are off by default</dd></div>
-          <div><dt>🌸 payments</dt><dd>optional cashu ecash per MiB (BUD-07), off by default</dd></div>
+          <div><dt>🌸 payments</dt><dd>optional cashu ecash (BUD-07): pay to upload, anyone can pay to keep any blob longer, no accounts; off by default</dd></div>
           <div><dt>🌸 reports</dt><dd>optional BUD-09 reports that quarantine or delete a blob, off by default</dd></div>
         </dl>
-        <p>blobs may disappear - keep your own copy.</p>
+        <p>unpaid blobs may disappear - keep your own copy.</p>
         <p>good luck! 🎉</p>
       </div>
       <span id="cursor">▊</span>
+
+      <section aria-labelledby="up-h">
+        <h2 id="up-h"># upload a file</h2>
+        <p id="needs" role="alert" data-kind="err" hidden></p>
+        <fieldset>
+          <legend>sign as</legend>
+          <label class="inline"><input type="radio" name="signer" id="sig-nip07" value="nip07" /> <span>my nostr signer extension (NIP-07)</span></label>
+          <label class="inline"><input type="radio" name="signer" id="sig-key" value="key" checked /> <span>a one-time key made in this tab, no login</span></label>
+          <p id="sig-note" class="note">The signature only authorizes this one upload (BUD-11). A one-time key is discarded after signing. Payment is not tied to any account.</p>
+        </fieldset>
+        <label for="up-file">file</label>
+        <input type="file" id="up-file" />
+        <label for="up-days">keep for (days from now)</label>
+        <input type="number" id="up-days" min="1" step="1" inputmode="numeric" placeholder="server default" aria-describedby="up-days-note" />
+        <p id="up-days-note" class="note">Empty uses the server's default. Your browser reads the whole file into memory to hash it.</p>
+        <div class="row"><button type="button" id="up-quote">1. hash and get price</button></div>
+        <p id="up-status" class="status" role="status" aria-live="polite"></p>
+        <fieldset id="up-pay" hidden>
+          <legend>payment</legend>
+          <dl>
+            <div><dt>price</dt><dd data-r="price"></dd></div>
+            <div><dt>accepted mints</dt><dd data-r="mints"></dd></div>
+            <div><dt>server says</dt><dd data-r="reason"></dd></div>
+          </dl>
+          <label for="up-req">payment request (the <code>X-Cashu</code> header of the 402 answer)</label>
+          <textarea id="up-req" data-r="req" rows="3" readonly></textarea>
+          <div class="qr" data-r="qr" role="img" aria-label="QR code of the payment request" hidden></div>
+          <div class="row"><button type="button" data-r="copyreq">copy request</button></div>
+          <p class="note">Pay it with a Cashu wallet that reads payment requests, or make a token for exactly the price from an accepted mint. If the mint charges fees, add them: the server must receive the full price after fees.</p>
+          <label for="up-token">cashu token (<code>cashuB…</code> or <code>cashuA…</code>)</label>
+          <textarea id="up-token" data-r="token" rows="4" autocomplete="off" spellcheck="false" aria-describedby="up-check"></textarea>
+          <p id="up-check" class="status" data-r="check" aria-live="polite"></p>
+          <label class="inline" data-r="over" hidden><input type="checkbox" data-r="ack" /> <span>I accept that the server keeps the whole token: the <span data-r="overamt"></span> above the price (minus any mint fee) is not returned as change.</span></label>
+        </fieldset>
+        <div class="row"><button type="button" id="up-send">2. upload</button></div>
+        <dl id="up-result" hidden></dl>
+      </section>
+
+      <section aria-labelledby="rn-h">
+        <h2 id="rn-h"># keep a blob longer</h2>
+        <p class="note">Anyone can pay to keep any blob stored here longer: no file, login or signature needed. You pay only for time beyond what is already paid.</p>
+        <label for="rn-hash">blob sha256</label>
+        <input type="text" id="rn-hash" maxlength="64" autocomplete="off" spellcheck="false" />
+        <label for="rn-days">keep until (days from now)</label>
+        <input type="number" id="rn-days" min="1" step="1" inputmode="numeric" placeholder="server default" />
+        <div class="row"><button type="button" id="rn-quote">1. check and get price</button></div>
+        <p id="rn-status" class="status" role="status" aria-live="polite"></p>
+        <fieldset id="rn-pay" hidden>
+          <legend>payment</legend>
+          <dl>
+            <div><dt>price</dt><dd data-r="price"></dd></div>
+            <div><dt>accepted mints</dt><dd data-r="mints"></dd></div>
+            <div><dt>server says</dt><dd data-r="reason"></dd></div>
+          </dl>
+          <label for="rn-req">payment request (the <code>X-Cashu</code> header of the 402 answer)</label>
+          <textarea id="rn-req" data-r="req" rows="3" readonly></textarea>
+          <div class="qr" data-r="qr" role="img" aria-label="QR code of the payment request" hidden></div>
+          <div class="row"><button type="button" data-r="copyreq">copy request</button></div>
+          <p class="note">Pay it with a Cashu wallet that reads payment requests, or make a token for exactly the price from an accepted mint. If the mint charges fees, add them: the server must receive the full price after fees.</p>
+          <label for="rn-token">cashu token (<code>cashuB…</code> or <code>cashuA…</code>)</label>
+          <textarea id="rn-token" data-r="token" rows="4" autocomplete="off" spellcheck="false" aria-describedby="rn-check"></textarea>
+          <p id="rn-check" class="status" data-r="check" aria-live="polite"></p>
+          <label class="inline" data-r="over" hidden><input type="checkbox" data-r="ack" /> <span>I accept that the server keeps the whole token: the <span data-r="overamt"></span> above the price (minus any mint fee) is not returned as change.</span></label>
+        </fieldset>
+        <div class="row"><button type="button" id="rn-send">2. pay and extend</button></div>
+        <dl id="rn-result" hidden></dl>
+      </section>
+
+      <p><a href="/admin/">Open administration</a> for the operator wallet.</p>
     </main>
     <script>
       if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -218,6 +410,846 @@
           setTimeout(type, Math.random() * 10);
         })();
       }
+    </script>
+    <script>
+      // BIP-340 Schnorr over secp256k1 with BigInt and WebCrypto, for one-time
+      // keys only. Its own script so a browser without BigInt still runs the rest.
+      // ponytail: plain BigInt is not constant-time; acceptable for a key that
+      // signs one upload authorization and is discarded, never for a kept key.
+      (() => {
+        if (!(window.isSecureContext && crypto.subtle)) return;
+        const P = 2n ** 256n - 0x1000003d1n;
+        const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+        const G = [
+          0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798n,
+          0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8n,
+        ];
+        const mod = (a, m = P) => ((a % m) + m) % m;
+        const inv = (a) => {
+          let [r0, r1, x0, x1] = [mod(a), P, 1n, 0n];
+          while (r1) {
+            const q = r0 / r1;
+            [r0, r1, x0, x1] = [r1, r0 - q * r1, x1, x0 - q * x1];
+          }
+          return mod(x0);
+        };
+        const add = (A, B) => {
+          if (!A) return B;
+          if (!B) return A;
+          const [x1, y1] = A;
+          const [x2, y2] = B;
+          if (x1 === x2 && mod(y1 + y2) === 0n) return null;
+          const l = x1 === x2 ? mod(3n * x1 * x1 * inv(2n * y1)) : mod((y2 - y1) * inv(x2 - x1));
+          const x3 = mod(l * l - x1 - x2);
+          return [x3, mod(l * (x1 - x3) - y1)];
+        };
+        const mul = (k, A = G) => {
+          let R = null;
+          for (; k > 0n; k >>= 1n, A = add(A, A)) if (k & 1n) R = add(R, A);
+          return R;
+        };
+        const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+        const big = (b) => BigInt("0x" + hex(b));
+        const be = (n) => Uint8Array.from(n.toString(16).padStart(64, "0").match(/../g), (h) => parseInt(h, 16));
+        const rand = () => crypto.getRandomValues(new Uint8Array(32));
+        const sha = async (...parts) => {
+          const all = new Uint8Array(parts.reduce((s, p) => s + p.length, 0));
+          parts.reduce((o, p) => (all.set(p, o), o + p.length), 0);
+          return new Uint8Array(await crypto.subtle.digest("SHA-256", all));
+        };
+        const tagged = async (tag, ...parts) => {
+          const t = await sha(new TextEncoder().encode(tag));
+          return sha(t, t, ...parts);
+        };
+
+        async function sign(msg, d0) {
+          const Pt = mul(d0);
+          const d = Pt[1] & 1n ? N - d0 : d0;
+          const Pe = [Pt[0], Pt[1] & 1n ? P - Pt[1] : Pt[1]];
+          const t = be(d ^ big(await tagged("BIP0340/aux", rand())));
+          const k0 = mod(big(await tagged("BIP0340/nonce", t, be(Pe[0]), msg)), N);
+          if (!k0) throw new Error("signing failed, try again");
+          const R = mul(k0);
+          const k = R[1] & 1n ? N - k0 : k0;
+          const e = mod(big(await tagged("BIP0340/challenge", be(R[0]), be(Pe[0]), msg)), N);
+          const s = mod(k + e * d, N);
+          // Verify before use: s·G − e·P must be R with an even y.
+          const V = add(mul(s), mul(mod(-e, N), Pe));
+          if (!V || V[0] !== R[0] || V[1] & 1n) throw new Error("one-time key self-check failed");
+          return hex(be(R[0])) + hex(be(s));
+        }
+
+        // Sign a NIP-01 event template with a fresh key that is then dropped.
+        window.oneTimeSigner = async (template) => {
+          let d;
+          do d = big(rand());
+          while (d === 0n || d >= N);
+          const event = { ...template, pubkey: hex(be(mul(d)[0])) };
+          const serialized = JSON.stringify([0, event.pubkey, event.created_at, event.kind, event.tags, event.content]);
+          const id = await sha(new TextEncoder().encode(serialized));
+          return { ...event, id: hex(id), sig: await sign(id, d) };
+        };
+      })();
+    </script>
+    <script>
+      "use strict";
+      const $ = (id) => document.getElementById(id);
+      const enc = new TextEncoder();
+      const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+      const now = () => Math.floor(Date.now() / 1000);
+      const canHash = !!(window.isSecureContext && crypto.subtle);
+      const canKey = typeof window.oneTimeSigner === "function";
+      const AUTH_TTL = 600;
+
+      function say(el, text, kind = "") {
+        el.textContent = text;
+        el.dataset.kind = kind;
+      }
+      function when(sec) {
+        const d = new Date(sec * 1000);
+        return `${d.toLocaleString()} (${d.toISOString()})`;
+      }
+      function rows(el, entries) {
+        el.replaceChildren(
+          ...entries
+            .filter(([, v]) => v != null && v !== "")
+            .map(([k, v]) => {
+              const div = document.createElement("div");
+              const dt = document.createElement("dt");
+              const dd = document.createElement("dd");
+              dt.textContent = k;
+              if (v instanceof Node) dd.append(v);
+              else dd.textContent = String(v);
+              div.append(dt, dd);
+              return div;
+            })
+        );
+        el.hidden = false;
+      }
+      async function copy(field, status) {
+        field.select();
+        try {
+          await navigator.clipboard.writeText(field.value);
+          say(status, "copied", "ok");
+        } catch {
+          say(status, "selected: press Ctrl+C or ⌘C to copy");
+        }
+      }
+      // Disable the button while the action runs, so one click is one request.
+      async function busy(button, status, action) {
+        button.disabled = true;
+        try {
+          await action();
+        } catch (e) {
+          say(status, e.message || String(e), "err");
+        } finally {
+          button.disabled = false;
+        }
+      }
+
+      // The only network call on the page. Relative paths plus the CSP keep
+      // every request on this server; refusing redirects keeps X-Cashu and
+      // Authorization from being replayed to another location.
+      async function api(method, path, headers = {}, body) {
+        try {
+          const res = await fetch(path, {
+            method,
+            headers,
+            body,
+            cache: "no-store",
+            credentials: "omit",
+            redirect: "error",
+            referrerPolicy: "no-referrer",
+          });
+          const text = method === "HEAD" ? "" : await res.text();
+          return { res, text, reason: res.headers.get("X-Reason") || text.trim().slice(0, 500) || res.statusText };
+        } catch (error) {
+          return { error };
+        }
+      }
+
+      const b64 = (bytes) => btoa(Array.from(bytes, (b) => String.fromCharCode(b)).join(""));
+      function unb64(s) {
+        s = s.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
+        while (s.length % 4) s += "=";
+        return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+      }
+
+      // Minimal CBOR (RFC 8949) reader for cashuB tokens and creqA requests:
+      // definite lengths, ints, strings, arrays, maps, bools, null.
+      function cbor(bytes) {
+        let i = 0;
+        const need = (n) => {
+          if (i + n > bytes.length) throw new Error("truncated data");
+        };
+        const uint = (n) => {
+          need(n);
+          let v = 0;
+          for (let k = 0; k < n; k++) v = v * 256 + bytes[i++];
+          if (v > Number.MAX_SAFE_INTEGER) throw new Error("number too large");
+          return v;
+        };
+        const item = () => {
+          need(1);
+          const major = bytes[i] >> 5;
+          const info = bytes[i++] & 31;
+          if (major === 7) {
+            if (info === 20 || info === 21) return info === 21;
+            if (info === 22 || info === 23) return null;
+            throw new Error("unsupported value");
+          }
+          if (info > 27) throw new Error("unsupported length");
+          const n = info < 24 ? info : uint(1 << (info - 24));
+          if (major >= 2 && major <= 5 && n > bytes.length - i) throw new Error("truncated data");
+          switch (major) {
+            case 0:
+              return n;
+            case 1:
+              return -1 - n;
+            case 2:
+              i += n;
+              return bytes.slice(i - n, i);
+            case 3:
+              i += n;
+              return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(i - n, i));
+            case 4:
+              return Array.from({ length: n }, item);
+            case 5: {
+              const o = Object.create(null);
+              for (let k = 0; k < n; k++) o[item()] = item();
+              return o;
+            }
+            default:
+              return item(); // tagged value: keep the value
+          }
+        };
+        const value = item();
+        if (i !== bytes.length) throw new Error("trailing data");
+        return value;
+      }
+
+      const normMint = (m) => String(m || "").replace(/\/+$/, "");
+
+      function parseToken(raw) {
+        const token = raw.trim().replace(/^cashu:/i, "");
+        let unit;
+        let entries;
+        if (token.startsWith("cashuB")) {
+          const t = cbor(unb64(token.slice(6)));
+          unit = t.u;
+          entries = [{ mint: t.m, amounts: (t.t || []).flatMap((k) => k.p || []).map((p) => p.a) }];
+        } else if (token.startsWith("cashuA")) {
+          const t = JSON.parse(new TextDecoder().decode(unb64(token.slice(6))));
+          unit = t.unit;
+          entries = (t.token || []).map((e) => ({ mint: e.mint, amounts: (e.proofs || []).map((p) => p.amount) }));
+        } else {
+          throw new Error("not a Cashu token: expected cashuB… or cashuA…");
+        }
+        const amounts = entries.flatMap((e) => e.amounts);
+        if (!amounts.length || !amounts.every((a) => Number.isSafeInteger(a) && a > 0)) {
+          throw new Error("token holds no valid proofs");
+        }
+        return {
+          token,
+          unit: unit || "sat",
+          mints: [...new Set(entries.map((e) => normMint(e.mint)))],
+          amount: amounts.reduce((a, b) => a + b, 0),
+        };
+      }
+
+      // Price, unit and mints from a 402: the NUT-18 creqA request, else X-Reason.
+      function readQuote(r) {
+        const request = r.res.headers.get("X-Cashu") || "";
+        const reason = r.res.headers.get("X-Reason") || "";
+        const q = { request, reason, amount: null, unit: null, mints: [] };
+        try {
+          if (request.startsWith("creqA")) {
+            const p = cbor(unb64(request.slice(5)));
+            if (Number.isSafeInteger(p.a)) q.amount = p.a;
+            if (typeof p.u === "string") q.unit = p.u;
+            if (Array.isArray(p.m)) q.mints = p.m.map(normMint);
+          }
+        } catch {
+          // Fall back to X-Reason below; the raw request is still shown.
+        }
+        const m = /Payment required:\s*(\d+)\s+([^\s(]+)/i.exec(reason);
+        if (m && q.amount == null) q.amount = Number(m[1]);
+        if (m && q.unit == null) q.unit = m[2];
+        return q;
+      }
+
+      // Fail closed: a token is only sent when it provably covers the price.
+      function judge(raw, q) {
+        if (!raw.trim()) return { error: "" };
+        let t;
+        try {
+          t = parseToken(raw);
+        } catch (e) {
+          return { error: `cannot read this token: ${e.message}` };
+        }
+        if (q.amount == null) return { error: "the price could not be read from the server's answer, so no token is sent" };
+        if (q.unit && t.unit !== q.unit) return { error: `token is in ${t.unit}, the price is in ${q.unit}` };
+        if (t.mints.length !== 1) return { error: "token mixes several mints: use a token from one accepted mint" };
+        if (q.mints.length && !q.mints.includes(t.mints[0])) {
+          return { error: `mint ${t.mints[0]} is not accepted here; accepted: ${q.mints.join(", ")}` };
+        }
+        if (t.amount < q.amount) return { error: `token holds ${t.amount} ${t.unit}, the price is ${q.amount} ${t.unit}` };
+        return { t, over: t.amount - q.amount };
+      }
+
+      // Minimal QR encoder (byte mode, error correction M, versions 1-40) for
+      // the payment request, so the page needs no external library.
+      const qrSvg = (() => {
+        const ECC = [-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28];
+        const BLOCKS = [-1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49];
+        const rawModules = (v) => {
+          let r = (16 * v + 128) * v + 64;
+          if (v >= 2) {
+            const n = Math.floor(v / 7) + 2;
+            r -= (25 * n - 10) * n - 55;
+            if (v >= 7) r -= 36;
+          }
+          return r;
+        };
+        const dataCodewords = (v) => Math.floor(rawModules(v) / 8) - ECC[v] * BLOCKS[v];
+        const gfMul = (x, y) => {
+          let z = 0;
+          for (let i = 7; i >= 0; i--) {
+            z = (z << 1) ^ ((z >>> 7) * 0x11d);
+            z ^= ((y >>> i) & 1) * x;
+          }
+          return z;
+        };
+        const rsDivisor = (degree) => {
+          const r = new Array(degree).fill(0);
+          r[degree - 1] = 1;
+          let root = 1;
+          for (let i = 0; i < degree; i++) {
+            for (let j = 0; j < degree; j++) {
+              r[j] = gfMul(r[j], root);
+              if (j + 1 < degree) r[j] ^= r[j + 1];
+            }
+            root = gfMul(root, 2);
+          }
+          return r;
+        };
+        const rsRemainder = (data, divisor) => {
+          const r = divisor.map(() => 0);
+          for (const b of data) {
+            const factor = b ^ r.shift();
+            r.push(0);
+            divisor.forEach((c, i) => (r[i] ^= gfMul(c, factor)));
+          }
+          return r;
+        };
+        const bit = (x, i) => ((x >>> i) & 1) !== 0;
+        const MASKS = [
+          (x, y) => (x + y) % 2 === 0,
+          (x, y) => y % 2 === 0,
+          (x, y) => x % 3 === 0,
+          (x, y) => (x + y) % 3 === 0,
+          (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0,
+          (x, y) => ((x * y) % 2) + ((x * y) % 3) === 0,
+          (x, y) => (((x * y) % 2) + ((x * y) % 3)) % 2 === 0,
+          (x, y) => (((x + y) % 2) + ((x * y) % 3)) % 2 === 0,
+        ];
+
+        function codewords(bytes) {
+          let ver = 1;
+          for (; ; ver++) {
+            if (ver > 40) throw new Error("too long for a QR code");
+            if (4 + (ver < 10 ? 8 : 16) + bytes.length * 8 <= dataCodewords(ver) * 8) break;
+          }
+          const bits = [];
+          const push = (value, len) => {
+            for (let i = len - 1; i >= 0; i--) bits.push((value >>> i) & 1);
+          };
+          push(4, 4);
+          push(bytes.length, ver < 10 ? 8 : 16);
+          for (const b of bytes) push(b, 8);
+          const capacity = dataCodewords(ver) * 8;
+          push(0, Math.min(4, capacity - bits.length));
+          push(0, (8 - (bits.length % 8)) % 8);
+          for (let pad = 0xec; bits.length < capacity; pad ^= 0xec ^ 0x11) push(pad, 8);
+          const data = [];
+          for (let i = 0; i < bits.length; i += 8) data.push(bits.slice(i, i + 8).reduce((v, b) => (v << 1) | b, 0));
+
+          const numBlocks = BLOCKS[ver];
+          const eccLen = ECC[ver];
+          const raw = Math.floor(rawModules(ver) / 8);
+          const numShort = numBlocks - (raw % numBlocks);
+          const shortLen = Math.floor(raw / numBlocks);
+          const divisor = rsDivisor(eccLen);
+          const blocks = [];
+          for (let i = 0, k = 0; i < numBlocks; i++) {
+            const block = data.slice(k, k + shortLen - eccLen + (i < numShort ? 0 : 1));
+            k += block.length;
+            const ecc = rsRemainder(block, divisor);
+            if (i < numShort) block.push(0);
+            blocks.push(block.concat(ecc));
+          }
+          const out = [];
+          for (let i = 0; i < blocks[0].length; i++) {
+            blocks.forEach((b, j) => {
+              if (i !== shortLen - eccLen || j >= numShort) out.push(b[i]);
+            });
+          }
+          return { ver, out };
+        }
+
+        function matrix(text) {
+          const { ver, out } = codewords(new TextEncoder().encode(text));
+          const size = ver * 4 + 17;
+          const m = Array.from({ length: size }, () => new Array(size).fill(false));
+          const fn = Array.from({ length: size }, () => new Array(size).fill(false));
+          const set = (x, y, dark) => {
+            m[y][x] = dark;
+            fn[y][x] = true;
+          };
+          for (let i = 0; i < size; i++) {
+            set(6, i, i % 2 === 0);
+            set(i, 6, i % 2 === 0);
+          }
+          for (const [cx, cy] of [[3, 3], [size - 4, 3], [3, size - 4]]) {
+            for (let dy = -4; dy <= 4; dy++) {
+              for (let dx = -4; dx <= 4; dx++) {
+                const d = Math.max(Math.abs(dx), Math.abs(dy));
+                const x = cx + dx;
+                const y = cy + dy;
+                if (x >= 0 && x < size && y >= 0 && y < size) set(x, y, d !== 2 && d !== 4);
+              }
+            }
+          }
+          if (ver > 1) {
+            const num = Math.floor(ver / 7) + 2;
+            const step = Math.floor((ver * 8 + num * 3 + 5) / (num * 4 - 4)) * 2;
+            const pos = [6];
+            for (let p = size - 7; pos.length < num; p -= step) pos.splice(1, 0, p);
+            for (let i = 0; i < num; i++) {
+              for (let j = 0; j < num; j++) {
+                if ((i === 0 && j === 0) || (i === 0 && j === num - 1) || (i === num - 1 && j === 0)) continue;
+                for (let dy = -2; dy <= 2; dy++) {
+                  for (let dx = -2; dx <= 2; dx++) set(pos[i] + dx, pos[j] + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+                }
+              }
+            }
+          }
+          const format = (mask) => {
+            const data = mask; // error correction level M encodes as 00
+            let rem = data;
+            for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+            const bits = ((data << 10) | rem) ^ 0x5412;
+            for (let i = 0; i <= 5; i++) set(8, i, bit(bits, i));
+            set(8, 7, bit(bits, 6));
+            set(8, 8, bit(bits, 7));
+            set(7, 8, bit(bits, 8));
+            for (let i = 9; i < 15; i++) set(14 - i, 8, bit(bits, i));
+            for (let i = 0; i < 8; i++) set(size - 1 - i, 8, bit(bits, i));
+            for (let i = 8; i < 15; i++) set(8, size - 15 + i, bit(bits, i));
+            set(8, size - 8, true);
+          };
+          format(0);
+          if (ver >= 7) {
+            let rem = ver;
+            for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1f25);
+            const bits = (ver << 12) | rem;
+            for (let i = 0; i < 18; i++) {
+              const a = size - 11 + (i % 3);
+              const b = Math.floor(i / 3);
+              set(a, b, bit(bits, i));
+              set(b, a, bit(bits, i));
+            }
+          }
+          let n = 0;
+          for (let right = size - 1; right >= 1; right -= 2) {
+            if (right === 6) right = 5;
+            for (let vert = 0; vert < size; vert++) {
+              for (let j = 0; j < 2; j++) {
+                const x = right - j;
+                const y = ((right + 1) & 2) === 0 ? size - 1 - vert : vert;
+                if (!fn[y][x] && n < out.length * 8) {
+                  m[y][x] = bit(out[n >>> 3], 7 - (n & 7));
+                  n++;
+                }
+              }
+            }
+          }
+
+          // Pick the mask with the lowest penalty (runs, 2x2 blocks, finder-like patterns, balance).
+          const penalty = () => {
+            let score = 0;
+            let dark = 0;
+            const line = (get) => {
+              let run = 1;
+              let seq = "";
+              for (let i = 0; i < size; i++) {
+                const v = get(i);
+                seq += v ? "1" : "0";
+                if (i > 0 && v === get(i - 1)) run++;
+                else {
+                  if (run >= 5) score += run - 2;
+                  run = 1;
+                }
+              }
+              if (run >= 5) score += run - 2;
+              const padded = `0000${seq}0000`;
+              for (const p of ["10111010000", "00001011101"]) {
+                for (let i = padded.indexOf(p); i !== -1; i = padded.indexOf(p, i + 1)) score += 40;
+              }
+            };
+            for (let y = 0; y < size; y++) {
+              line((x) => m[y][x]);
+              line((x) => m[x][y]);
+              for (let x = 0; x < size; x++) {
+                if (m[y][x]) dark++;
+                if (x < size - 1 && y < size - 1 && m[y][x] === m[y][x + 1] && m[y][x] === m[y + 1][x] && m[y][x] === m[y + 1][x + 1]) score += 3;
+              }
+            }
+            const total = size * size;
+            return score + (Math.ceil(Math.abs(dark * 20 - total * 10) / total) - 1) * 10;
+          };
+          const applyMask = (mask) => {
+            for (let y = 0; y < size; y++) {
+              for (let x = 0; x < size; x++) if (!fn[y][x] && MASKS[mask](x, y)) m[y][x] = !m[y][x];
+            }
+          };
+          let best = 0;
+          let bestScore = Infinity;
+          for (let mask = 0; mask < 8; mask++) {
+            applyMask(mask);
+            format(mask);
+            const s = penalty();
+            if (s < bestScore) {
+              best = mask;
+              bestScore = s;
+            }
+            applyMask(mask);
+          }
+          applyMask(best);
+          format(best);
+          return m;
+        }
+
+        return (text) => {
+          const m = matrix(text);
+          const quiet = 4;
+          const dim = m.length + quiet * 2;
+          const ns = "http://www.w3.org/2000/svg";
+          const svg = document.createElementNS(ns, "svg");
+          svg.setAttribute("viewBox", `0 0 ${dim} ${dim}`);
+          svg.setAttribute("shape-rendering", "crispEdges");
+          svg.setAttribute("aria-hidden", "true");
+          const bg = document.createElementNS(ns, "rect");
+          bg.setAttribute("width", dim);
+          bg.setAttribute("height", dim);
+          bg.setAttribute("fill", "#fff");
+          let d = "";
+          m.forEach((row, y) => row.forEach((dark, x) => {
+            if (dark) d += `M${x + quiet} ${y + quiet}h1v1h-1z`;
+          }));
+          const path = document.createElementNS(ns, "path");
+          path.setAttribute("d", d);
+          path.setAttribute("fill", "#000");
+          svg.append(bg, path);
+          return svg;
+        };
+      })();
+
+      function payBox(root) {
+        const el = (r) => root.querySelector(`[data-r="${r}"]`);
+        let quote = null;
+        const refresh = () => {
+          const v = quote && judge(el("token").value, quote);
+          el("over").hidden = !(v && v.over > 0);
+          if (!v || v.error === "") say(el("check"), "");
+          else if (v.error) say(el("check"), v.error, "err");
+          else if (v.over > 0) {
+            el("overamt").textContent = `${v.over} ${v.t.unit}`;
+            say(el("check"), `token holds ${v.t.amount} ${v.t.unit}, ${v.over} more than the price. No change is returned.`, "warn");
+          } else say(el("check"), `token holds exactly ${v.t.amount} ${v.t.unit} from ${v.t.mints[0]}`, "ok");
+          return v;
+        };
+        el("token").addEventListener("input", () => {
+          el("ack").checked = false;
+          refresh();
+        });
+        el("copyreq").addEventListener("click", () => copy(el("req"), el("check")));
+        return {
+          show(q) {
+            quote = q;
+            el("ack").checked = false;
+            root.hidden = !q;
+            if (q) {
+              el("price").textContent = q.amount == null ? "unreadable, see the request" : `${q.amount} ${q.unit || ""}`;
+              el("mints").textContent = q.mints.join(", ") || "see the request";
+              el("reason").textContent = q.reason || "-";
+              el("req").value = q.request;
+              el("qr").replaceChildren();
+              el("qr").hidden = true;
+              if (q.request) {
+                try {
+                  el("qr").append(qrSvg(q.request));
+                  el("qr").hidden = false;
+                } catch {
+                  // Too long for a QR code: the request text stays copyable above.
+                }
+              }
+            }
+            refresh();
+          },
+          // The token to send, or an error saying why it must not be sent.
+          take() {
+            const v = refresh();
+            if (!v || v.error != null) throw new Error((v && v.error) || "paste a Cashu token first");
+            if (v.over > 0 && !el("ack").checked) throw new Error("confirm the overpayment, or paste a token for the exact price");
+            return v.t.token;
+          },
+          clear() {
+            el("token").value = "";
+            el("ack").checked = false;
+            refresh();
+          },
+        };
+      }
+
+      const notConfirmed = (what, detail) =>
+        `NOT CONFIRMED: ${what} did not succeed: ${detail}.\n` +
+        "Do not count this as paid. Your token was left in the box above.\n" +
+        "Check it in your Cashu wallet. Unspent: nothing was charged. Spent: the server may have taken it, " +
+        "so retry this exact request with the same token, never a new one, so the same purchase is not paid twice.";
+      const brokenAnswer = (r) => `the connection broke before the server answered (${r.error.message}); the outcome is unknown`;
+
+      // ── BUD-11 upload authorization ──
+      let signerTouched = false;
+      let serverTag = false;
+      const signer = () => document.querySelector('input[name="signer"]:checked').value;
+
+      async function authorize(hash) {
+        const created_at = now();
+        const tags = [["t", "upload"], ["x", hash], ["expiration", String(created_at + AUTH_TTL)]];
+        if (serverTag) tags.push(["server", location.hostname.toLowerCase()]);
+        const template = { kind: 24242, created_at, tags, content: "Upload blob" };
+        let event;
+        if (signer() === "nip07") {
+          if (!window.nostr || typeof window.nostr.signEvent !== "function") {
+            throw new Error("no NIP-07 signer extension found: install one, or use a one-time key");
+          }
+          event = await window.nostr.signEvent(template);
+        } else {
+          if (!canKey) throw new Error("this browser cannot make a one-time key here");
+          event = await window.oneTimeSigner(template);
+        }
+        return { header: "Nostr " + b64(enc.encode(JSON.stringify(event))), expires: created_at + AUTH_TTL };
+      }
+
+      function days(input) {
+        const v = input.value.trim();
+        if (!v) return null;
+        const n = Number(v);
+        if (!Number.isSafeInteger(n) || n < 1) throw new Error("days must be a whole number of at least 1, or empty for the server default");
+        return now() + n * 86400;
+      }
+
+      // Link a returned URL only when it is this server's blob for this hash.
+      function blobLink(url, hash) {
+        try {
+          const u = new URL(url, location.href);
+          if (u.origin !== location.origin || !u.pathname.startsWith(`/${hash}`)) return url;
+          const a = document.createElement("a");
+          a.href = u.href;
+          a.textContent = u.href;
+          a.rel = "noopener noreferrer";
+          return a;
+        } catch {
+          return url;
+        }
+      }
+      const sunsetSeconds = (res) => {
+        const t = Date.parse(res.headers.get("Sunset") || "");
+        return Number.isNaN(t) ? null : Math.floor(t / 1000);
+      };
+
+      // ── upload ──
+      const up = { ready: false };
+      const upPay = payBox($("up-pay"));
+      const resetUpload = () => {
+        up.ready = false;
+        upPay.show(null);
+      };
+      $("up-file").addEventListener("change", resetUpload);
+      $("up-days").addEventListener("input", resetUpload);
+
+      async function quoteUpload() {
+        const st = $("up-status");
+        resetUpload();
+        $("up-result").hidden = true;
+        const file = $("up-file").files[0];
+        if (!file) throw new Error("choose a file first");
+        const exp = days($("up-days"));
+        const type = file.type || "application/octet-stream";
+        say(st, `hashing ${file.name} (${file.size} bytes)…`);
+        const hash = hex(new Uint8Array(await crypto.subtle.digest("SHA-256", await file.arrayBuffer())));
+        if ($("up-file").files[0] !== file) throw new Error("the file changed while hashing, try again");
+        say(st, "signing the upload authorization…");
+        let auth = await authorize(hash);
+        const headers = () => ({
+          Authorization: auth.header,
+          "X-SHA-256": hash,
+          "X-Content-Type": type,
+          "X-Content-Length": String(file.size),
+          ...(exp ? { "X-Expiration": String(exp) } : {}),
+        });
+        say(st, "asking the server for a price…");
+        let r = await api("HEAD", "/upload", headers());
+        if (r.res && r.res.status === 401 && !serverTag && /server tag/i.test(r.reason)) {
+          serverTag = true; // this server requires BUD-11 server binding
+          auth = await authorize(hash);
+          r = await api("HEAD", "/upload", headers());
+        }
+        if (!r.res) throw new Error(`could not reach the server: ${r.error.message}`);
+        const until = exp ? `until ${when(exp)}` : "for the server's default time";
+        if (r.res.status === 402) {
+          Object.assign(up, { ready: true, file, hash, exp, type, auth, quote: readQuote(r) });
+          upPay.show(up.quote);
+          say(st, `sha256 ${hash}\nkeeping it ${until} costs the price below. Paste a token, then upload.`, "warn");
+        } else if (r.res.ok) {
+          Object.assign(up, { ready: true, file, hash, exp, type, auth, quote: null });
+          say(st, `sha256 ${hash}\nno payment needed to keep it ${until}: press upload.`, "ok");
+        } else {
+          throw new Error(`the server refuses this upload (${r.res.status}): ${r.reason}`);
+        }
+      }
+
+      async function sendUpload() {
+        const st = $("up-status");
+        if (!up.ready || $("up-file").files[0] !== up.file) throw new Error("get the price first (step 1)");
+        const token = up.quote ? upPay.take() : null;
+        if (up.auth.expires - now() < 60) up.auth = await authorize(up.hash);
+        const headers = { Authorization: up.auth.header, "X-SHA-256": up.hash, "Content-Type": up.type };
+        if (up.exp) headers["X-Expiration"] = String(up.exp);
+        if (token) headers["X-Cashu"] = token;
+        say(st, token ? "uploading and paying… keep this tab open" : "uploading…");
+        const r = await api("PUT", "/upload", headers, up.file);
+        if (!r.res) return say(st, token ? notConfirmed("the paid upload", brokenAnswer(r)) : `upload failed: ${r.error.message}`, "err");
+        if (!r.res.ok) {
+          if (r.res.status === 402) {
+            up.quote = readQuote(r);
+            upPay.show(up.quote);
+          }
+          const detail = `${r.res.status} ${r.reason}`;
+          return say(st, token ? notConfirmed("the paid upload", detail) : `upload failed: ${detail}`, "err");
+        }
+        let d = {};
+        try {
+          d = JSON.parse(r.text);
+        } catch {
+          // A success without a descriptor still stored the blob.
+        }
+        const until = Number.isSafeInteger(d.expiration) ? d.expiration : sunsetSeconds(r.res);
+        upPay.clear();
+        up.ready = false;
+        $("rn-hash").value = up.hash;
+        rows($("up-result"), [
+          ["url", d.url ? blobLink(d.url, up.hash) : null],
+          ["sha256", d.sha256 || up.hash],
+          ["size", d.size != null ? `${d.size} bytes` : null],
+          ["type", d.type],
+          ["kept until", until ? when(until) : "no announced expiry"],
+        ]);
+        say(st, token ? "uploaded and paid." : "uploaded.", "ok");
+      }
+
+      // ── renewal ──
+      const rn = { ready: false };
+      const rnPay = payBox($("rn-pay"));
+      const resetRenewal = () => {
+        rn.ready = false;
+        rnPay.show(null);
+      };
+      $("rn-hash").addEventListener("input", resetRenewal);
+      $("rn-days").addEventListener("input", resetRenewal);
+
+      async function quoteRenewal() {
+        const st = $("rn-status");
+        resetRenewal();
+        $("rn-result").hidden = true;
+        const hash = $("rn-hash").value.trim().toLowerCase();
+        if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error("enter the blob's sha256: 64 hex characters");
+        const exp = days($("rn-days"));
+        say(st, "checking the blob…");
+        const cur = await api("HEAD", `/${hash}`);
+        if (cur.res && cur.res.status === 404) throw new Error("this server does not hold that blob: upload it instead");
+        const sunset = cur.res && cur.res.ok ? sunsetSeconds(cur.res) : null;
+        const now_ = sunset ? `currently kept until ${when(sunset)}\n` : "";
+        const r = await api("HEAD", `/retain/${hash}`, exp ? { "X-Expiration": String(exp) } : {});
+        if (!r.res) throw new Error(`could not reach the server: ${r.error.message}`);
+        const until = exp ? `until ${when(exp)}` : "for the server's default time";
+        if (r.res.status === 402) {
+          Object.assign(rn, { ready: true, hash, exp, quote: readQuote(r) });
+          rnPay.show(rn.quote);
+          say(st, `${now_}keeping it ${until} costs the price below.`, "warn");
+        } else if (r.res.ok) {
+          say(st, `${now_}nothing to pay: it is already paid ${until}.`, "ok");
+        } else if (r.res.status === 404 || r.res.status === 405) {
+          throw new Error(`paid renewal is not available for this blob here (${r.res.status}): ${r.reason}`);
+        } else {
+          throw new Error(`the server refuses this renewal (${r.res.status}): ${r.reason}`);
+        }
+      }
+
+      async function sendRenewal() {
+        const st = $("rn-status");
+        if (!rn.ready) throw new Error("get the price first (step 1)");
+        const headers = { "X-Cashu": rnPay.take() };
+        if (rn.exp) headers["X-Expiration"] = String(rn.exp);
+        say(st, "paying… keep this tab open");
+        const r = await api("PUT", `/retain/${rn.hash}`, headers);
+        if (!r.res) return say(st, notConfirmed("the renewal", brokenAnswer(r)), "err");
+        if (!r.res.ok) {
+          if (r.res.status === 402) {
+            rn.quote = readQuote(r);
+            rnPay.show(rn.quote);
+          }
+          return say(st, notConfirmed("the renewal", `${r.res.status} ${r.reason}`), "err");
+        }
+        let d = {};
+        try {
+          d = JSON.parse(r.text);
+        } catch {
+          // Fall back to the Sunset header.
+        }
+        const paid = Number.isSafeInteger(d.paid_until) ? d.paid_until : sunsetSeconds(r.res);
+        rnPay.clear();
+        rn.ready = false;
+        rows($("rn-result"), [
+          ["sha256", d.sha256 || rn.hash],
+          ["paid until", paid ? when(paid) : "not reported"],
+        ]);
+        say(st, "paid.", "ok");
+      }
+
+      // ── wiring ──
+      const on = (id, status, action) => $(id).addEventListener("click", () => busy($(id), $(status), action));
+      on("up-quote", "up-status", quoteUpload);
+      on("up-send", "up-status", sendUpload);
+      on("rn-quote", "rn-status", quoteRenewal);
+      on("rn-send", "rn-status", sendRenewal);
+      document.getElementsByName("signer").forEach((r) => r.addEventListener("change", () => (signerTouched = true)));
+
+      if (!canHash) {
+        say($("needs"), "Uploading needs a secure page (HTTPS or localhost): this browser blocks file hashing here. Renewal still works.", "err");
+        $("needs").hidden = false;
+        $("up-quote").disabled = $("up-send").disabled = true;
+      }
+      if (!canKey) {
+        $("sig-key").disabled = true;
+        $("sig-nip07").checked = true;
+        $("sig-note").textContent += " A one-time key needs HTTPS (or localhost) and a current browser, so only a signer extension works here.";
+      }
+      // Extensions inject window.nostr after load; prefer one when present.
+      setTimeout(() => {
+        if (window.nostr && !signerTouched) $("sig-nip07").checked = true;
+      }, 500);
     </script>
   </body>
 </html>

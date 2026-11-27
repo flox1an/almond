@@ -98,14 +98,28 @@ async fn remove_local_file(path: &Path) -> AppResult<()> {
 /// suffix or an extension; a hash prefix followed by `_`, `.`, or end-of-name
 /// is therefore the only accepted match.
 pub async fn ensure_not_quarantined(state: &AppState, sha256: &str) -> AppResult<()> {
+    ensure_storage_not_quarantined(&state.storage, sha256).await
+}
+
+pub async fn ensure_storage_not_quarantined(
+    storage: &crate::models::StorageLayout,
+    sha256: &str,
+) -> AppResult<()> {
     validate_sha256_format(sha256)?;
-    let mut entries = match fs::read_dir(&state.storage.quarantine).await {
+    let block = storage.root.join("admin-blocks").join(sha256);
+    if fs::try_exists(&block)
+        .await
+        .map_err(|error| AppError::IoError(format!("Failed to inspect hash block: {error}")))?
+    {
+        return Err(AppError::Forbidden("Blob hash is blocked".to_owned()));
+    }
+    let mut entries = match fs::read_dir(&storage.quarantine).await {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(AppError::IoError(format!(
                 "Failed to inspect quarantine directory {}: {error}",
-                state.storage.quarantine.display()
+                storage.quarantine.display()
             )));
         }
     };
@@ -113,7 +127,7 @@ pub async fn ensure_not_quarantined(state: &AppState, sha256: &str) -> AppResult
     while let Some(entry) = entries.next_entry().await.map_err(|error| {
         AppError::IoError(format!(
             "Failed to read quarantine directory {}: {error}",
-            state.storage.quarantine.display()
+            storage.quarantine.display()
         ))
     })? {
         let name = entry.file_name();
@@ -238,6 +252,7 @@ pub async fn publish_existing_metadata(
     metadata: FileMetadata,
 ) -> AppResult<Arc<FileMetadata>> {
     let _guard = state.blob_mutation_locks.lock(&sha256).await;
+    ensure_not_quarantined(state, &sha256).await?;
     Ok(publish_metadata(state, sha256, metadata).await?.metadata)
 }
 
@@ -403,6 +418,23 @@ pub async fn remove_indexed_blob(
     let _guard = state.blob_mutation_locks.lock(sha256).await;
 
     let Some(current) = state.file_index.get(sha256).await else {
+        if removal == Removal::Quarantined {
+            let record = state
+                .storage
+                .quarantine
+                .join(format!("{sha256}.metadata.json"));
+            match fs::read(record).await {
+                Ok(bytes) => {
+                    let metadata: FileMetadata = serde_json::from_slice(&bytes).map_err(|e| {
+                        AppError::IoError(format!("Invalid quarantine metadata: {e}"))
+                    })?;
+                    quarantine_current(state, sha256, &metadata).await?;
+                    return Ok(true);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(AppError::IoError(error.to_string())),
+            }
+        }
         // Nothing indexed, but a requested or reported removal still sweeps the
         // backend so a hash that lost its index entry cannot linger in it.
         if removal.sweeps_backend() {
@@ -418,6 +450,18 @@ pub async fn remove_indexed_blob(
         {
             return Ok(false);
         }
+    }
+
+    // Checked under the hash guard that renewal also holds, so a purchase
+    // committed before this point is always seen.
+    #[cfg(feature = "cashu")]
+    if removal == Removal::Evicted
+        && state
+            .paid_store
+            .as_ref()
+            .is_some_and(|store| store.is_protected(sha256, unix_now()))
+    {
+        return Ok(false);
     }
 
     if removal == Removal::Quarantined {
@@ -440,42 +484,200 @@ pub async fn remove_indexed_blob(
     Ok(removed)
 }
 
-/// Move a local blob into the quarantine root, keeping its bytes.
-///
-/// A blob held in the native backend cannot be moved into a local directory,
-/// so quarantining one removes it instead — the behaviour the report handler
-/// had before this path existed.
+/// Move bytes out of the served namespace, retaining metadata for restoration.
 async fn quarantine_current(
     state: &AppState,
     sha256: &str,
     metadata: &FileMetadata,
 ) -> AppResult<()> {
-    let FileLocation::Local(path) = &metadata.location else {
-        return sweep_backend_copies(state, sha256).await;
-    };
-
     let quarantine = &state.storage.quarantine;
-    fs::create_dir_all(quarantine).await.map_err(|error| {
-        AppError::IoError(format!(
-            "Failed to create quarantine directory {}: {error}",
-            quarantine.display()
-        ))
-    })?;
+    fs::create_dir_all(quarantine)
+        .await
+        .map_err(|error| AppError::IoError(error.to_string()))?;
+    let record = quarantine.join(format!("{sha256}.metadata.json"));
+    let bytes =
+        serde_json::to_vec(metadata).map_err(|error| AppError::InternalError(error.to_string()))?;
+    match fs::read(&record).await {
+        Ok(existing) if existing == bytes => {}
+        Ok(_) => {
+            return Err(AppError::Conflict(
+                "Different quarantine record already exists".to_owned(),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            use tokio::io::AsyncWriteExt;
+            let temp = quarantine.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+                .await
+                .map_err(|e| AppError::IoError(e.to_string()))?;
+            let result = async {
+                file.write_all(&bytes).await?;
+                file.sync_all().await?;
+                fs::hard_link(&temp, &record).await?;
+                fs::remove_file(&temp).await?;
+                fs::File::open(quarantine).await?.sync_all().await
+            }
+            .await;
+            if result.is_err() {
+                let _ = fs::remove_file(&temp).await;
+            }
+            result.map_err(|e: std::io::Error| AppError::IoError(e.to_string()))?;
+        }
+        Err(error) => return Err(AppError::IoError(error.to_string())),
+    }
+    if let FileLocation::S3 { key } = &metadata.location {
+        let s3 = state
+            .native_s3
+            .as_ref()
+            .ok_or_else(|| AppError::ServiceUnavailable("S3 unavailable".to_owned()))?;
+        return s3
+            .move_object(key, &format!(".almond-quarantine/{key}"))
+            .await;
+    }
+    let FileLocation::Local(path) = &metadata.location else {
+        unreachable!()
+    };
 
     let name = path.file_name().map_or_else(
         || sha256.to_string(),
         |name| name.to_string_lossy().into_owned(),
     );
     let destination = quarantine.join(name);
-    fs::rename(path, &destination).await.map_err(|error| {
-        AppError::IoError(format!(
-            "Failed to quarantine {} into {}: {error}",
-            path.display(),
-            destination.display()
-        ))
-    })?;
+    if fs::try_exists(path)
+        .await
+        .map_err(|e| AppError::IoError(e.to_string()))?
+        && fs::try_exists(&destination)
+            .await
+            .map_err(|e| AppError::IoError(e.to_string()))?
+    {
+        return Err(AppError::Conflict(
+            "Quarantine destination already exists".to_owned(),
+        ));
+    }
+    match fs::rename(path, &destination).await {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && fs::try_exists(&destination)
+                    .await
+                    .map_err(|e| AppError::IoError(e.to_string()))? => {}
+        Err(error) => {
+            return Err(AppError::IoError(format!(
+                "Failed to quarantine {} into {}: {error}",
+                path.display(),
+                destination.display()
+            )))
+        }
+    }
+    fs::File::open(quarantine)
+        .await
+        .map_err(|e| AppError::IoError(e.to_string()))?
+        .sync_all()
+        .await
+        .map_err(|e| AppError::IoError(e.to_string()))?;
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)
+            .await
+            .map_err(|e| AppError::IoError(e.to_string()))?
+            .sync_all()
+            .await
+            .map_err(|e| AppError::IoError(e.to_string()))?;
+    }
 
     info!(sha256, quarantine = ?destination, "Quarantined blob");
+    Ok(())
+}
+
+pub async fn restore_quarantined(state: &AppState, sha256: &str) -> AppResult<()> {
+    validate_sha256_format(sha256)?;
+    let _guard = state.blob_mutation_locks.lock(sha256).await;
+    if fs::try_exists(state.storage.root.join("admin-blocks").join(sha256))
+        .await
+        .map_err(|e| AppError::IoError(e.to_string()))?
+    {
+        return Err(AppError::Conflict(
+            "Unblock the hash before restoring".to_owned(),
+        ));
+    }
+    let record = state
+        .storage
+        .quarantine
+        .join(format!("{sha256}.metadata.json"));
+    let bytes = fs::read(&record)
+        .await
+        .map_err(|e| AppError::IoError(format!("Cannot read quarantine metadata: {e}")))?;
+    let metadata: FileMetadata = serde_json::from_slice(&bytes)
+        .map_err(|e| AppError::IoError(format!("Invalid quarantine metadata: {e}")))?;
+    if let Some(current) = state.file_index.get(sha256).await {
+        if current.location != metadata.location {
+            return Err(AppError::Conflict("Blob already exists".to_owned()));
+        }
+    }
+    match &metadata.location {
+        FileLocation::Local(path) => {
+            let name = path
+                .file_name()
+                .ok_or_else(|| AppError::IoError("Invalid quarantine path".to_owned()))?;
+            let source = state.storage.quarantine.join(name);
+            let source_exists = fs::try_exists(&source)
+                .await
+                .map_err(|e| AppError::IoError(e.to_string()))?;
+            let destination_exists = fs::try_exists(path)
+                .await
+                .map_err(|e| AppError::IoError(e.to_string()))?;
+            if source_exists && destination_exists {
+                return Err(AppError::Conflict(
+                    "Original path already exists".to_owned(),
+                ));
+            }
+            if source_exists {
+                create_parent_dirs(path).await?;
+                fs::rename(&source, path)
+                    .await
+                    .map_err(|e| AppError::IoError(e.to_string()))?;
+            } else if !destination_exists {
+                return Err(AppError::NotFound(
+                    "Quarantined bytes are missing".to_owned(),
+                ));
+            }
+            fs::File::open(path.parent().unwrap())
+                .await
+                .map_err(|e| AppError::IoError(e.to_string()))?
+                .sync_all()
+                .await
+                .map_err(|e| AppError::IoError(e.to_string()))?;
+            fs::File::open(&state.storage.quarantine)
+                .await
+                .map_err(|e| AppError::IoError(e.to_string()))?
+                .sync_all()
+                .await
+                .map_err(|e| AppError::IoError(e.to_string()))?;
+        }
+        FileLocation::S3 { key } => {
+            let s3 = state
+                .native_s3
+                .as_ref()
+                .ok_or_else(|| AppError::ServiceUnavailable("S3 unavailable".to_owned()))?;
+            s3.move_object(&format!(".almond-quarantine/{key}"), key)
+                .await?;
+        }
+    }
+    fs::remove_file(&record).await.map_err(|e| {
+        AppError::IoError(format!(
+            "Restored bytes, but failed to remove quarantine metadata: {e}"
+        ))
+    })?;
+    fs::File::open(&state.storage.quarantine)
+        .await
+        .map_err(|e| AppError::IoError(e.to_string()))?
+        .sync_all()
+        .await
+        .map_err(|e| AppError::IoError(e.to_string()))?;
+    state.file_index.insert(sha256.to_owned(), metadata).await;
+    mark_changes_pending(state).await;
     Ok(())
 }
 
@@ -485,6 +687,113 @@ async fn sweep_backend_copies(state: &AppState, sha256: &str) -> AppResult<()> {
         Some(s3) => s3.delete_matching(sha256).await,
         None => Ok(()),
     }
+}
+
+#[cfg(feature = "cashu")]
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[cfg(feature = "cashu")]
+fn paid_store(state: &AppState) -> AppResult<&Arc<crate::services::paid_store::PaidStore>> {
+    state.paid_store.as_ref().ok_or_else(|| {
+        AppError::ServiceUnavailable("Paid retention store is not configured".to_string())
+    })
+}
+
+/// Fail unless `sha256` is indexed with exactly `size` bytes.
+#[cfg(feature = "cashu")]
+async fn require_indexed_size(state: &AppState, sha256: &str, size: u64) -> AppResult<()> {
+    match state.file_index.get(sha256).await {
+        Some(metadata) if metadata.size == size => Ok(()),
+        Some(_) => Err(AppError::Conflict(format!(
+            "Stored blob {sha256} does not match the purchased size"
+        ))),
+        None => Err(AppError::NotFound(format!("Blob {sha256} is not stored"))),
+    }
+}
+
+/// Record purchase intent under the hash guard, before any mint call.
+///
+/// `require_indexed` is for renewals: the blob must be stored with the quoted
+/// size, checked under the same guard as eviction. A known op id returns its
+/// recorded outcome even if the blob has since gone, so retries never charge.
+#[cfg(feature = "cashu")]
+pub async fn begin_paid_operation(
+    state: &AppState,
+    terms: crate::services::paid_store::PurchaseTerms,
+    require_indexed: bool,
+    now: u64,
+) -> AppResult<crate::services::paid_store::Begin> {
+    use crate::services::paid_store::Begin;
+    validate_sha256_format(&terms.sha256)?;
+    let store = paid_store(state)?;
+    let _guard = state.blob_mutation_locks.lock(&terms.sha256).await;
+    if let Some(existing) = store.operation(&terms.op_id).await? {
+        if existing.terms != terms {
+            return Err(AppError::Conflict(
+                "Purchase operation id reused with different terms".to_string(),
+            ));
+        }
+        return Ok(Begin::Existing(existing));
+    }
+    if require_indexed {
+        require_indexed_size(state, &terms.sha256, terms.size).await?;
+    }
+    store.begin(terms, now).await
+}
+
+/// Grant a settled purchase under the hash guard. The blob must be stored
+/// with the purchased size; otherwise the operation stays settled (and its
+/// hash protected) until the bytes are published or an operator reconciles.
+#[cfg(feature = "cashu")]
+pub async fn apply_paid_operation(state: &AppState, op_id: &str, now: u64) -> AppResult<u64> {
+    let store = paid_store(state)?;
+    let operation = store
+        .operation(op_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Unknown purchase operation {op_id}")))?;
+    let _guard = state
+        .blob_mutation_locks
+        .lock(&operation.terms.sha256)
+        .await;
+    require_indexed_size(state, &operation.terms.sha256, operation.terms.size).await?;
+    store.apply(op_id, now).await
+}
+
+/// Startup reconciliation after the index (and S3 sync, if any) is built:
+/// apply settled purchases whose bytes are stored. Pending operations await
+/// wallet reconciliation and stay protected; nothing here marks one failed.
+#[cfg(feature = "cashu")]
+pub async fn recover_paid_operations(state: &AppState, now: u64) -> AppResult<()> {
+    use crate::services::paid_store::OpState;
+    for operation in paid_store(state)?.unresolved().await? {
+        let terms = &operation.terms;
+        match operation.state {
+            OpState::Settled => match apply_paid_operation(state, &terms.op_id, now).await {
+                Ok(until) => info!(
+                    sha256 = terms.sha256,
+                    op_id = terms.op_id,
+                    paid_until = until,
+                    "Applied settled purchase during recovery"
+                ),
+                Err(error) => warn!(
+                    sha256 = terms.sha256,
+                    op_id = terms.op_id,
+                    "Settled purchase remains unapplied: {error}"
+                ),
+            },
+            _ => warn!(
+                sha256 = terms.sha256,
+                op_id = terms.op_id,
+                "Purchase outcome unresolved; blob stays protected until the wallet reconciles it"
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// Mark changes as pending for consumers that observe index mutations.
@@ -548,6 +857,31 @@ impl TempBlob {
     /// this value must not unlink them.
     fn into_published(mut self) {
         self.path = None;
+    }
+
+    /// Release ownership without unlinking; the caller now owns the file.
+    #[must_use]
+    pub fn keep(mut self) -> PathBuf {
+        self.path
+            .take()
+            .expect("a TempBlob is only pathless after it has been published")
+    }
+
+    /// Atomically rename the bytes to `destination` (same filesystem) and
+    /// stop owning them. On failure the temporary file is still unlinked.
+    pub async fn persist(self, destination: &Path) -> AppResult<()> {
+        create_parent_dirs(destination).await?;
+        fs::rename(self.path(), destination)
+            .await
+            .map_err(|error| {
+                AppError::IoError(format!(
+                    "Failed to persist {} to {}: {error}",
+                    self.path().display(),
+                    destination.display()
+                ))
+            })?;
+        self.into_published();
+        Ok(())
     }
 }
 

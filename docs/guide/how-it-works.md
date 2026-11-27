@@ -46,6 +46,20 @@ below it uploads get `507`).
 Clients see an upload's deadline in the `Sunset` header and the descriptor's
 `expiration` field; see [Blob delivery](/reference/api#blob-delivery).
 
+Paid uploads use the Cashu wallet SQLite file for a separate retention and
+purchase journal. Blob bytes remain in the filesystem or S3; the in-memory
+index is reconstructed on startup. Paid retention protects a blob from ordinary
+age and capacity eviction through its purchased deadline. Clients can extend an
+existing blob with `HEAD` and `PUT /retain/<sha256>` using `X-Expiration` and
+`X-Cashu`. Anyone may pay to extend a public blob; payment does not grant
+deletion rights. Retention commitments do not prevent administrative removal,
+moderation, hardware failure, or loss of an unbacked-up storage volume.
+
+Keep the wallet database, seed, blob storage, and `paid-pending/` directory on
+persistent storage and back them up together. Never delete pending payment
+records after an ambiguous mint timeout; retry the same payment rather than
+submitting a new token.
+
 ## Access control
 
 Every write carries a Nostr kind `24242` authorization event in the
@@ -86,10 +100,28 @@ from the single mint in `ALMOND_CASHU_MINT` and are received into the wallet at
 `ALMOND_CASHU_WALLET_PATH`. Payments apply on top of the access mode. Builds
 without the `cashu` feature refuse to start with paid operations configured.
 
+With paid uploads enabled, the homepage offers a Cashu upload and extension
+flow. Pricing is per MiB for each started 30-day period; `X-Expiration` selects
+an absolute deadline within one year, or defaults to 30 days. The Mint is a
+custodian: choose one you trust. The administrative interface at `/admin/`
+can export earned funds as a Cashu token and inspect or reclaim pending exports.
+Use HTTPS (or a local tunnel) and back up the wallet database and seed before
+accepting funds.
+
+**Breaking wallet authorization cutover:** configure `ALMOND_ADMIN_NPUBS` and
+`ALMOND_PUBLIC_URL` before upgrading, then migrate operator
+clients to NIP-98 signed requests as described in the API reference. The old
+`admin-token` file and bearer authorization are no longer used; remove the old
+file securely after upgrading. Existing wallet data and withdrawal request IDs
+remain valid. On an uncertain withdrawal, look up or retry the same request ID
+and amount rather than creating a new withdrawal.
+
 The CDK 0.18 dependency upgrade automatically migrates the wallet database,
-including transaction keys. Stop Almond and back up the wallet database and
-its seed before the first upgraded start. Do not point an older binary at the
-migrated database; a rollback requires restoring the matching pre-upgrade backup.
+including transaction keys. Stop Almond and back up the database, its seed and
+the paid-purchase state before the first upgraded start. Do not point an older
+binary at the migrated database; a rollback requires restoring the matching
+pre-upgrade backup. An incoming transaction is payment only after settlement
+is completed, not while it is pending or failed.
 
 ## Upstream lookups
 

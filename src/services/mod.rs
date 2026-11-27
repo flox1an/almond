@@ -10,6 +10,12 @@ pub mod file_storage;
 pub mod hls;
 pub mod intake;
 pub mod native_storage;
+#[cfg(feature = "cashu")]
+pub mod paid_purchase;
+#[cfg(feature = "cashu")]
+pub mod paid_recovery;
+#[cfg(feature = "cashu")]
+pub mod paid_store;
 pub mod serve_files;
 pub mod tail;
 pub mod upload;

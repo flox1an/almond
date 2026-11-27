@@ -16,7 +16,7 @@ Deviations from the spec text are documented in detail under
 | [04](https://github.com/hzrd149/blossom/blob/master/buds/04.md) | Mirroring blobs | ✅ | `PUT /mirror`. Mirroring an HLS playlist also mirrors its segments. No MIME sniffing when the origin omits `Content-Type`. |
 | [05](https://github.com/hzrd149/blossom/blob/master/buds/05.md) | Media optimization | ❌ | `/media` is not routed |
 | [06](https://github.com/hzrd149/blossom/blob/master/buds/06.md) | Upload requirements | ✅ | `HEAD /upload` |
-| [07](https://github.com/hzrd149/blossom/blob/master/buds/07.md) | Payment required | ⚠️ | Cashu, behind the `cashu` feature. The `402` challenge is not NUT-24 `creqA`, and an insufficient payment returns `402` instead of `400`. |
+| [07](https://github.com/hzrd149/blossom/blob/master/buds/07.md) | Payment required | ⚠️ | Cashu, behind the `cashu` feature. Paid retention is an Almond extension. |
 | [08](https://github.com/hzrd149/blossom/blob/master/buds/08.md) | Nostr File Metadata Tags | ✅ | Blob descriptors carry `nip94` |
 | [09](https://github.com/hzrd149/blossom/blob/master/buds/09.md) | Blob Report | ⚠️ | `PUT /report`, off by default. Public mode accepts reports without an `x` tag, and no report rules are published. |
 | [10](https://github.com/hzrd149/blossom/blob/master/buds/10.md) | Blossom URI Schema | – | Client-side only |

@@ -206,10 +206,23 @@ impl NativeS3Storage {
     /// List the bucket and merge it into `index` (local copies keep
     /// precedence), then mark the bucket available. A failed listing marks it
     /// unavailable and returns the error.
-    pub async fn sync_index(&self, index: &BlobIndex) -> AppResult<()> {
+    pub async fn sync_index(
+        &self,
+        index: &BlobIndex,
+        storage: &crate::models::StorageLayout,
+    ) -> AppResult<()> {
         match self.list_all().await {
             Ok(entries) => {
                 for (sha256, metadata) in entries {
+                    match crate::services::file_storage::ensure_storage_not_quarantined(
+                        storage, &sha256,
+                    )
+                    .await
+                    {
+                        Ok(()) => {}
+                        Err(AppError::Forbidden(_)) => continue,
+                        Err(error) => return Err(error),
+                    }
                     if !index.contains(&sha256).await {
                         index.insert(sha256, metadata).await;
                     }
@@ -323,6 +336,63 @@ impl NativeS3Storage {
             .into_bytes();
         String::from_utf8(bytes.to_vec())
             .map_err(|error| AppError::IoError(format!("S3 object was not UTF-8: {error}")))
+    }
+
+    /// Copy first, then delete: an interrupted move retains at least one copy.
+    pub async fn move_object(&self, from: &str, to: &str) -> AppResult<()> {
+        self.ensure_available()?;
+        let from_head = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(from)
+            .send()
+            .await;
+        let to_head = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(to)
+            .send()
+            .await;
+        match (from_head, to_head) {
+            (Ok(source), Ok(destination)) => {
+                if source.e_tag().is_none()
+                    || source.e_tag() != destination.e_tag()
+                    || source.content_length() != destination.content_length()
+                {
+                    return Err(AppError::Conflict(
+                        "S3 move destination already exists with different content".into(),
+                    ));
+                }
+            }
+            (Ok(_), Err(error)) if error.as_service_error().is_some_and(|e| e.is_not_found()) => {
+                self.client
+                    .copy_object()
+                    .bucket(&self.bucket)
+                    .key(to)
+                    .copy_source(format!("{}/{}", self.bucket, from))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        AppError::ServiceUnavailable(format!("S3 CopyObject failed: {e}"))
+                    })?;
+            }
+            (Err(error), Ok(_)) if error.as_service_error().is_some_and(|e| e.is_not_found()) => {
+                return Ok(())
+            }
+            (Err(error), _) => {
+                return Err(AppError::ServiceUnavailable(format!(
+                    "S3 source check failed: {error}"
+                )))
+            }
+            (_, Err(error)) => {
+                return Err(AppError::ServiceUnavailable(format!(
+                    "S3 destination check failed: {error}"
+                )))
+            }
+        }
+        self.delete(from).await
     }
 
     pub async fn delete(&self, key: &str) -> AppResult<()> {

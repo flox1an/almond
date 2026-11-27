@@ -8,6 +8,7 @@ Blossom endpoints:
 |---|---|
 | `PUT /upload` | Upload a blob (BUD-02) |
 | `HEAD /upload` | Check whether an upload would be admitted (BUD-06) |
+| `HEAD /retain/<sha256>`, `PUT /retain/<sha256>` | Quote or purchase additional retention for an existing blob (Almond extension) |
 | `PATCH /upload` | Resumable upload (Almond extension) |
 | `GET /<sha256>[.ext]` | Download a blob; the extension is ignored for lookup (BUD-01) |
 | `HEAD /<sha256>[.ext]` | Blob metadata (BUD-01) |
@@ -25,8 +26,35 @@ Almond pages and diagnostics:
 | `GET /config` | Config editor |
 | `GET /filter` | BUD-11 filter over all stored hashes |
 | `GET /metrics` | Prometheus metrics; requires `Authorization: Bearer <ALMOND_METRICS_TOKEN>` |
+| `GET /admin/wallet` | Operator wallet balance; requires admin NIP-98 authorization |
+| `POST /admin/withdraw`, `GET /admin/withdraw/<request-id>`, `POST /admin/withdraw/<request-id>/reclaim` | Export, inspect or reclaim operator Cashu; require admin NIP-98 authorization |
 | `GET /_upstream` | Configured upstream servers |
 | `GET /_wot` | Bloom filter of the web of trust (`?format=json\|bin`, `?fp=`, `?test=<hex pubkey>`) |
+
+Wallet authorization is a breaking cutover: `Authorization: Bearer` and the
+storage-directory `admin-token` credential no longer grant access. Configure
+`ALMOND_ADMIN_NPUBS` (`--admin-npubs`) and `ALMOND_PUBLIC_URL` (`--public-url`),
+then sign each request with a fresh NIP-98 event in
+`Authorization: Nostr <base64-event>`. The event binds the exact absolute URL
+(including query), HTTP method and, for requests with a body, its SHA-256 payload. Mutations require
+the server challenge from `GET /admin/api/challenge` and fresh signatures even
+on retries; obtain a new challenge after a server restart.
+
+`POST /admin/withdraw` accepts `{"amount":123,"request_id":"..."}`. Amount
+is a positive integer in sats; request IDs are 1–64 ASCII letters, digits,
+hyphens or underscores. Save the ID and amount before sending; after a lost
+response, inspect the same ID or retry the same body with a fresh signature,
+never a new request ID. Reusing an ID with a different amount returns a
+conflict. An interrupted withdrawal can report unavailable until startup wallet
+recovery; restart and retry the same ID rather than creating another.
+
+The response includes `id`, `operation_id`, `amount`, `fee`, `token` and
+`status`; status lookup returns the same fields. Reclaim returns `amount` after
+mint fees and only succeeds for an outstanding, unredeemed token. If a reclaim
+outcome is uncertain, check its status before retrying; an interrupted reclaim
+can be unknown. Treat exported tokens as bearer money and do not log them.
+Responses are not cacheable. No-Cashu builds do not expose the
+wallet routes; an uninitialized wallet reports service unavailable.
 
 `/_upstream` response:
 
@@ -90,11 +118,12 @@ The same range and conditional rules apply, with these differences:
 (including extension variants, `206` and `304`) return the RFC 8594 / BUD-01
 `Sunset` header, exposed to browsers via `Access-Control-Expose-Headers`.
 
-- The value is the deadline the cleanup job uses: the earlier of the persisted
-  expiration and `created_at + ALMOND_UPLOAD_MAX_AGE` under the current config, so
-  a changed limit shows up immediately. Uploads stored before v0.4.24 may carry a
-  persisted deadline that a raised limit does not extend.
-- `X-Expiration` can only shorten retention; the descriptor's `expiration` field
+- For unpaid uploads, the deadline is the earlier of the persisted expiration and
+  `created_at + ALMOND_UPLOAD_MAX_AGE` under the current configuration.
+- Paid uploads additionally have a durable `paid_until` deadline in the wallet
+  database; ordinary cleanup does not evict them before that deadline.
+- For paid uploads, `X-Expiration` requests a retention target; for unpaid
+  uploads it can only shorten retention. The descriptor's `expiration` field
   carries the same deadline as `Sunset`.
 - Upstream-cache copies and upstream redirects carry no `Sunset`: the URL keeps
   resolving via upstream.
