@@ -11,7 +11,7 @@ Almond is not published on crates.io. Depend on a release tag:
 
 ```toml
 [dependencies]
-almond = { git = "https://github.com/flox1an/almond", tag = "v0.5.4", default-features = false }
+almond = { git = "https://github.com/flox1an/almond", tag = "v0.5.5", default-features = false }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 ```
